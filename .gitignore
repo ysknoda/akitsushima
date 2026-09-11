@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.so
+
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+.DS_Store
+
+# Added by pip_preparation
+.tox/
+.vscode/
+.idea/
+*.egg
+
+# AI-assisted-development tooling (process artifacts, not the package)
+.claude/
+.code-check/
+.pip_preparation/

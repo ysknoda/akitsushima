@@ -1,0 +1,920 @@
+"""Unified fitting driver: train/val split, scoring, and the fit_potential
+optimisation loop shared by every potential type (LJ, Morse, BornMayer,
+Buckingham, Stillinger-Weber, Tersoff).
+
+Consolidation note
+-------------------
+The original script kept a second, Buckingham-only copy of this whole
+stack (``buckingham_energy_forces_stress``, ``loss_function``,
+``run_fitting``, ``print_parameters``, ``evaluate_diagnostics``, plus a
+module-level ``ParameterSet = BuckinghamParameterSet`` alias) that
+predated the generic ``fit_potential`` interface. ``run_fitting``'s own
+docstring already said it was nothing but a thin wrapper delegating to
+``fit_potential``, so -- per the project decision to consolidate every
+potential onto a single ``fit`` code path (no more special-cased
+``fitpot``/Buckingham branch) -- that whole duplicate stack has been
+removed here.  The one genuinely distinct feature it carried,
+LAMMPS ``pair_coeff.txt`` export, is preserved as the explicit-argument
+:func:`export_lammps_buckingham` helper, called from
+:func:`save_fit_result_generic` when ``potential == "buckingham"``.
+"""
+import json
+import os
+from typing import Optional
+
+import numpy as np
+from scipy.optimize import differential_evolution, minimize
+
+from ..constants import EV_ANG3_TO_GPA
+from ..engine import compute_all_general
+from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.timing import TimingCollector
+from .io_utils import _pair_to_str, save_potential
+from .loss import generic_loss_function
+from .parameter_sets import FittableParameterSet
+
+__all__ = [
+    "split_train_val",
+    "ScoreCard",
+    "compute_scorecard",
+    "print_scorecard_comparison",
+    "parity_plot_all",
+    "fit_potential",
+    "print_fit_result",
+    "evaluate_diagnostics_generic",
+    "save_fit_result_generic",
+    "export_lammps_buckingham",
+]
+
+
+def split_train_val(structures   : list,
+                    val_fraction  : float = 0.2,
+                    seed          : int   = 0,
+                    stratify_by   : Optional[str] = "natoms",
+                    ) -> tuple:
+    """
+    Split a structure list into training and validation subsets.
+
+    Parameters
+    ----------
+    structures   : list of structure dicts (from the Buckingham fitting
+                   workflow) or any list that can be indexed.
+                   For ELM training data loaded from CSV, use the
+                   ELMModel.fit() val_fraction argument instead.
+    val_fraction : fraction of structures held out for validation [0, 1).
+                   0.0 -> no validation set (all structures used for training).
+    seed         : random seed for reproducibility.
+    stratify_by  : None | 'natoms' | 'name_prefix'.
+                   'natoms'       -- bin by atom count so that each bin is
+                                   represented proportionally in both sets.
+                   'name_prefix'  -- bin by the first directory component of
+                                   the structure name (useful when structures
+                                   are grouped by type: equilibrium, displaced).
+                   None           -- pure random shuffle.
+
+    Returns
+    -------
+    train : list of training structures
+    val   : list of validation structures (empty when val_fraction == 0.0)
+
+    Notes
+    -----
+    - val_fraction < 1/(n_structures) silently returns all structures as
+      training and an empty validation set.
+    - When stratify_by is set but the strata are too small to split, a
+      warning is issued and the strata are merged into the random pool.
+    """
+    import warnings
+
+    if val_fraction <= 0.0 or len(structures) == 0:
+        return list(structures), []
+
+    rng = np.random.default_rng(seed)
+    n_val = max(1, int(round(len(structures) * val_fraction)))
+
+    if n_val >= len(structures):
+        warnings.warn(
+            f"split_train_val: val_fraction={val_fraction} leaves no training "
+            f"data.  Returning all {len(structures)} structures as training.",
+            UserWarning, stacklevel=2)
+        return list(structures), []
+
+    # ----- Stratified split ------------------------------------------------
+    if stratify_by is not None:
+        if stratify_by == "natoms":
+            key_fn = lambda s: s["natoms"]
+        elif stratify_by == "name_prefix":
+            key_fn = lambda s: s["name"].split("/")[0] if "/" in s["name"] else s["name"]
+        else:
+            raise ValueError(f"Unknown stratify_by value: '{stratify_by}'")
+
+        from collections import defaultdict
+        bins: dict = defaultdict(list)
+        for s in structures:
+            bins[key_fn(s)].append(s)
+
+        train_all, val_all = [], []
+        unassigned = []
+        for k, group in bins.items():
+            rng.shuffle(group)
+            n_v = max(0, round(len(group) * val_fraction))
+            if n_v == 0 or n_v == len(group):
+                # Group too small to split cleanly -> defer to random pool
+                unassigned.extend(group)
+            else:
+                val_all.extend(group[:n_v])
+                train_all.extend(group[n_v:])
+
+        # Handle unassigned structures with plain random split
+        if unassigned:
+            rng.shuffle(unassigned)
+            n_v2 = max(0, round(len(unassigned) * val_fraction))
+            val_all.extend(unassigned[:n_v2])
+            train_all.extend(unassigned[n_v2:])
+
+        # Guarantee minimum sizes
+        if len(val_all) == 0 or len(train_all) == 0:
+            # Fall back to plain random
+            idx = rng.permutation(len(structures))
+            return ([structures[i] for i in idx[n_val:]],
+                    [structures[i] for i in idx[:n_val]])
+
+        rng.shuffle(train_all)
+        rng.shuffle(val_all)
+        return train_all, val_all
+
+    # ----- Plain random split ----------------------------------------------
+    idx = rng.permutation(len(structures))
+    train = [structures[i] for i in idx[n_val:]]
+    val   = [structures[i] for i in idx[:n_val]]
+    return train, val
+
+
+# ---------------------------------------------------------------------------
+# ScoreCard: unified MAE/RMSE/MaxAE for E, F, sigma
+# ---------------------------------------------------------------------------
+
+class ScoreCard:
+    """
+    Collects prediction errors for energies, forces, and stresses and
+    computes MAE, RMSE, and MaxAE for each quantity.
+
+    Usage
+    -----
+    sc = ScoreCard("train")
+    for s in structures:
+        E_pred, F_pred, S_pred = model.compute(...)
+        sc.add(s, E_pred, F_pred, S_pred)
+    sc.finalize()
+    print(sc)
+    """
+
+    def __init__(self, label: str = ""):
+        self.label   = label
+        self._e_ref  : list = []
+        self._e_pred : list = []
+        self._f_ref  : list = []
+        self._f_pred : list = []
+        self._s_ref  : list = []
+        self._s_pred : list = []
+        self._final  : Optional[dict] = None
+
+    # ------------------------------------------------------------------
+    def add(self,
+            struct  : dict,
+            e_pred  : float,
+            f_pred  : Optional[np.ndarray],
+            s_pred  : Optional[np.ndarray]) -> None:
+        """Accumulate one structure's predictions."""
+        N = struct["natoms"]
+        self._e_ref.append(struct["ref_energy"] / N)
+        self._e_pred.append(e_pred / N)
+
+        if struct.get("ref_forces") is not None and f_pred is not None:
+            self._f_ref.extend(struct["ref_forces"].ravel().tolist())
+            self._f_pred.extend(np.asarray(f_pred).ravel().tolist())
+
+        if struct.get("ref_stress") is not None and s_pred is not None:
+            # Use Voigt 6 unique components (avoid double-counting off-diagonal)
+            sig_r = struct["ref_stress"]
+            sig_p = np.asarray(s_pred)
+            for a, b in [(0,0),(1,1),(2,2),(1,2),(0,2),(0,1)]:
+                self._s_ref.append(float(sig_r[a, b]))
+                self._s_pred.append(float(sig_p[a, b]))
+
+    # ------------------------------------------------------------------
+    def finalize(self) -> dict:
+        """Compute and cache MAE / RMSE / MaxAE for all quantities."""
+        def _metrics(ref_list, pred_list, gpa_factor=1.0):
+            if not ref_list:
+                return None
+            r = np.array(ref_list)
+            p = np.array(pred_list)
+            d = np.abs(r - p) * gpa_factor
+            return {
+                "MAE"  : float(np.mean(d)),
+                "RMSE" : float(np.sqrt(np.mean(d**2))),
+                "MaxAE": float(np.max(d)),
+                "N"    : len(r),
+            }
+
+        GPa = EV_ANG3_TO_GPA
+        self._final = {
+            "energy": _metrics(self._e_ref,  self._e_pred),          # eV/atom
+            "forces": _metrics(self._f_ref,  self._f_pred),          # eV/A
+            "stress": _metrics(self._s_ref,  self._s_pred, GPa),     # GPa
+            "n_struct": len(self._e_ref),
+        }
+        return self._final
+
+    @property
+    def results(self) -> dict:
+        if self._final is None:
+            self.finalize()
+        return self._final
+
+    # ------------------------------------------------------------------
+    def __str__(self) -> str:
+        r = self.results
+        lbl = f"[{self.label}]" if self.label else ""
+        lines = [f"  {lbl} n_structures = {r['n_struct']}"]
+        for qty, unit in [("energy","eV/atom"), ("forces","eV/A"),
+                           ("stress","GPa")]:
+            m = r[qty]
+            if m is None:
+                continue
+            lines.append(
+                f"  {lbl} {qty:8s}  MAE={m['MAE']:.4f}  "
+                f"RMSE={m['RMSE']:.4f}  MaxAE={m['MaxAE']:.4f}  [{unit}]  "
+                f"(n={m['N']})")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Unified score runner (shared by classical and ELM workflows)
+# ---------------------------------------------------------------------------
+
+def compute_scorecard(structures  : list,
+                      predict_fn  ,
+                      label       : str = "") -> ScoreCard:
+    """
+    Evaluate *predict_fn* on every structure and return a ScoreCard.
+
+    Parameters
+    ----------
+    structures : list of structure dicts.
+    predict_fn : callable(lattice, positions, atom_types)
+                 -> (energy[eV], forces[eV/A], stress[eV/A^3])
+    label      : descriptive label for the scorecard.
+
+    Returns
+    -------
+    ScoreCard (already finalised)
+    """
+    import warnings
+
+    sc = ScoreCard(label)
+    for s in structures:
+        try:
+            e, f, sig = predict_fn(
+                s["lattice"], s["positions"], s["atom_types"])
+        except Exception as exc:
+            warnings.warn(f"compute_scorecard: prediction failed for "
+                          f"'{s['name']}': {exc}", UserWarning, stacklevel=2)
+            continue
+        sc.add(s, e, f, sig)
+    sc.finalize()
+    return sc
+
+
+def print_scorecard_comparison(train_sc: ScoreCard,
+                                val_sc  : Optional[ScoreCard] = None,
+                                title   : str = "Prediction errors") -> None:
+    """
+    Print a formatted comparison table of train vs validation scorecards.
+
+    Example output
+    --------------
+    ================================================================
+      Prediction errors
+    ================================================================
+      Quantity     | Metric  |       Train |         Val | Unit
+      -------------+---------+-------------+-------------+-----------
+      Energy       | MAE     |      0.0012 |      0.0031 | eV/atom
+      Energy       | RMSE    |      0.0018 |      0.0045 | eV/atom
+      ...
+    """
+    sep = "=" * 64
+    mid_parts = ["  " + "-" * 13 + "+" + "-" * 9 + "+" + "-" * 14]
+    if val_sc is not None:
+        mid_parts.append("+" + "-" * 14)
+    mid_parts.append("+" + "-" * 11)
+    mid = "".join(mid_parts)
+
+    print("\n" + sep)
+    print(f"  {title}")
+    print(sep)
+
+    quantities = [
+        ("energy", "Energy  ", "eV/atom"),
+        ("forces", "Forces  ", "eV/A   "),
+        ("stress", "Stress  ", "GPa    "),
+    ]
+    hdr = f"  {'Quantity':12s} | {'Metric':7s} | {'Train':>12s}"
+    if val_sc is not None:
+        hdr += f" | {'Val':>12s}"
+    hdr += " | Unit"
+    print(hdr)
+    print(mid)
+
+    for qty, name, unit in quantities:
+        tr = train_sc.results.get(qty)
+        if tr is None:
+            continue
+        va = val_sc.results.get(qty) if val_sc is not None else None
+        for metric in ("MAE", "RMSE", "MaxAE"):
+            tr_v = f"{tr[metric]:12.4f}"
+            row  = f"  {name:12s} | {metric:7s} | {tr_v}"
+            if val_sc is not None:
+                va_v = f"{va[metric]:12.4f}" if va else f"{'N/A':>12s}"
+                row += f" | {va_v}"
+            row += f" | {unit}"
+            print(row)
+        print(mid)
+
+    print(f"  {'n_struct':12s} | {'':<7s} | {train_sc.results['n_struct']:>12d}", end="")
+    if val_sc is not None:
+        n_v = val_sc.results["n_struct"] if val_sc else 0
+        print(f" | {n_v:>12d}", end="")
+    print(" |")
+    print(sep)
+
+
+def parity_plot_all(train_sc  : ScoreCard,
+                    val_sc    : Optional[ScoreCard] = None,
+                    output_dir: str  = ".",
+                    prefix    : str  = "parity") -> None:
+    """
+    Save 3-panel parity plots (E / F / sigma) for train and optionally val sets.
+
+    Each panel shows:
+      - Training points in blue
+      - Validation points in orange (when val_sc is not None)
+      - Perfect-prediction diagonal (dashed)
+      - Per-set RMSE in the legend
+    """
+    if not HAS_MATPLOTLIB:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+
+    quantities = [
+        ("energy", "Energy (eV/atom)",    "_e_ref",  "_e_pred"),
+        ("forces", "Force comp (eV/A)",   "_f_ref",  "_f_pred"),
+        ("stress", "Stress comp (GPa)",   "_s_ref",  "_s_pred"),
+    ]
+    GPa = EV_ANG3_TO_GPA
+
+    for qty, xlabel, rattr, pattr in quantities:
+        tr_ref  = getattr(train_sc, rattr, [])
+        tr_pred = getattr(train_sc, pattr, [])
+        if not tr_ref:
+            continue
+
+        fig, ax = plt.subplots(figsize=(5, 5))
+
+        # Apply GPa conversion for stress
+        scale = GPa if qty == "stress" else 1.0
+        tr_r = np.array(tr_ref) * scale
+        tr_p = np.array(tr_pred) * scale
+        tr_rmse = train_sc.results[qty]["RMSE"] if train_sc.results.get(qty) else 0.0
+
+        ax.scatter(tr_r, tr_p, s=8, alpha=0.5, color="steelblue",
+                   label=f"Train  RMSE={tr_rmse:.4f}")
+
+        if val_sc is not None:
+            va_ref  = getattr(val_sc, rattr, [])
+            va_pred = getattr(val_sc, pattr, [])
+            if va_ref:
+                va_r = np.array(va_ref) * scale
+                va_p = np.array(va_pred) * scale
+                va_rmse = val_sc.results[qty]["RMSE"] if val_sc.results.get(qty) else 0.0
+                ax.scatter(va_r, va_p, s=8, alpha=0.7, color="darkorange",
+                           marker="^", label=f"Val    RMSE={va_rmse:.4f}")
+
+        all_v = np.concatenate([tr_r, tr_p])
+        if val_sc is not None and getattr(val_sc, rattr, []):
+            va_r  = np.array(getattr(val_sc, rattr)) * scale
+            va_p  = np.array(getattr(val_sc, pattr)) * scale
+            all_v = np.concatenate([all_v, va_r, va_p])
+        lim = [all_v.min(), all_v.max()]
+        margin = 0.05 * (lim[1] - lim[0] + 1e-10)
+        lim = [lim[0] - margin, lim[1] + margin]
+        ax.plot(lim, lim, "k--", lw=1, zorder=0)
+        ax.set_xlim(lim); ax.set_ylim(lim)
+        ax.set_xlabel(f"DFT {xlabel}"); ax.set_ylabel(f"Predicted {xlabel}")
+        ax.set_title(f"Parity -- {xlabel}")
+        ax.legend(fontsize=8)
+        ax.set_aspect("equal")
+        fig.tight_layout()
+        path = os.path.join(output_dir, f"{prefix}_{qty}.png")
+        fig.savefig(path, dpi=150); plt.close(fig)
+        print(f"  Parity plot saved : {path}")
+
+
+def fit_potential(param_set      : FittableParameterSet,
+                  structures     : list,
+                  r_cut          : float,
+                  ewald_alpha    : Optional[float] = None,
+                  weights        : Optional[dict]  = None,
+                  method         : str   = "L-BFGS-B",
+                  use_de         : bool  = False,
+                  de_maxiter     : int   = 500,
+                  de_popsize     : int   = 15,
+                  coulomb_method : str   = "ewald",
+                  loss_type      : str   = "squared",
+                  val_fraction   : float = 0.2,
+                  val_seed       : int   = 0,
+                  output_dir     : str   = ".",
+                  verbose        : bool  = True,
+                  timing         : bool  = False) -> dict:
+    """
+    Unified parameter fitting for any pair potential.
+
+    Supports LennardJonesPotential, MorsePotential, BornMayerPotential,
+    BuckinghamPotential (via BuckinghamParameterSet), StillingerWeberPotential,
+    and TersoffPotential through a common optimisation loop.
+
+    Loss function
+    -------------
+    Energy term normalised by atom count; force and stress terms averaged
+    over components within each structure.  Per-structure unit-conversion
+    scale via ``structure["scale"]`` (default 1.0), and an independent
+    per-structure trust weight via ``structure["weight"]`` (default 1.0):
+
+    .. math::
+
+        L = \\sum_s w_{\\rm trust}(s) \\, c_s^2 \\left[
+              w_E \\left(\\frac{E_s^{\\rm pred} - E_s^{\\rm ref}}{N_s}\\right)^2
+            + w_F \\,\\overline{\\|\\delta\\mathbf{F}\\|^2}
+            + w_\\sigma \\,\\overline{|\\delta\\boldsymbol{\\sigma}|^2}
+          \\right]
+
+    Set the ``r0`` and ``eps0`` keys in the ``weights`` dict to bring
+    all residuals to the same physical unit (eV^2); see
+    :func:`~akitsushima.fitting.loss.generic_loss_function` for the
+    exact formula, including the optional ``loss_type='huber'`` mode.
+
+    Parameters
+    ----------
+    param_set      : FittableParameterSet instance.
+    structures     : list of structure dicts (``lattice``, ``positions``,
+                     ``atom_types``, ``natoms``, ``ref_energy``; optional
+                     ``ref_forces``, ``ref_stress``, ``scale``).
+    r_cut          : short-range cutoff [A].
+    ewald_alpha    : Ewald alpha [A^-1]; auto if None.
+    weights        : dict controlling the loss function.
+                     Keys and defaults:
+
+                     ======  =======  =================================================
+                     Key     Default  Meaning
+                     ======  =======  =================================================
+                     energy  1.0      w_E  -- energy category weight
+                     forces  1.0      w_F  -- force category weight
+                     stress  0.1      w_S  -- stress category weight
+                     r0      1.0      r_0 [A] -- atomic displacement for F->eV conversion
+                     eps0    1.0      epsilon_0 [--] -- cell strain for S->eV conversion
+                     ======  =======  =================================================
+
+                     ``ref_energy`` in structure dicts must be in **eV/atom**.
+                     The loss function converts each residual to eV:
+
+                     - E term:  w_E x (N_s x deltaE_per_atom)^2  [eV^2]
+                     - F term:  w_F x r_0^2 x mean(deltaF^2)       [eV^2]
+                     - S term:  w_S x (V_s epsilon_0)^2 x mean(deltasigma^2) [eV^2]
+    method         : scipy local optimiser (default 'L-BFGS-B').
+    use_de         : run Differential Evolution before local refinement.
+    de_maxiter     : max DE generations.
+    de_popsize     : DE population size (x n_params).
+    coulomb_method : 'ewald' | 'pppm'.
+    loss_type      : 'squared' (default) | 'huber' -- see
+                     :func:`~akitsushima.fitting.loss.generic_loss_function`.
+                     When 'huber', ``weights`` must also contain
+                     ``huber_delta_energy``/``huber_delta_forces``/
+                     ``huber_delta_stress`` (eV).
+    val_fraction   : fraction of structures held out for validation.
+    val_seed       : RNG seed for the train/val split.
+    output_dir     : directory for parity plots.
+    verbose        : print progress.
+
+    A note on cross-validation
+    --------------------------
+    This function only ever performs a single stratified train/val
+    holdout (via :func:`split_train_val`), not full k-fold
+    cross-validation. Given the objective is already called "tens of
+    thousands of times" per fit (see
+    :func:`~akitsushima.fitting.loss.generic_loss_function`'s own module
+    docstring), k-fold would multiply total fitting wall-clock time by
+    k -- disproportionate for the typical training-set sizes this
+    project's classical-potential fitting targets (few to a few dozen
+    structures, a handful of fitted parameters). For a cheap variance
+    estimate instead of true k-fold, call this function several times
+    with different ``val_seed`` values and compare the resulting
+    ``val_sc``/``val_loss`` spread across runs -- ``split_train_val``'s
+    existing ``seed`` parameter already supports exactly this "repeated
+    holdout" recipe with no new code needed.
+
+    Returns
+    -------
+    dict with keys: ``params``, ``engine``, ``x``, ``loss``,
+    ``train_structs``, ``val_structs``, ``train_sc``, ``val_sc``.
+    """
+    _tc_fit = TimingCollector(enabled=timing)
+    _tc_fit.start("total")
+    if weights is None:
+        weights = {"energy": 1.0, "forces": 1.0, "stress": 0.1}
+
+    # ---- Train / val split ------------------------------------------------
+    if val_fraction > 0.0:
+        train_structs, val_structs = split_train_val(
+            structures, val_fraction=val_fraction, seed=val_seed,
+            stratify_by="natoms")
+        if verbose:
+            print(f"\nTrain/val split (val_fraction={val_fraction}):")
+            print(f"  Train: {len(train_structs)} structures")
+            print(f"  Val  : {len(val_structs)} structures")
+    else:
+        train_structs = list(structures)
+        val_structs   = []
+
+    if not train_structs:
+        raise RuntimeError("fit_potential: training set is empty after split.")
+
+    # ---- Objective -------------------------------------------------------
+    call_count = [0]
+
+    def objective(x):
+        call_count[0] += 1
+        loss = generic_loss_function(
+            x, param_set, train_structs, weights,
+            r_cut, ewald_alpha, coulomb_method, loss_type)
+        if verbose and call_count[0] % 50 == 0:
+            print(f"    iter {call_count[0]:6d}  loss = {loss:.6e}")
+        return loss
+
+    best_x    = param_set.x0.copy()
+    best_loss = objective(best_x)
+    if verbose:
+        print(f"\nInitial loss : {best_loss:.6e}")
+
+    # ---- Differential Evolution (optional) --------------------------------
+    if use_de:
+        if verbose:
+            print("\nRunning Differential Evolution ...")
+        de_res = differential_evolution(
+            objective, bounds=param_set.bounds,
+            maxiter=de_maxiter, popsize=de_popsize,
+            tol=1e-8, seed=42, workers=1, polish=False,
+            disp=verbose)
+        if de_res.fun < best_loss:
+            best_x, best_loss = de_res.x, de_res.fun
+        if verbose:
+            print(f"DE finished  : loss = {best_loss:.6e}")
+
+    # ---- Local refinement -------------------------------------------------
+    if verbose:
+        print(f"\nLocal refinement with {method} ...")
+    opt = minimize(objective, x0=best_x, method=method,
+                   bounds=param_set.bounds,
+                   options={"maxiter": 5000, "ftol": 1e-12,
+                             "gtol": 1e-8, "maxfun": 100_000})
+    if opt.fun < best_loss:
+        best_x, best_loss = opt.x, opt.fun
+
+    params_fit  = param_set.decode(best_x)
+    engine_fit  = param_set.build_engine(params_fit)
+    charges_fit = params_fit.get("charges")
+
+    if verbose:
+        print(f"\nFinal   loss : {best_loss:.6e}")
+
+    # ---- ScoreCards -------------------------------------------------------
+    def _predict(lattice, positions, atom_types):
+        return compute_all_general(
+            lattice, positions, atom_types,
+            engine_fit,
+            charges        = charges_fit,
+            r_cut          = r_cut,
+            ewald_alpha    = ewald_alpha,
+            coulomb_method = coulomb_method,
+        )
+
+    train_sc = compute_scorecard(train_structs, _predict, label="train")
+    val_sc   = (compute_scorecard(val_structs, _predict, label="val ")
+                if val_structs else None)
+
+    print_scorecard_comparison(train_sc, val_sc,
+                               title=f"{type(param_set).__name__} -- prediction errors")
+
+    parity_plot_all(train_sc, val_sc, output_dir=output_dir,
+                    prefix=type(param_set).__name__.replace("ParameterSet", "").lower())
+
+    # Compute validation loss for diagnostic output
+    if val_structs:
+        val_loss = generic_loss_function(
+            best_x, param_set, val_structs, weights,
+            r_cut=r_cut, ewald_alpha=ewald_alpha, loss_type=loss_type)
+        if verbose:
+            print(f"  val_loss  = {val_loss:.6e}  "
+                  f"(train_loss = {best_loss:.6e}  "
+                  f"ratio = {val_loss/best_loss:.3f})")
+    else:
+        val_loss = None
+
+    _tc_fit.stop("total")
+    if timing:
+        _tc_fit.print_summary(label="fit_potential")
+
+    return {
+        "params"        : params_fit,
+        "engine"        : engine_fit,
+        "x"             : best_x,
+        "loss"          : best_loss,
+        "val_loss"      : val_loss,
+        "opt_result"    : opt,
+        "train_structs" : train_structs,
+        "val_structs"   : val_structs,
+        "train_sc"      : train_sc,
+        "val_sc"        : val_sc,
+        "timing"        : _tc_fit.summary(),
+    }
+
+
+# ---------------------------------------------------------------------------
+#  Reporting / persistence of fit_potential() results (any potential type)
+# ---------------------------------------------------------------------------
+
+def print_fit_result(result: dict, potential: str) -> None:
+    """
+    Pretty-print fitted parameters for any potential type.
+    """
+    params = result.get("params", {})
+    print("\n" + "=" * 62)
+    print(f"  Fitted Parameters  [{potential.upper()}]")
+    print("=" * 62)
+
+    if potential == "buckingham":
+        buck    = params.get("buck", {})
+        charges = params.get("charges", {})
+        print(f"  {'Pair':<15}  {'A (eV)':>14}  {'rho (A)':>10}  {'C (eV.A^6)':>12}")
+        print("  " + "-" * 58)
+        for pair, p in buck.items():
+            s1, s2 = sorted(pair)
+            print(f"  {s1+'-'+s2:<15}  {p['A']:14.4f}  "
+                  f"{p['rho']:10.6f}  {p['C']:12.4f}")
+        if charges:
+            print(f"\n  {'Species':<12}  {'Charge (e)':>12}")
+            print("  " + "-" * 28)
+            for sp, q in charges.items():
+                print(f"  {sp:<10}  {q:+.4f} e")
+
+    elif potential in ("lj",):
+        lj = params.get("lj", {})
+        print(f"  {'Pair':<15}  {'epsilon (eV)':>14}  {'sigma (A)':>12}")
+        print("  " + "-" * 45)
+        for pair, p in lj.items():
+            sp = "-".join(sorted(pair))
+            print(f"  {sp:<15}  {p['epsilon']:>14.6f}  {p['sigma']:>12.6f}")
+
+    elif potential == "morse":
+        mo = params.get("morse", {})
+        print(f"  {'Pair':<15}  {'D_e (eV)':>10}  {'alpha (A^-1)':>12}  {'r0 (A)':>10}")
+        print("  " + "-" * 55)
+        for pair, p in mo.items():
+            sp = "-".join(sorted(pair))
+            print(f"  {sp:<15}  {p['D_e']:>10.6f}  {p['alpha']:>12.6f}  {p['r0']:>10.6f}")
+
+    elif potential == "bornmayer":
+        bm      = params.get("bm", {})
+        charges = params.get("charges", {})
+        print(f"  {'Pair':<15}  {'A (eV)':>14}  {'rho (A)':>12}")
+        print("  " + "-" * 45)
+        for pair, p in bm.items():
+            sp = "-".join(sorted(pair))
+            print(f"  {sp:<15}  {p['A']:>14.4f}  {p['rho']:>12.6f}")
+        if charges:
+            print(f"\n  {'Species':<12}  {'Charge (e)':>12}")
+            print("  " + "-" * 28)
+            for sp, q in charges.items():
+                print(f"  {sp:<12}  {q:>+12.4f}")
+
+    elif potential in ("sw", "tersoff"):
+        # Print each parameter sub-dict
+        key = "sw" if potential == "sw" else "tersoff"
+        for trio, p in params.get(key, {}).items():
+            sp = "-".join(sorted(trio)) if not isinstance(trio, str) else trio
+            print(f"\n  [{sp}]")
+            for k, v in p.items():
+                print(f"    {k:<20s} = {v:>15.8g}")
+
+    else:
+        # Generic fallback: dump the params dict, recursively converting
+        # any frozenset-keyed pair dict (e.g. Mie/Yukawa's own
+        # {pair: {...}} shape, identical to LJ/Morse/BornMayer's) into
+        # "Sp1-Sp2" string keys first.
+        #
+        # Bug-fix note (found adding Mie/Yukawa, Phase 2): this used to
+        # stringify only the OUTER dict's keys (here, just the single
+        # potential-name key, e.g. "mie" -- already a string, a no-op),
+        # leaving any frozenset keys nested one level down inside
+        # completely unconverted, so json.dumps immediately raised
+        # ``TypeError: keys must be str, int, float, bool or None, not
+        # frozenset`` for every potential type that isn't one of the 5
+        # branches explicitly special-cased above. Every potential
+        # added after those 5 originally-ported ones would have hit this
+        # same crash -- the fallback needed to be genuinely generic, not
+        # almost-generic, given the whole point of Phase 1's registry is
+        # that adding a potential should not require finding every
+        # remaining hardcoded special case by trial and error. Mirrors
+        # the recursive frozenset-key conversion already used by
+        # save_potential's own _serialise helper (io_utils.py).
+        def _serialise(p):
+            if isinstance(p, dict):
+                return {(_pair_to_str(k) if isinstance(k, frozenset) else str(k)):
+                        _serialise(v) for k, v in p.items()}
+            return p
+
+        print(json.dumps(_serialise(params), indent=2, default=str))
+
+    print("=" * 62)
+
+
+def evaluate_diagnostics_generic(structures    : list,
+                                   param_set,
+                                   fitted_params : dict,
+                                   r_cut         : float,
+                                   output_dir    : str,
+                                   ewald_alpha   : Optional[float] = None,
+                                   coulomb_method: str = "ewald",
+                                   val_structs   : Optional[list]  = None,
+                                   ) -> dict:
+    """
+    Compute energy / force / stress MAE and RMSE for any ParameterSet.
+
+    Builds an engine from the **fitted** parameters and evaluates all
+    structures through :func:`~akitsushima.engine.compute_all_general`
+    (so that any Coulomb/Ewald contribution driven by ``fitted_params
+    ["charges"]`` -- e.g. Buckingham or Born-Mayer + Coulomb -- is
+    included, not just the short-range PotentialEngine part).
+
+    Bug-fix note (F5): the original implementation ignored the fitted
+    result entirely and re-evaluated ``param_set.decode(param_set.x0)``
+    -- i.e. always the *initial guess*, never the optimised parameters
+    -- so every "diagnostics" report was silently meaningless.  It also
+    built the force function via ``make_force_fn(engine)`` on the bare
+    short-range PotentialEngine, which for an ionic (Buckingham/
+    Born-Mayer + Coulomb) potential drops the electrostatic energy,
+    forces, and stress entirely; that gap was latent in the original
+    code (the CLI never routed Buckingham through this function) but
+    would become live and silently wrong once Buckingham is unified
+    onto the same generic ``fit`` path as every other potential.  Both
+    issues are fixed here: the caller must now pass the fitted
+    parameter dict explicitly, and evaluation goes through
+    ``compute_all_general(..., charges=...)`` directly.
+
+    Returns a diagnostics dict compatible with ``save_fit_result_generic``.
+    """
+    import math
+
+    engine = param_set.build_engine(fitted_params)
+    if engine is None:
+        return {}
+    charges = fitted_params.get("charges")
+
+    def _eval_set(structs, label):
+        e_err, f_err, s_err = [], [], []
+        for s in structs:
+            e_pred, f_pred, s_pred = compute_all_general(
+                s["lattice"], s["positions"], s["atom_types"], engine,
+                charges        = charges,
+                r_cut          = r_cut,
+                ewald_alpha    = ewald_alpha,
+                coulomb_method = coulomb_method,
+            )
+            n = s["natoms"]
+            if s.get("ref_energy") is not None:
+                e_err.append(e_pred / n - s["ref_energy"])
+            if s.get("ref_forces") is not None:
+                f_err.extend((f_pred - s["ref_forces"]).ravel().tolist())
+            if s.get("ref_stress") is not None:
+                s_err.extend((s_pred - s["ref_stress"]).ravel().tolist())
+
+        def _stats(arr):
+            if not arr:
+                return {"mae": None, "rmse": None}
+            a = [abs(x) for x in arr]
+            mae  = sum(a) / len(a)
+            rmse = math.sqrt(sum(x**2 for x in arr) / len(arr))
+            return {"mae": mae, "rmse": rmse}
+
+        return {
+            "label"  : label,
+            "n"      : len(structs),
+            "energy" : _stats(e_err),
+            "forces" : _stats(f_err),
+            "stress" : _stats(s_err),
+        }
+
+    diag: dict = {"train": _eval_set(structures, "train")}
+    if val_structs:
+        diag["val"] = _eval_set(val_structs, "val")
+
+    # Print table
+    print("\n  Diagnostics")
+    print("  " + "-" * 54)
+    for key, d in diag.items():
+        print(f"  [{d['label']:5s}]  N={d['n']}")
+        for qty in ("energy", "forces", "stress"):
+            st = d[qty]
+            if st["mae"] is None:
+                continue
+            print(f"    {qty:<8s}  MAE={st['mae']:.4e}  RMSE={st['rmse']:.4e}")
+
+    return diag
+
+
+def export_lammps_buckingham(buck_params: dict,
+                              charges    : dict,
+                              output_dir : str) -> None:
+    """
+    Write a LAMMPS ``pair_coeff.txt`` snippet for a fitted Buckingham
+    potential (``pair_style buck/coul/long``).
+
+    Kept as a standalone, explicit-argument function -- rather than
+    bundled into a Buckingham-only diagnostics/fitting stack -- so that
+    ``cmd_fit`` can call it for ``potential == "buckingham"`` without
+    branching onto a separate code path for the rest of the fit.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    lammps_path = os.path.join(output_dir, "pair_coeff.txt")
+    with open(lammps_path, "w") as fh:
+        fh.write("# Buckingham pair coefficients for LAMMPS\n")
+        fh.write("# pair_style buck/coul/long <r_cut>\n\n")
+        for pair, p in buck_params.items():
+            parts = sorted(pair)
+            s1 = parts[0];  s2 = parts[-1]   # same for homoatomic pairs
+            fh.write(f"pair_coeff  {s1}  {s2}  "
+                     f"{p['A']:.4f}  {p['rho']:.6f}  {p['C']:.4f}\n")
+        fh.write("\n# Formal charges\n")
+        for sp, q in charges.items():
+            fh.write(f"# {sp}  {q:+.4f} e\n")
+    print(f"LAMMPS snippet saved to {lammps_path}")
+
+
+def save_fit_result_generic(result: dict,
+                              potential : str,
+                              output_dir: str,
+                              diag      : dict,
+                              extra_meta: Optional[dict] = None) -> None:
+    """
+    Save fitted parameters for any potential type to JSON.
+
+    Produces ``fitted_potential.json`` (via :func:`~akitsushima.fitting.
+    io_utils.save_potential`, so the file uses exactly the same schema
+    that :func:`~akitsushima.fitting.io_utils.load_potential` /
+    ``_load_potential_json`` expect -- see the bug-fix note below) and
+    prints a short diagnostic.  For Buckingham, additionally writes the
+    LAMMPS ``pair_coeff.txt`` snippet via
+    :func:`export_lammps_buckingham`.
+
+    Bug-fix note (schema consistency, found alongside S13): the original
+    implementation hand-rolled a *second*, incompatible JSON schema here
+    (top-level key ``"potential"`` instead of ``"potential_type"``, and
+    ``charges`` left nested inside ``params`` instead of hoisted to the
+    top level).  Every YAML config's default
+    ``potential_json: ./fitting_output/fitted_potential.json`` -- the
+    exact file this function produces -- is read back through
+    ``_load_potential_json`` -> :func:`load_potential`, which requires
+    the *other* schema (the one :func:`save_potential` writes).  Once
+    S13's missing ``_load_potential_json`` is implemented, reloading a
+    file saved by the original ``save_fit_result_generic`` would have
+    raised ``KeyError('potential_type')`` immediately.  Delegating to
+    ``save_potential`` here makes the write and read sides consistent.
+
+    ``extra_meta`` : fixed (not-fit) construction hyperparameters that
+    are not part of the fitted ``params`` dict but are still needed to
+    reconstruct an identical potential on load -- e.g. Mie's ``n``/``m``
+    exponents or Yukawa's ``kappa`` screening length. Persisted verbatim
+    into the JSON so :func:`~akitsushima.fitting.io_utils.load_potential`
+    can read them back instead of silently falling back to a default
+    that might not match what was actually fit.
+    """
+    out_path = os.path.join(output_dir, "fitted_potential.json")
+    extra = {"diagnostics": diag}
+    if extra_meta:
+        extra.update(extra_meta)
+    save_potential(result, out_path, potential_type=potential, extra=extra)
+
+    if potential == "buckingham":
+        params = result.get("params", {})
+        export_lammps_buckingham(
+            params.get("buck", {}), params.get("charges", {}), output_dir)

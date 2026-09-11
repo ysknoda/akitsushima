@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "akitsushima"
+version = "0.1.0b1"
+description = "Classical force-field and machine-learning potential toolkit for atomistic simulation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yusuke Noda" }]
+keywords = [
+    "molecular-dynamics",
+    "force-field",
+    "interatomic-potential",
+    "machine-learning-potential",
+    "phonon",
+    "thermal-conductivity",
+    "geometry-optimization",
+    "nudged-elastic-band",
+    "materials-science",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+numba = ["numba>=0.58"]
+mpi = ["mpi4py>=3.1"]
+torch = ["torch>=2.0"]
+lightgbm = ["lightgbm>=4.0", "optuna>=3.0"]
+yaml = ["pyyaml>=6.0"]
+plotting = ["matplotlib>=3.7"]
+all = ["akitsushima[numba,mpi,torch,lightgbm,yaml,plotting]"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+akitsushima = "akitsushima.cli.parser:main"
+
+[project.urls]
+Homepage = "https://github.com/ysknoda/akitsushima"
+Repository = "https://github.com/ysknoda/akitsushima"
+
+[tool.setuptools.packages.find]
+include = ["akitsushima", "akitsushima.*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "mpi: requires a working mpirun/mpiexec (deselect with '-m \"not mpi\"')",
+    "slow: longer-running MD/GCMC/fitting integration tests",
+]
+testpaths = ["tests"]

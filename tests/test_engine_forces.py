@@ -1,0 +1,1045 @@
+"""Finite-difference force/stress validation for every engine potential.
+
+This is the most important regression test in the whole test suite: several
+CRITICAL bugs found during the pre-release review were sign/formula errors
+that are *invisible* at a symmetric equilibrium structure (force is zero
+there by symmetry regardless of a sign flip) and only show up once you
+perturb the structure away from equilibrium. Every test below therefore
+runs on a randomly perturbed copy of a fixture, never the bare symmetric
+fixture.
+
+Stress convention note
+-----------------------
+The stress-vs-finite-difference relationship used here (``sigma_ab =
+-(1/V) dE/dT_ab`` under an affine deformation ``h' = h @ T``, positions
+``r' = frac @ h'`` with fixed fractional coordinates) was independently
+derived from the chain rule for a generic pair potential and cross-checked
+against ``ewald_sum``'s real-space contribution (whose force sign is itself
+independently validated two other ways -- see ``engine/coulomb/ewald.py``),
+giving an exact match (ratio 1.0 to 8 significant figures). This is the
+same check that caught a genuine reciprocal-space stress *formula* bug
+(not just a sign flip) that the original code review had not found.
+"""
+import numpy as np
+import pytest
+
+from akitsushima.utils.jit import _HAS_NUMBA
+from conftest import (
+    diamond_si_dict,
+    fcc_al_dict,
+    randomly_perturbed,
+    rocksalt_nacl_dict,
+    toy_dimer_dict,
+)
+
+
+def _charges_array(struct):
+    if struct.get("charges") is None:
+        return None
+    return np.array([struct["charges"][t] for t in struct["atom_types"]])
+
+
+def finite_diff_forces(energy_fn, positions, h=1e-4):
+    """Central-difference force estimate: F_i,a = -dE/dr_i,a.
+
+    ``energy_fn(positions) -> float``; lattice is assumed fixed (this is a
+    force check, not a stress check -- use :func:`finite_diff_stress` for
+    the latter, which must also vary the lattice).
+    """
+    N = positions.shape[0]
+    F = np.zeros((N, 3))
+    for i in range(N):
+        for a in range(3):
+            pp = positions.copy()
+            pm = positions.copy()
+            pp[i, a] += h
+            pm[i, a] -= h
+            F[i, a] = -(energy_fn(pp) - energy_fn(pm)) / (2.0 * h)
+    return F
+
+
+def finite_diff_stress(energy_fn, lattice, positions, h=1e-5):
+    """
+    Central-difference stress estimate via a small linear-deformation probe
+    on the cell, holding *fractional* coordinates fixed.
+
+    ``energy_fn(lattice, positions) -> float``.
+
+    For each of the 9 independent entries of a deformation matrix
+    ``T = I + eps`` (not pre-symmetrized -- see module docstring), applies
+    ``lattice' = lattice @ T``, ``positions' = frac @ lattice'`` (affine,
+    fractional coordinates fixed), and returns
+    ``sigma_ab = -(1/V) dE/dT_ab``. For a correctly rotationally-invariant
+    potential the result is automatically symmetric (a useful built-in
+    sanity check) even though the probe itself is not.
+    """
+    volume = abs(np.linalg.det(lattice))
+    inv_lat = np.linalg.inv(lattice)
+    frac = positions @ inv_lat
+    M = np.zeros((3, 3))
+    for a in range(3):
+        for b in range(3):
+            Tp = np.eye(3)
+            Tp[a, b] += h
+            Tm = np.eye(3)
+            Tm[a, b] -= h
+            lat_p = lattice @ Tp
+            lat_m = lattice @ Tm
+            pos_p = frac @ lat_p
+            pos_m = frac @ lat_m
+            M[a, b] = (energy_fn(lat_p, pos_p) - energy_fn(lat_m, pos_m)) / (2.0 * h)
+    return -M / volume
+
+
+def assert_forces_match(f_analytic, f_numeric, atol=2e-3, rtol=1e-3, label=""):
+    diff = np.abs(f_analytic - f_numeric)
+    tol = atol + rtol * np.abs(f_numeric)
+    assert np.all(diff <= tol), (
+        f"{label} force mismatch: max abs diff={diff.max():.6g}\n"
+        f"analytic=\n{f_analytic}\nnumeric=\n{f_numeric}")
+
+
+def assert_stress_match(s_analytic, s_numeric, atol=2e-3, rtol=1e-3, label=""):
+    diff = np.abs(s_analytic - s_numeric)
+    tol = atol + rtol * np.abs(s_numeric)
+    assert np.all(diff <= tol), (
+        f"{label} stress mismatch: max abs diff={diff.max():.6g}\n"
+        f"analytic=\n{s_analytic}\nnumeric=\n{s_numeric}")
+
+
+def assert_translationally_invariant(forces, atol=1e-7):
+    assert np.allclose(np.sum(forces, axis=0), 0.0, atol=atol)
+
+
+# ===========================================================================
+# Ewald
+# ===========================================================================
+
+def test_ewald_force_matches_finite_difference():
+    from akitsushima.engine.coulomb.ewald import ewald_sum
+
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
+    charges = _charges_array(struct)
+    lattice = struct["lattice"]
+    r_cut = 4.0
+
+    def energy_of(positions):
+        e, _, _ = ewald_sum(lattice, positions, charges, r_cut=r_cut)
+        return e
+
+    _, f_analytic, _ = ewald_sum(lattice, struct["positions"], charges, r_cut=r_cut)
+    f_numeric = finite_diff_forces(energy_of, struct["positions"])
+    assert_forces_match(f_analytic, f_numeric, label="ewald_sum")
+    assert_translationally_invariant(f_analytic)
+
+
+def test_ewald_stress_matches_finite_difference():
+    from akitsushima.engine.coulomb.ewald import ewald_sum
+
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
+    charges = _charges_array(struct)
+    r_cut = 4.0
+
+    def energy_of(lattice, positions):
+        e, _, _ = ewald_sum(lattice, positions, charges, r_cut=r_cut)
+        return e
+
+    _, _, s_analytic = ewald_sum(struct["lattice"], struct["positions"], charges, r_cut=r_cut)
+    s_numeric = finite_diff_stress(energy_of, struct["lattice"], struct["positions"])
+    assert_stress_match(s_analytic, s_numeric, label="ewald_sum")
+
+
+def test_ewald_matches_pppm_real_space_with_neighbor_list():
+    """Cross-check: ewald_sum's real-space contribution and PPPMSolver's
+    neighbour-list real-space branch must agree exactly (both call the
+    same shared ``real_space_coulomb`` implementation)."""
+    from akitsushima.engine.coulomb.ewald import real_space_coulomb
+    from akitsushima.engine.neighborlist import NeighbourList
+
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
+    charges = _charges_array(struct)
+    lattice = struct["lattice"]
+    r_cut = 2.7
+    alpha = 5.0 / r_cut
+
+    e_direct, f_direct, s_direct = real_space_coulomb(
+        lattice, struct["positions"], charges, alpha, r_cut, neigh_list=None)
+
+    nl = NeighbourList(r_cut=r_cut, skin_width=0.1, backend="cll")
+    nl.build(lattice, struct["positions"])
+    e_nl, f_nl, s_nl = real_space_coulomb(
+        lattice, struct["positions"], charges, alpha, r_cut, neigh_list=nl)
+
+    assert abs(e_direct - e_nl) < 1e-10
+    assert np.allclose(f_direct, f_nl, atol=1e-10)
+    assert np.allclose(s_direct, s_nl, atol=1e-10)
+
+
+# ===========================================================================
+# PPPM
+# ===========================================================================
+
+def _pppm_solver(lattice, r_cut=2.7, mesh=64, order=8):
+    from akitsushima.engine.coulomb.pppm import PPPMSolver
+    alpha = 5.0 / r_cut
+    return PPPMSolver(lattice, alpha=alpha, mesh=mesh, order=order, r_cut=r_cut)
+
+
+def test_pppm_force_matches_finite_difference():
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
+    charges = _charges_array(struct)
+    lattice = struct["lattice"]
+
+    def energy_of(positions):
+        solver = _pppm_solver(lattice)
+        e, _, _ = solver.compute(positions, charges)
+        return e
+
+    solver = _pppm_solver(lattice)
+    _, f_analytic, _ = solver.compute(struct["positions"], charges)
+    f_numeric = finite_diff_forces(energy_of, struct["positions"])
+    assert_forces_match(f_analytic, f_numeric, atol=5e-3, rtol=2e-3, label="PPPM")
+    assert_translationally_invariant(f_analytic, atol=1e-6)
+
+
+def test_pppm_stress_matches_finite_difference():
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
+    charges = _charges_array(struct)
+    lattice = struct["lattice"]
+
+    def energy_of(lat, positions):
+        solver = _pppm_solver(lat)
+        e, _, _ = solver.compute(positions, charges)
+        return e
+
+    solver = _pppm_solver(lattice)
+    _, _, s_analytic = solver.compute(struct["positions"], charges)
+    s_numeric = finite_diff_stress(energy_of, lattice, struct["positions"])
+    assert_stress_match(s_analytic, s_numeric, atol=5e-3, rtol=2e-3, label="PPPM")
+
+
+def test_pppm_independent_of_neighbor_list_usage():
+    """PPPM's real-space branch must give bit-for-bit-close results whether
+    or not a pre-built NeighbourList is supplied (both routes go through the
+    same shared real_space_coulomb implementation)."""
+    from akitsushima.engine.neighborlist import NeighbourList
+
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
+    charges = _charges_array(struct)
+    lattice = struct["lattice"]
+    r_cut = 2.7
+
+    solver = _pppm_solver(lattice, r_cut=r_cut)
+    e0, f0, s0 = solver.compute(struct["positions"], charges)
+
+    nl = NeighbourList(r_cut=r_cut, skin_width=0.1, backend="cll")
+    nl.build(lattice, struct["positions"])
+    e1, f1, s1 = solver.compute(struct["positions"], charges, neigh_list=nl)
+
+    assert abs(e0 - e1) < 1e-10
+    assert np.allclose(f0, f1, atol=1e-10)
+    assert np.allclose(s0, s1, atol=1e-10)
+
+
+def test_pppm_matches_ewald_sum():
+    """PPPM (mesh-based) and ewald_sum (direct k-sum) approximate the same
+    physics and must agree closely for well-converged parameters."""
+    from akitsushima.engine.coulomb.ewald import ewald_sum
+
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
+    charges = _charges_array(struct)
+    lattice = struct["lattice"]
+    r_cut = 2.7
+    alpha = 5.0 / r_cut
+
+    solver = _pppm_solver(lattice, r_cut=r_cut, mesh=64, order=8)
+    e_pppm, f_pppm, s_pppm = solver.compute(struct["positions"], charges)
+    e_ew, f_ew, s_ew = ewald_sum(lattice, struct["positions"], charges,
+                                  alpha=alpha, k_max=12, r_cut=r_cut)
+
+    assert abs(e_pppm - e_ew) < 5e-3
+    assert np.allclose(f_pppm, f_ew, atol=1e-2)
+    assert np.allclose(s_pppm, s_ew, atol=5e-3)
+
+
+# ===========================================================================
+# ESM (Effective Screening Medium)
+# ===========================================================================
+#
+# ESM found THREE bugs beyond the one already known (E4, the z-index hard
+# wrap): (1) the xy charge-assignment phase factor had the wrong sign,
+# placing each atom's charge density at the *mirrored* (Lx-rx, Ly-ry)
+# position instead of its true position -- confirmed by comparing
+# Nx*Ny*ifft2(rho_Gz) for a single test charge against a direct (no-FFT)
+# evaluation of the same Gaussian, which showed the FFT-recovered peak sitting
+# exactly at the mirrored grid coordinates; (2) np.fft.ifft2 (used to convert
+# the manually-phase-constructed G-space potential/field back to real space in
+# _compute_forces/_compute_stress) was missing the Nx*Ny renormalisation that
+# its own built-in 1/(Nx*Ny) division requires when its input did not come
+# from an actual fft2 call -- confirmed because the analytic/numeric force
+# ratio scaled as almost exactly 1/(n_grid_xy**2) when n_grid_xy was varied,
+# independent of n_grid_z; (3) the G||=0 (planar-averaged) 1-D Poisson solve
+# used a plain np.cumsum (O(dz) Riemann-sum accuracy) instead of a proper
+# trapezoidal cumulative integral (O(dz^2)) -- confirmed because the residual
+# converged only *linearly* (not quadratically) with n_grid_z before the fix,
+# and quadratically after.
+
+
+def _esm_test_structure():
+    """A small, clean 2-ion slab -- deliberately not derived from a bulk
+    fixture's periodic images, to avoid any incidental alignment with the
+    ESM z-grid that could mask or exaggerate discretisation error."""
+    lattice = np.array([[6.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 16.0]])
+    positions = np.array([[1.234, 2.345, -1.111],
+                           [3.456, 4.567, 1.222]])
+    atom_types = ["Na", "Cl"]
+    charges = {"Na": 1.0, "Cl": -1.0}
+    return lattice, positions, atom_types, charges
+
+
+@pytest.mark.parametrize("bc", ["bc1", "bc2", "bc3"])
+def test_esm_force_matches_finite_difference(bc):
+    from akitsushima.engine.coulomb.esm import ESMCalculator
+
+    lattice, positions, atom_types, charges = _esm_test_structure()
+    esm = ESMCalculator(lattice, positions, atom_types, charges=charges, bc=bc,
+                         sigma=0.3, n_grid_xy=96, n_grid_z=384)
+
+    def energy_of(pos):
+        e, _, _ = esm(lattice, pos, atom_types)
+        return e
+
+    _, f_analytic, _ = esm(lattice, positions, atom_types)
+    f_numeric = finite_diff_forces(energy_of, positions)
+    # Mesh-based method with trilinear force interpolation (not matched to the
+    # Gaussian charge-assignment kernel the way PPPM's B-splines are) -- a
+    # looser, resolution-appropriate tolerance than Ewald/PPPM's near-machine
+    # precision is expected and was confirmed to shrink further with an even
+    # finer grid; this tolerance is set from the observed converged residual.
+    assert_forces_match(f_analytic, f_numeric, atol=3e-2, rtol=2e-2, label=f"ESM {bc}")
+
+
+def test_esm_charge_density_recovers_atom_position():
+    """Direct regression test for the phase-sign (mirroring) bug: the
+    charge density recovered from rho_Gz via ifft2 must peak at the atom's
+    true position, not its mirror image (Lx - rx, Ly - ry)."""
+    from akitsushima.engine.coulomb.esm import ESMCalculator
+
+    Nx = Ny = 64
+    Nz = 32
+    Lx = Ly = 6.0
+    Lz = 12.0
+    sigma = 0.4
+    z_grid = np.linspace(-Lz / 2, Lz / 2, Nz, endpoint=False)
+    gx = 2 * np.pi * np.fft.fftfreq(Nx, d=Lx / Nx)
+    gy = 2 * np.pi * np.fft.fftfreq(Ny, d=Ly / Ny)
+    GX, GY = np.meshgrid(gx, gy, indexing='ij')
+
+    rx, ry, rz = 1.03, 2.07, 0.5
+    positions = np.array([[rx, ry, rz]])
+    charges = np.array([1.0])
+
+    rho_Gz = ESMCalculator._build_charge_density_2d(
+        positions, charges, Nx, Ny, Nz, Lz, Lx, Ly, sigma, z_grid, GX, GY)
+    rho_real = (Nx * Ny) * np.fft.ifft2(rho_Gz, axes=(0, 1)).real
+
+    x_grid = np.arange(Nx) * (Lx / Nx)
+    y_grid = np.arange(Ny) * (Ly / Ny)
+    idx = np.unravel_index(np.argmax(rho_real), rho_real.shape)
+    peak_x, peak_y = x_grid[idx[0]], y_grid[idx[1]]
+
+    assert abs(peak_x - rx) < (Lx / Nx)
+    assert abs(peak_y - ry) < (Ly / Ny)
+    # the mirrored (buggy) location would be near (Lx-rx, Ly-ry) -- make sure
+    # we did NOT land there instead
+    assert abs(peak_x - (Lx - rx)) > Lx / 4
+
+
+def test_esm_gpar0_poisson_solve_converges_quadratically():
+    """Direct regression test for the cumsum -> trapezoidal fix: the
+    G||=0 z-force residual (vs. finite difference) must shrink roughly by
+    4x (not ~2x) each time n_grid_z doubles."""
+    from akitsushima.engine.coulomb.esm import ESMCalculator
+
+    lattice, positions, atom_types, charges = _esm_test_structure()
+
+    def fz_error(nz):
+        esm = ESMCalculator(lattice, positions, atom_types, charges=charges,
+                             bc="bc1", sigma=0.3, n_grid_xy=48, n_grid_z=nz)
+        e0, f_analytic, _ = esm(lattice, positions, atom_types)
+        h = 1e-4
+        pp = positions.copy()
+        pp[0, 2] += h
+        pm = positions.copy()
+        pm[0, 2] -= h
+        ep, _, _ = esm(lattice, pp, atom_types)
+        em, _, _ = esm(lattice, pm, atom_types)
+        fz_numeric = -(ep - em) / (2 * h)
+        return abs(f_analytic[0, 2] - fz_numeric)
+
+    err_192 = fz_error(192)
+    err_384 = fz_error(384)
+    # linear (buggy) convergence would give a ratio near 2; quadratic
+    # (fixed) convergence gives a ratio near 4 -- assert clearly closer to
+    # quadratic to guard against a regression back to cumsum.
+    assert err_192 / err_384 > 3.0
+
+
+def test_esm_rejects_bad_lattice():
+    from akitsushima.engine.coulomb.esm import ESMCalculator
+
+    lattice, positions, atom_types, charges = _esm_test_structure()
+    bad_lattice = lattice.copy()
+    bad_lattice[2, 0] = 1.0   # c-vector no longer along z
+    with pytest.raises(ValueError):
+        ESMCalculator(bad_lattice, positions, atom_types, charges=charges)
+
+
+def test_esm_z_out_of_bounds_raises_not_wraps():
+    """Direct regression test for E4: an atom placed outside the
+    [-Lz/2, Lz/2) domain must raise, not silently wrap to the opposite,
+    physically disconnected side of a non-periodic boundary."""
+    from akitsushima.engine.coulomb.esm import ESMCalculator
+
+    lattice, positions, atom_types, charges = _esm_test_structure()
+    esm = ESMCalculator(lattice, positions, atom_types, charges=charges,
+                         bc="bc1", sigma=0.3, n_grid_xy=24, n_grid_z=64)
+    bad_positions = positions.copy()
+    bad_positions[0, 2] = lattice[2, 2] / 2.0 + 1.0   # well outside the domain
+    with pytest.raises(ValueError):
+        esm(lattice, bad_positions, atom_types)
+
+
+# ===========================================================================
+# Simple pair potentials: Lennard-Jones, Morse, Born-Mayer, Buckingham
+# ===========================================================================
+
+def test_lj_force_stress_match_finite_difference():
+    from akitsushima.engine import LennardJonesPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    pot = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="LJ")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]), label="LJ")
+    assert_translationally_invariant(f_analytic)
+
+
+def test_morse_force_stress_match_finite_difference():
+    from akitsushima.engine import MorsePotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    pot = MorsePotential({frozenset({"Al", "Al"}): {"D_e": 0.3, "alpha": 1.5, "r0": 2.86}}, r_cut=6.0)
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="Morse")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]), label="Morse")
+    assert_translationally_invariant(f_analytic)
+
+
+def test_bornmayer_force_stress_match_finite_difference():
+    from akitsushima.engine import BornMayerPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    pot = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3}}, r_cut=6.0)
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="BornMayer")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]), label="BornMayer")
+    assert_translationally_invariant(f_analytic)
+
+
+def test_buckingham_force_stress_match_finite_difference():
+    from akitsushima.engine import BuckinghamPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    pot = BuckinghamPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3, "C": 10.0}}, r_cut=6.0)
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="Buckingham")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]), label="Buckingham")
+    assert_translationally_invariant(f_analytic)
+
+
+def test_buckingham_c_zero_matches_bornmayer():
+    """BuckinghamPotential(C=0) must be numerically identical to
+    BornMayerPotential with the same A/rho (design cross-check noted in
+    the plan's Buckingham-consolidation design decision)."""
+    from akitsushima.engine import BornMayerPotential, BuckinghamPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    buck = BuckinghamPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3, "C": 0.0}}, r_cut=6.0)
+    bm = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3}}, r_cut=6.0)
+
+    e1, f1, s1 = buck.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    e2, f2, s2 = bm.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert abs(e1 - e2) < 1e-12
+    assert np.allclose(f1, f2, atol=1e-12)
+    assert np.allclose(s1, s2, atol=1e-12)
+
+
+def test_mie_force_stress_match_finite_difference():
+    """Phase 2: MiePotential, using exponents (n=14, m=7) deliberately
+    different from the LJ-reducing (12, 6) case, so this test actually
+    exercises the general Mie formula rather than a value that happens
+    to coincide with LJ's own already-verified formula."""
+    from akitsushima.engine import MiePotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    pot = MiePotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}},
+                       n=14.0, m=7.0, r_cut=6.0)
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="Mie")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]), label="Mie")
+    assert_translationally_invariant(f_analytic)
+
+
+def test_mie_reduces_to_lj_at_12_6():
+    """MiePotential(n=12, m=6) must be numerically identical to
+    LennardJonesPotential with the same epsilon/sigma -- the free,
+    strong correctness check enabled by Mie's own normalisation
+    constant C(n,m) (see MiePotential's docstring), and a direct
+    demonstration that the Phase 1 registry's "add a new potential"
+    recipe produces a genuinely correct implementation, not just one
+    that passes its own from-scratch finite-difference check in
+    isolation."""
+    from akitsushima.engine import LennardJonesPotential, MiePotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    mie = MiePotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}},
+                       n=12.0, m=6.0, r_cut=6.0)
+    lj = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
+
+    e1, f1, s1 = mie.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    e2, f2, s2 = lj.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert abs(e1 - e2) < 1e-10
+    assert np.allclose(f1, f2, atol=1e-10)
+    assert np.allclose(s1, s2, atol=1e-10)
+
+
+def test_yukawa_force_stress_match_finite_difference():
+    """Phase 2: YukawaPotential (screened Coulomb), with a negative A
+    (attractive, as for an opposite-charge pair) to exercise the signed
+    parameter regime YukawaParameterSet also allows."""
+    from akitsushima.engine import YukawaPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    pot = YukawaPotential({frozenset({"Al", "Al"}): {"A": -20.0}}, kappa=1.2, r_cut=6.0)
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="Yukawa")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]), label="Yukawa")
+    assert_translationally_invariant(f_analytic)
+
+
+@pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+def test_pair_potential_numba_matches_numpy():
+    from akitsushima.engine import LennardJonesPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    pot = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
+    e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
+    e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
+    assert abs(e0 - e1) < 1e-8
+    assert np.allclose(f0, f1, atol=1e-8)
+    assert np.allclose(s0, s1, atol=1e-8)
+
+
+# ===========================================================================
+# Stillinger-Weber
+# ===========================================================================
+
+def test_sw_force_stress_match_finite_difference():
+    from akitsushima.engine import StillingerWeberPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    # A minimal dict with a recognized top-level key ('sigma') triggers the
+    # legacy flat (default Si) parameter path; the rest fall back to their
+    # hardcoded Si defaults via .get(key, default) inside the class.
+    pot = StillingerWeberPotential({"sigma": 2.0951}, species=["Si"])
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="SW")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]), label="SW")
+    assert_translationally_invariant(f_analytic)
+
+
+@pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+def test_sw_numba_matches_numpy():
+    from akitsushima.engine import StillingerWeberPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    pot = StillingerWeberPotential({"sigma": 2.0951}, species=["Si"])
+    e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
+    e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
+    assert abs(e0 - e1) < 1e-6
+    assert np.allclose(f0, f1, atol=1e-6)
+    assert np.allclose(s0, s1, atol=1e-6)
+
+
+def test_sw_multi_species_path():
+    """Exercise the nested-triple multi-species parameter format (not just
+    the legacy flat single-species default)."""
+    from akitsushima.engine import StillingerWeberPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    params = {
+        ("Si", "Si", "Si"): {
+            "epsilon": 2.1682, "sigma": 2.0951, "A": 7.049556, "B": 0.6022246,
+            "p": 4, "q": 0, "a": 1.80, "lambda": 21.0, "gamma": 1.20,
+            "costheta0": -1.0 / 3.0,
+        },
+    }
+    pot = StillingerWeberPotential(params, species=["Si"])
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, _ = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]), label="SW-multi")
+    assert_translationally_invariant(f_analytic)
+
+
+@pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+def test_sw_multi_species_numba_matches_numpy():
+    """Phase 5: the multi-species (nested-triple) path gained its own JIT
+    kernel, table-driven off dense per-species-id arrays resolved from
+    the dict-keyed parameter set (see StillingerWeberPotential's
+    _compute_multi_species docstring). Uses a genuinely heteroatomic
+    (Na/Cl rock-salt) structure -- not just a single species dressed up
+    in the multi-species dict format, as the pre-existing
+    test_sw_multi_species_path does -- with DELIBERATELY DIFFERENT
+    parameter values for the (Na,Cl,Cl) vs (Cl,Na,Na) entries, so that a
+    species-id indexing mistake in the JIT table lookup (e.g. a
+    transposed [i_sp, j_sp]) would show up as a mismatch here rather
+    than being masked by both directions happening to share one value."""
+    from akitsushima.engine import StillingerWeberPotential
+
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=2)
+    # a*sigma = 1.80*2.0951 = 3.771 A cuts off just short of the a/sqrt(2)
+    # = 3.99 A same-species shell, leaving only the a/2 = 2.82 A
+    # Na-Cl nearest-neighbour shell inside cutoff -- i.e. every 2-body/
+    # 3-body term actually evaluated is heteroatomic, exactly what this
+    # test wants to exercise.
+    params = {
+        ("Na", "Cl", "Cl"): {
+            "epsilon": 2.0, "sigma": 2.0951, "A": 7.05, "B": 0.60,
+            "p": 4, "q": 0, "a": 1.80, "lambda": 15.0, "gamma": 1.2,
+            "costheta0": -1.0 / 3.0,
+        },
+        ("Cl", "Na", "Na"): {
+            "epsilon": 1.5, "sigma": 2.0951, "A": 5.5, "B": 0.55,
+            "p": 4, "q": 0, "a": 1.80, "lambda": 12.0, "gamma": 1.1,
+            "costheta0": -1.0 / 3.0,
+        },
+    }
+    pot = StillingerWeberPotential(params, species=["Na", "Cl"])
+
+    e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
+    e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
+    assert abs(e0 - e1) < 1e-8
+    assert np.allclose(f0, f1, atol=1e-8)
+    assert np.allclose(s0, s1, atol=1e-8)
+
+    # Also confirm the numba path itself matches a finite-difference
+    # force oracle (not just the NumPy path -- catches a bug that could
+    # affect both paths identically, though none is expected here since
+    # the NumPy path is unchanged and already covered by
+    # test_sw_multi_species_path).
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"], use_numba=True)
+        return e
+
+    assert_forces_match(f1, finite_diff_forces(e_of_pos, struct["positions"]), label="SW-multi-numba")
+    assert_translationally_invariant(f1)
+
+
+# ===========================================================================
+# Tersoff
+# ===========================================================================
+
+_TERSOFF_SI_PARAMS = dict(
+    A=1830.8, B=471.18, lambda1=2.4799, lambda2=1.7322, lambda3=1.7322,
+    beta=1.1e-6, n=0.78734, c=100390.0, d=16.217, h=-0.59825, R=2.85, D=0.15,
+)
+
+
+def test_tersoff_force_stress_match_finite_difference():
+    from akitsushima.engine import TersoffPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    pot = TersoffPotential(dict(_TERSOFF_SI_PARAMS), species=["Si"])
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]),
+                         atol=5e-3, rtol=2e-3, label="Tersoff")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]),
+                         atol=5e-3, rtol=2e-3, label="Tersoff")
+    assert_translationally_invariant(f_analytic)
+
+
+@pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+def test_tersoff_numba_matches_numpy():
+    from akitsushima.engine import TersoffPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    pot = TersoffPotential(dict(_TERSOFF_SI_PARAMS), species=["Si"])
+    e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
+    e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
+    assert abs(e0 - e1) < 5e-3
+    assert np.allclose(f0, f1, atol=5e-3)
+    assert np.allclose(s0, s1, atol=5e-3)
+
+
+def test_tersoff_multi_species_path():
+    """Exercise the nested-triple multi-species parameter format."""
+    from akitsushima.engine import TersoffPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    diag = dict(_TERSOFF_SI_PARAMS)
+    params = {("Si", "Si", "Si"): diag}
+    pot = TersoffPotential(params, species=["Si"])
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, _ = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]),
+                         atol=5e-3, rtol=2e-3, label="Tersoff-multi")
+    assert_translationally_invariant(f_analytic)
+
+
+@pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+def test_tersoff_multi_species_numba_matches_numpy():
+    """Phase 5: the multi-species path gained its own JIT kernels
+    (_te_multi_zeta_jit / _te_multi_pass3_jit), table-driven off dense
+    per-species-id arrays resolved from the dict-keyed parameter set
+    (see TersoffPotential._compute_multi_species's docstring). Uses a
+    genuinely heteroatomic zincblende-like structure -- relabelling
+    diamond silicon's two interpenetrating FCC sublattices (each atom's
+    4 nearest neighbours all sit on the OTHER sublattice, the defining
+    property of the diamond/zincblende structure -- the same way real
+    binary zincblende compounds like SiC are built from the diamond
+    parent lattice) as species "X"/"Y", with DELIBERATELY DIFFERENT
+    parameter values for the (X,Y,Y) vs (Y,X,X) table entries, so that a
+    transposed species-id table lookup would show up as a mismatch
+    rather than being masked by both directions sharing one value."""
+    from akitsushima.engine import TersoffPotential
+
+    base = diamond_si_dict()
+    struct = randomly_perturbed(base, magnitude=0.05, seed=4)
+    struct["atom_types"] = ["X"] * 4 + ["Y"] * 4   # 2 diamond sublattices -> 2 species
+
+    params = {
+        ("X", "Y", "Y"): {
+            "A": 1830.8, "B": 471.18, "lambda1": 2.4799, "lambda2": 1.7322,
+            "R": 2.85, "D": 0.15, "beta": 1.1e-6, "n": 0.78734,
+            "c": 100390.0, "d": 16.217, "h": -0.59825, "lambda3": 1.7322,
+        },
+        ("Y", "X", "X"): {
+            "A": 1500.0, "B": 400.0, "lambda1": 2.2, "lambda2": 1.5,
+            "R": 2.85, "D": 0.15, "beta": 0.9e-6, "n": 0.7,
+            "c": 90000.0, "d": 14.0, "h": -0.55, "lambda3": 1.5,
+        },
+    }
+    pot = TersoffPotential(params, species=["X", "Y"])
+
+    e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
+    e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
+    assert abs(e0 - e1) < 1e-6
+    assert np.allclose(f0, f1, atol=1e-6)
+    assert np.allclose(s0, s1, atol=1e-6)
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"], use_numba=True)
+        return e
+
+    assert_forces_match(f1, finite_diff_forces(e_of_pos, struct["positions"]),
+                        atol=5e-3, rtol=2e-3, label="Tersoff-multi-numba")
+    assert_translationally_invariant(f1)
+
+
+# ===========================================================================
+# EAM
+# ===========================================================================
+
+def test_eam_force_stress_match_finite_difference():
+    from akitsushima.engine import EAMPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+
+    # Simple analytic callables (no spline needed): a Gaussian-decaying
+    # density and a soft-core embedding function, generic enough that
+    # neither is linear (a linear F(rho) would make the embedding-force
+    # cross term trivially zero and not actually exercise dF/drho).
+    def rho_fn(r):
+        return np.exp(-r / 1.5)
+
+    def F_fn(rho):
+        return -0.5 * np.sqrt(np.maximum(rho, 1e-12))
+
+    def phi_fn(r):
+        return 500.0 * np.exp(-r / 0.4)
+
+    pot = EAMPotential(F_fn, rho_fn, phi_fn, r_cut=6.0, species=["Al"])
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f_analytic, s_analytic = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert_forces_match(f_analytic, finite_diff_forces(e_of_pos, struct["positions"]),
+                         atol=5e-3, rtol=2e-3, label="EAM")
+    assert_stress_match(s_analytic, finite_diff_stress(e_of_lat, struct["lattice"], struct["positions"]),
+                         atol=5e-3, rtol=2e-3, label="EAM")
+    assert_translationally_invariant(f_analytic)
+
+
+def test_eam_tabulated_spline_matches_callable():
+    """Cubic-spline (tabulated-array) construction path must agree with
+    the equivalent analytic callable to within spline interpolation
+    error."""
+    from akitsushima.engine import EAMPotential
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+
+    def rho_fn(r):
+        return np.exp(-r / 1.5)
+
+    def F_fn(rho):
+        return -0.5 * np.sqrt(np.maximum(rho, 1e-12))
+
+    def phi_fn(r):
+        return 500.0 * np.exp(-r / 0.4)
+
+    pot_callable = EAMPotential(F_fn, rho_fn, phi_fn, r_cut=6.0, species=["Al"])
+
+    r_grid = np.linspace(0.05, 6.5, 400)
+    rho_grid = np.linspace(1e-6, rho_fn(r_grid.min()), 400)
+    pot_tab = EAMPotential(F_fn(rho_grid), rho_fn(r_grid), phi_fn(r_grid),
+                           rho_grid=rho_grid, r_grid=r_grid, r_cut=6.0, species=["Al"])
+
+    e0, f0, s0 = pot_callable.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    e1, f1, s1 = pot_tab.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    assert abs(e0 - e1) < 1e-3
+    assert np.allclose(f0, f1, atol=1e-2)
+
+
+# ===========================================================================
+# PotentialEngine + compute_all_general
+# ===========================================================================
+
+def test_potential_engine_sums_multiple_potentials():
+    from akitsushima.engine import BornMayerPotential, LennardJonesPotential, PotentialEngine
+
+    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    lj = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
+    bm = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 100.0, "rho": 0.3}}, r_cut=6.0)
+
+    e_lj, f_lj, s_lj = lj.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    e_bm, f_bm, s_bm = bm.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+
+    engine = PotentialEngine().add(lj).add(bm)
+    e, f, s = engine.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+
+    assert abs(e - (e_lj + e_bm)) < 1e-10
+    assert np.allclose(f, f_lj + f_bm, atol=1e-10)
+    assert np.allclose(s, s_lj + s_bm, atol=1e-10)
+
+
+def test_compute_all_general_matches_engine_plus_ewald():
+    from akitsushima.engine import BornMayerPotential, PotentialEngine, compute_all_general
+    from akitsushima.engine.coulomb.ewald import ewald_sum
+
+    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=7)
+    bm = BornMayerPotential({frozenset({"Na", "Cl"}): {"A": 1000.0, "rho": 0.3},
+                             frozenset({"Na", "Na"}): {"A": 0.0, "rho": 1.0},
+                             frozenset({"Cl", "Cl"}): {"A": 0.0, "rho": 1.0}}, r_cut=2.7)
+    engine = PotentialEngine().add(bm)
+
+    e, f, s = compute_all_general(struct["lattice"], struct["positions"], struct["atom_types"],
+                                   engine, charges=struct["charges"], r_cut=2.7,
+                                   coulomb_method="ewald")
+
+    e_bm, f_bm, s_bm = bm.compute(struct["lattice"], struct["positions"], struct["atom_types"])
+    q = np.array([struct["charges"][t] for t in struct["atom_types"]])
+    e_ew, f_ew, s_ew = ewald_sum(struct["lattice"], struct["positions"], q, r_cut=2.7)
+
+    assert abs(e - (e_bm + e_ew)) < 1e-10
+    assert np.allclose(f, f_bm + f_ew, atol=1e-10)
+    assert np.allclose(s, s_bm + s_ew, atol=1e-10)
+
+
+def test_compute_all_general_pppm_cache_reused_and_correct():
+    """Regression test for bug E6: the relocated PPPM LRU cache must
+    still produce numerically-correct, lattice-consistent results across
+    repeated calls with varying lattices (not just avoid crashing)."""
+    from akitsushima.engine import PotentialEngine, compute_all_general
+    from akitsushima.engine.potential_engine import _pppm_cache
+
+    _pppm_cache.clear()
+    base = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=7)
+    engine = PotentialEngine()
+
+    results = []
+    for scale in [1.0, 1.01, 1.02, 1.0]:   # revisit the original lattice last
+        lat = base["lattice"] * scale
+        pos = base["positions"] * scale
+        e, f, s = compute_all_general(lat, pos, base["atom_types"], engine,
+                                       charges=base["charges"], r_cut=2.5,
+                                       coulomb_method="pppm", pppm_mesh=32)
+        results.append(e)
+    # revisiting the original (scale=1.0) lattice must reproduce the exact
+    # same energy as the first call, not a stale/incorrectly-cached one
+    assert abs(results[0] - results[3]) < 1e-8
+    assert len(_pppm_cache) <= 8
+
+
+def test_pppm_cache_key_distinguishes_r_cut():
+    """
+    Regression: the PPPM solver cache key omitted ``r_cut``, so a second
+    call at a different real-space cutoff silently got back the solver
+    built with the FIRST one.
+
+    ``PPPMSolver`` takes r_cut as a constructor argument and uses it for
+    both its real-space erfc sum and its ``r_cut < min_i(d_i)/2``
+    minimum-image precondition check, so a stale value is doubly harmful.
+    With the default ``ewald_alpha=None`` the bug was masked, because
+    alpha is then derived from r_cut and alpha *was* in the key; it is
+    reachable with an EXPLICIT ``ewald_alpha``, i.e. exactly a real-space
+    cutoff convergence study at fixed Ewald splitting.  Measured on a
+    1024-atom MgO cell at alpha=0.35, warming at r_cut=5.0 and then
+    asking for 7.0 returned the 5.0 energy bit-for-bit: 730 eV of error
+    out of 12271 eV.
+
+    The invariant needs no reference data: a cache is only legitimate if
+    it is invisible, so the warmed-cache result must equal the
+    cold-cache result for the same inputs.
+    """
+    from akitsushima.engine import PotentialEngine, compute_all_general
+    from akitsushima.engine.potential_engine import _pppm_cache
+
+    # A 2x2x2 supercell is required, not the bare conventional cell: NaCl
+    # has a = 5.64 A with its FIRST neighbour shell at 2.82 A, so the
+    # single cell's minimum-image limit (r_cut < 2.82 A) leaves no room
+    # for two cutoffs that bracket any real pair -- both would enclose an
+    # empty real-space sum and give identical energies for the wrong
+    # reason.  The 11.28 A supercell admits r_cut up to 5.64 A, so 3.0 and
+    # 5.0 straddle the 2.82 / 3.99 / 4.88 A shells.
+    unit = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=3)
+    a_cell = unit["lattice"][0, 0]
+    positions = np.concatenate([
+        unit["positions"] + np.array([i, j, k]) * a_cell
+        for i in range(2) for j in range(2) for k in range(2)])
+    lattice = unit["lattice"] * 2.0
+    atom_types = unit["atom_types"] * 8
+
+    engine = PotentialEngine()
+    # Explicit alpha -> alpha no longer tracks r_cut, which is what
+    # exposes the bug.  0.5 A^-1 is chosen so the erfc-damped real-space
+    # tail between the two cutoffs is genuinely significant
+    # (erfc(0.5*3.0) = 3.4e-2 vs erfc(0.5*5.0) = 4.1e-4); a strongly
+    # damping alpha would make both cutoffs numerically identical and the
+    # premise assertion below would (correctly) reject the fixture.
+    alpha_fixed = 0.5
+
+    def run(r_cut):
+        return compute_all_general(
+            lattice, positions, atom_types, engine,
+            charges=unit["charges"], r_cut=r_cut, ewald_alpha=alpha_fixed,
+            coulomb_method="pppm", pppm_mesh=32)[0]
+
+    _pppm_cache.clear()
+    e_small_cold = run(3.0)
+    _pppm_cache.clear()
+    e_large_cold = run(5.0)
+
+    assert abs(e_large_cold - e_small_cold) > 1e-6, (
+        "test premise: r_cut must actually change the energy at this "
+        "fixed alpha, or the check below cannot detect a stale solver")
+
+    # Warm the cache at the SMALLER cutoff, then ask for the larger one.
+    _pppm_cache.clear()
+    run(3.0)
+    e_large_warm = run(5.0)
+
+    assert e_large_warm == pytest.approx(e_large_cold, abs=1e-9), (
+        f"a warmed cache must not change the answer: got "
+        f"{e_large_warm} with the cache warmed at r_cut=3.0, but "
+        f"{e_large_cold} from a cold cache (the r_cut=3.0 energy is "
+        f"{e_small_cold})")
+    assert len(_pppm_cache) == 2, (
+        "the two distinct r_cut values must occupy two distinct cache "
+        "entries")
