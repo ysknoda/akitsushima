@@ -56,7 +56,11 @@ library.
 ### Performance
 
 - **`NeighbourList`** — cell-linked list / SciPy `cKDTree` back-end, with a Verlet skin for lazy rebuilds during MD.
-- **Numba JIT** — optional `@njit` compilation of the pair / many-body loops (roughly 10–100x speed-up), with a transparent NumPy fallback when numba isn't installed.
+- **Numba JIT** — optional `@njit` compilation of the pair / many-body loops,
+  used automatically whenever numba is importable, with a transparent NumPy
+  fallback when it isn't. Measured on 64-atom silicon: Stillinger-Weber
+  66 → 4.2 ms/step, Tersoff 117 → 2.5 ms/step. Set `NUMBA_ENABLE=0` to force
+  the NumPy path.
 - **MPI (mpi4py)** — domain-split + `Allreduce` parallelism across ranks, available for every potential, for NEB image evaluation, phonon finite displacements, and the fitting loss function — with a transparent single-process fallback when mpi4py isn't installed.
 
 ## Installation
