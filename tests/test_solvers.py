@@ -1980,3 +1980,57 @@ def test_barostat_momentum_is_thermostatted(tmp_path):
     assert 0.3 < ratio < 1.5, (
         f"<p_eps^2/W>/kT = {ratio:.4f}; the barostat momentum is not "
         "being thermostatted")
+
+
+def test_optimiser_state_vector_is_continuous_across_a_cell_face():
+    """M2 regression: the state vector must move by exactly the step taken.
+
+    The optimiser used to PBC-wrap self.positions on every update.  For
+    an atom sitting at fractional 0 -- the first atom of almost every
+    POSCAR -- a small negative move then wrapped to the far face, so
+    `s = _get_x() - x_before` recorded nearly a whole lattice vector
+    instead of the actual displacement.  L-BFGS pairs exactly that `s`
+    with the gradient change to build curvature, and DIIS forms
+    `x_new = sum_k c_k x_k`, a linear combination that means nothing if
+    some x_k were wrapped to the other side.
+
+    Nothing downstream needed the wrap: NeighbourList wraps its own
+    input and the potentials apply minimum image themselves, so the
+    POSCAR and XDATCAR writers now wrap at the point of output instead.
+    Measured on a supercell relaxed across a face: DIIS 24 -> 12 steps,
+    L-BFGS 11 -> 8.
+
+    Asserted as an exact invariant rather than a step count, which
+    depends on the machine and the structure.
+    """
+    fn = _lj_force_fn(r_cut=3.2)
+    al = _fcc_al_supercell()
+    frac = al["positions"] @ np.linalg.inv(al["lattice"])
+    frac -= frac[0]                       # atom 0 exactly at the origin
+    frac -= np.floor(frac)
+    frac[frac >= 1.0] = 0.0
+    go = GeometryOptimiser(al["lattice"], frac @ al["lattice"],
+                           al["atom_types"], force_fn=fn, method="lbfgs",
+                           max_steps=1, verbose=False,
+                           output_dir="/tmp/akitsushima_test_state_cont")
+
+    x0 = go._get_x()
+    step = np.zeros_like(x0)
+    step[0] = -1.0e-3                     # push atom 0 back across the face
+    go._apply_generalised_displacement(step)
+    s = go._get_x() - x0
+
+    assert np.allclose(s, step, atol=1e-12), (
+        f"state vector moved by {s[0]:.6e} A where the step was "
+        f"{step[0]:.6e} A -- a PBC wrap corrupted it")
+
+    # The written structure must still be inside the cell.
+    result = go.run()
+    out_frac = result["positions"] @ np.linalg.inv(result["lattice"])
+    from akitsushima.io.poscar import parse_poscar
+    written = parse_poscar(
+        "/tmp/akitsushima_test_state_cont/POSCAR_relaxed")
+    wf = written["positions"] @ np.linalg.inv(written["lattice"])
+    assert wf.min() >= -1e-9 and wf.max() < 1.0 + 1e-9, (
+        "POSCAR_relaxed is not wrapped into the cell")
+    assert out_frac.shape == wf.shape

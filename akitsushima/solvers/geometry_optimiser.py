@@ -610,8 +610,21 @@ class GeometryOptimiser:
             frac   = self.positions @ np.linalg.inv(self.lattice)
             self.lattice   += d_cell
             self.positions  = frac @ self.lattice
-        self.positions = wrap_positions_into_cell(self.positions,
-                                                  self.lattice)
+        # Deliberately NOT wrapped.  The optimiser's state vector must
+        # be a continuous function of the step it just took: `s = x_new
+        # - x_old` is what L-BFGS pairs with the gradient change to
+        # build curvature, and DIIS forms `x_new = sum_k c_k x_k`, a
+        # linear combination that is geometrically meaningless if some
+        # of the x_k were wrapped to the far side of the cell.  Wrapping
+        # here turned a -0.001 A move of an atom at frac = 0 into a
+        # +19.999 A entry in s for a 20 A cell, giving s.y = -1.13e-03
+        # where the truth is +5.67e-08; DIIS went from 29 to 43 steps on
+        # a dimer relaxed across a face.
+        #
+        # Nothing downstream needs wrapped coordinates any more:
+        # NeighbourList wraps its own input, and the potentials apply
+        # the minimum-image convention themselves.  The POSCAR and
+        # XDATCAR writers wrap explicitly at the point of output.
 
     def _clamp_step(self, step: np.ndarray) -> np.ndarray:
         """
@@ -679,8 +692,7 @@ class GeometryOptimiser:
             frac = self.positions @ np.linalg.inv(self.lattice)
             self.lattice   = x[n_ion:].reshape(3, 3).copy()
             self.positions = frac @ self.lattice
-        self.positions = wrap_positions_into_cell(self.positions,
-                                                  self.lattice)
+        # Not wrapped -- see _apply_generalised_displacement.
 
     # ------------------------------------------------------------------ #
     #  Common run entry-point                                              #
@@ -795,7 +807,9 @@ class GeometryOptimiser:
                   f"step={step}  E={float(e):.6f}eV  "
                   f"Fmax={fmax_val:.4f}eV/A  Pmax={pmax_val:.4f}GPa")
         _write_xdatcar_frame(
-            self._xdatcar_fh, self.positions, self.lattice, self.atom_types,
+            self._xdatcar_fh,
+            wrap_positions_into_cell(self.positions, self.lattice),
+            self.lattice, self.atom_types,
             self._xdatcar_frame_idx, variable_header=self.relax_cell,
             comment=comment)
         self._xdatcar_frame_idx += 1
@@ -898,7 +912,9 @@ class GeometryOptimiser:
             fa_out = (self._fix_ions.reshape(self.N, 3)
                       if np.any(self._fix_ions) else None)
             if self._is_root:
-                write_poscar(best_out, self.lattice, self.positions,
+                write_poscar(best_out, self.lattice,
+                             wrap_positions_into_cell(self.positions,
+                                                      self.lattice),
                              self.atom_types,
                              title="Best-energy structure (akitsushima.py)",
                              fix_atoms=fa_out)
@@ -912,7 +928,8 @@ class GeometryOptimiser:
         if self._is_root:
             print(f"  Final energy : {e_final:.6f} eV")
             print(f"  Final Fmax   : {np.max(np.abs(forces)):.4f} eV/A")
-            write_poscar(out, final_lat, final_pos,
+            write_poscar(out, final_lat,
+                         wrap_positions_into_cell(final_pos, final_lat),
                          self.atom_types, title="Relaxed by akitsushima.py",
                          fix_atoms=fa_out)
             print(f"  Relaxed structure written to {out}")
