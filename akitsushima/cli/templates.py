@@ -212,7 +212,7 @@ md:
   ensemble:     nvt
   output_dir:   ./nvt_output
   temperature:  300.0              # K
-  timestep:     0.1                # fs
+  timestep:     1.0                # fs
   # This template used to claim "SW requires dt<=0.05 fs; Tersoff allows
   # dt=0.1-0.5 fs".  Measured instead -- 64-atom silicon, NVE, 5 ps per
   # row, secular drift from a linear fit rather than an endpoint value,
@@ -229,14 +229,19 @@ md:
   # potential needs anything like 0.05 fs; silicon has no light atoms
   # and its fastest optical mode has a period near 64 fs.
   #
-  # 0.1 fs is kept here as a deliberately conservative starting point.
-  # Raising it to 1.0 fs is a 10x saving in wall time at a drift that is
-  # still four orders of magnitude below the thermal energy; do that
-  # once you have checked the H_NHC (or E_tot) drift for YOUR system,
-  # which is what that column in thermo.log is for.  A system containing
-  # hydrogen is the real exception -- an X-H stretch has a period near
-  # 10 fs, and the solvers warn when the timestep is large for the
-  # lightest mass present.
+  # 1.0 fs is the default on that evidence.  n_steps below is unchanged,
+  # so the same wall-clock cost now buys 10 ps of simulated time instead
+  # of 1 ps -- at a drift four orders of magnitude below the thermal
+  # energy.  It also matches the default the NVT/NVE/NPT classes
+  # themselves have always had, which this template was silently
+  # overriding with a tenth of it.
+  #
+  # Check the H_NHC (or E_tot) drift column in thermo.log for YOUR
+  # system before trusting it: the numbers above are for silicon, which
+  # has no light atoms.  A system containing hydrogen is the real
+  # exception -- an X-H stretch has a period near 10 fs -- and the
+  # solvers warn when the timestep is large for the lightest mass
+  # present.
   n_steps:      10000
   equil_steps:  1000               # steps with velocity rescaling active
   tau_nhc:      20.0               # fs  NHC thermostat time constant
@@ -277,7 +282,9 @@ md:
   ensemble:     nve
   output_dir:   ./nve_output
   temperature:  300.0
-  timestep:     0.1
+  timestep:     1.0                # fs -- see the NVT template's
+                                   # timestep note for the measured
+                                   # drift-vs-dt table
   n_steps:      10000
   equil_steps:  0
   traj_every:   10
@@ -317,7 +324,9 @@ md:
   output_dir:  ./npt_output
   temperature: 300.0
   pressure:    0.0                 # GPa
-  timestep:    0.1                 # fs
+  timestep:    1.0                 # fs -- see the NVT template's
+                                   # timestep note for the measured
+                                   # drift-vs-dt table
   n_steps:     20000
   equil_steps: 2000
   tau_nhc:     20.0                # fs
