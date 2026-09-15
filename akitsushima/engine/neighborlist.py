@@ -1,4 +1,5 @@
 """Neighbour list: Verlet-skin cell-linked list (CLL) or scipy cKDTree back-end."""
+import contextlib
 from typing import Optional, Tuple
 
 import numpy as np
@@ -35,6 +36,88 @@ def _minimum_image(rij: np.ndarray,
 # brute-force periodic reference: radii 0.866 and 0.9 both return all
 # C(N,2) pairs).
 _MAX_FRACTIONAL_MIN_IMAGE_DIST = np.sqrt(3.0) / 2.0
+
+
+_min_image_suppress_depth = 0
+
+
+@contextlib.contextmanager
+def allow_minimum_image_violation():
+    """Suppress the minimum-image precondition for the duration of the block.
+
+    ``BasePairPotential.compute()``'s neighbour-list-free O(N^2) path
+    normally refuses to run when ``r_cut`` reaches past half the smallest
+    perpendicular cell width, because beyond that limit
+    ``s -= np.round(s)`` keeps exactly one image per pair and the other
+    images inside the cutoff are never counted -- silently wrong numbers.
+
+    A context manager rather than a parameter, for the same reason
+    :func:`akitsushima.utils.mpi.local_only` is one: the potential objects
+    are constructed deep inside ``make_force_fn``, ``build_engine``,
+    ``load_potential``, ``_build_force_fn_from_yaml`` and the fitting
+    registry -- 26 sites across six modules -- so a keyword argument
+    would have to be threaded through most of the fitting API to reach
+    them.
+
+    Use it only where the absolute physics genuinely does not matter: a
+    self-consistency check between two code paths that are affected
+    identically, a finite-difference oracle that differentiates the same
+    (truncated) energy it validates, or a deliberate comparison against
+    the unguarded behaviour.  It is NOT a way to run real physics in a
+    cell that cannot host its cutoff.
+
+    Scope: this affects only the O(N^2) fallback.  ``NeighbourList``
+    still refuses such a cell outright, because a Verlet or cell-linked
+    list cannot even enumerate the missing images -- there is no
+    "degraded but deterministic" result to fall back on there.
+
+    Re-entrant: nesting increments and decrements a depth counter, so a
+    block that calls code opening another block behaves correctly
+    (suppressed until the OUTERMOST block exits).
+    """
+    global _min_image_suppress_depth
+    _min_image_suppress_depth += 1
+    try:
+        yield
+    finally:
+        _min_image_suppress_depth -= 1
+
+
+def _check_min_image(lattice: np.ndarray, r_list: float,
+                     caller: str) -> None:
+    """Raise unless ``r_list`` is inside the minimum-image validity limit.
+
+    ``r_list`` is whatever radius the caller will actually reach out to --
+    ``r_cut + skin_width`` for a Verlet list, plain ``r_cut`` for a direct
+    O(N^2) evaluation that keeps no skin.
+
+    The bound is half the smallest PERPENDICULAR cell width
+    ``d_i = V / |a_j x a_k|``, not half the shortest lattice vector: for a
+    sheared cell the width is smaller than the vector length, so a cell
+    can look large enough and still be too thin.  See ``_cell_metrics``.
+
+    Beyond that bound ``s -= np.round(s)`` still returns exactly one image
+    per pair, so the other images that are also inside the cutoff are
+    simply never counted -- no error, no warning, just wrong numbers.
+    """
+    if _min_image_suppress_depth > 0:
+        return
+    perp_widths, _ = _cell_metrics(lattice)
+    min_width = float(np.min(perp_widths))
+    if r_list >= min_width / 2.0:
+        cell_lengths = np.linalg.norm(np.asarray(lattice, dtype=float),
+                                      axis=1)
+        raise ValueError(
+            f"{caller}: cutoff radius ({r_list:.4f} A) must be < half the "
+            f"smallest perpendicular cell width ({min_width / 2.0:.4f} A) "
+            f"for the minimum-image convention to be valid. Perpendicular "
+            f"widths are [{perp_widths[0]:.4f}, {perp_widths[1]:.4f}, "
+            f"{perp_widths[2]:.4f}] A for lattice vector lengths "
+            f"[{cell_lengths[0]:.4f}, {cell_lengths[1]:.4f}, "
+            f"{cell_lengths[2]:.4f}] A -- for a sheared cell the width is "
+            "SMALLER than the vector length, so a cell can look large "
+            "enough and still be too thin. Use a larger supercell or a "
+            "smaller r_cut.")
 
 
 def wrap_positions_into_cell(positions: np.ndarray,

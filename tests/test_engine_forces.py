@@ -418,7 +418,8 @@ def test_lj_force_stress_match_finite_difference():
     from akitsushima.engine import LennardJonesPotential
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    pot = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
+    pot = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     def e_of_pos(pos):
         e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
@@ -438,7 +439,8 @@ def test_morse_force_stress_match_finite_difference():
     from akitsushima.engine import MorsePotential
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    pot = MorsePotential({frozenset({"Al", "Al"}): {"D_e": 0.3, "alpha": 1.5, "r0": 2.86}}, r_cut=6.0)
+    pot = MorsePotential({frozenset({"Al", "Al"}): {"D_e": 0.3, "alpha": 1.5, "r0": 2.86}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     def e_of_pos(pos):
         e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
@@ -458,7 +460,8 @@ def test_bornmayer_force_stress_match_finite_difference():
     from akitsushima.engine import BornMayerPotential
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    pot = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3}}, r_cut=6.0)
+    pot = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     def e_of_pos(pos):
         e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
@@ -478,7 +481,8 @@ def test_buckingham_force_stress_match_finite_difference():
     from akitsushima.engine import BuckinghamPotential
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    pot = BuckinghamPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3, "C": 10.0}}, r_cut=6.0)
+    pot = BuckinghamPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3, "C": 10.0}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     def e_of_pos(pos):
         e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
@@ -495,14 +499,17 @@ def test_buckingham_force_stress_match_finite_difference():
 
 
 def test_buckingham_c_zero_matches_bornmayer():
-    """BuckinghamPotential(C=0) must be numerically identical to
+    """BuckinghamPotential(C=0,
+    allow_minimum_image_violation=True) must be numerically identical to
     BornMayerPotential with the same A/rho (design cross-check noted in
     the plan's Buckingham-consolidation design decision)."""
     from akitsushima.engine import BornMayerPotential, BuckinghamPotential
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    buck = BuckinghamPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3, "C": 0.0}}, r_cut=6.0)
-    bm = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3}}, r_cut=6.0)
+    buck = BuckinghamPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3, "C": 0.0}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
+    bm = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 1000.0, "rho": 0.3}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     e1, f1, s1 = buck.compute(struct["lattice"], struct["positions"], struct["atom_types"])
     e2, f2, s2 = bm.compute(struct["lattice"], struct["positions"], struct["atom_types"])
@@ -520,7 +527,8 @@ def test_mie_force_stress_match_finite_difference():
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
     pot = MiePotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}},
-                       n=14.0, m=7.0, r_cut=6.0)
+                       n=14.0, m=7.0, r_cut=6.0,
+                                               allow_minimum_image_violation=True)
 
     def e_of_pos(pos):
         e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
@@ -537,7 +545,8 @@ def test_mie_force_stress_match_finite_difference():
 
 
 def test_mie_reduces_to_lj_at_12_6():
-    """MiePotential(n=12, m=6) must be numerically identical to
+    """MiePotential(n=12, m=6,
+    allow_minimum_image_violation=True) must be numerically identical to
     LennardJonesPotential with the same epsilon/sigma -- the free,
     strong correctness check enabled by Mie's own normalisation
     constant C(n,m) (see MiePotential's docstring), and a direct
@@ -549,8 +558,10 @@ def test_mie_reduces_to_lj_at_12_6():
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
     mie = MiePotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}},
-                       n=12.0, m=6.0, r_cut=6.0)
-    lj = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
+                       n=12.0, m=6.0, r_cut=6.0,
+                                               allow_minimum_image_violation=True)
+    lj = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     e1, f1, s1 = mie.compute(struct["lattice"], struct["positions"], struct["atom_types"])
     e2, f2, s2 = lj.compute(struct["lattice"], struct["positions"], struct["atom_types"])
@@ -566,7 +577,8 @@ def test_yukawa_force_stress_match_finite_difference():
     from akitsushima.engine import YukawaPotential
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    pot = YukawaPotential({frozenset({"Al", "Al"}): {"A": -20.0}}, kappa=1.2, r_cut=6.0)
+    pot = YukawaPotential({frozenset({"Al", "Al"}): {"A": -20.0}}, kappa=1.2, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     def e_of_pos(pos):
         e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
@@ -587,7 +599,8 @@ def test_pair_potential_numba_matches_numpy():
     from akitsushima.engine import LennardJonesPotential
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    pot = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
+    pot = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
     e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
     e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
     assert abs(e0 - e1) < 1e-8
@@ -905,8 +918,10 @@ def test_potential_engine_sums_multiple_potentials():
     from akitsushima.engine import BornMayerPotential, LennardJonesPotential, PotentialEngine
 
     struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
-    lj = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0)
-    bm = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 100.0, "rho": 0.3}}, r_cut=6.0)
+    lj = LennardJonesPotential({frozenset({"Al", "Al"}): {"epsilon": 0.4, "sigma": 2.6}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
+    bm = BornMayerPotential({frozenset({"Al", "Al"}): {"A": 100.0, "rho": 0.3}}, r_cut=6.0,
+    allow_minimum_image_violation=True)
 
     e_lj, f_lj, s_lj = lj.compute(struct["lattice"], struct["positions"], struct["atom_types"])
     e_bm, f_bm, s_bm = bm.compute(struct["lattice"], struct["positions"], struct["atom_types"])
@@ -926,7 +941,8 @@ def test_compute_all_general_matches_engine_plus_ewald():
     struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=7)
     bm = BornMayerPotential({frozenset({"Na", "Cl"}): {"A": 1000.0, "rho": 0.3},
                              frozenset({"Na", "Na"}): {"A": 0.0, "rho": 1.0},
-                             frozenset({"Cl", "Cl"}): {"A": 0.0, "rho": 1.0}}, r_cut=2.7)
+                             frozenset({"Cl", "Cl"}): {"A": 0.0, "rho": 1.0}}, r_cut=2.7,
+                                                                                        allow_minimum_image_violation=True)
     engine = PotentialEngine().add(bm)
 
     e, f, s = compute_all_general(struct["lattice"], struct["positions"], struct["atom_types"],

@@ -10,6 +10,8 @@ to or larger than half the cell edge -- no need for primitive cells to hit it.
 import numpy as np
 import pytest
 
+from akitsushima.engine.neighborlist import allow_minimum_image_violation
+
 
 def _cubic(a: float) -> np.ndarray:
     return np.eye(3) * a
@@ -98,3 +100,28 @@ def diamond_si() -> dict:
 @pytest.fixture
 def toy_dimer() -> dict:
     return toy_dimer_dict()
+
+
+@pytest.fixture
+def small_cell_ok():
+    """Opt this test out of the minimum-image precondition.
+
+    BasePairPotential.compute()'s O(N^2) fallback refuses to run when
+    r_cut reaches past half the smallest perpendicular cell width,
+    because beyond that limit `s -= np.round(s)` keeps one image per
+    pair and silently drops the others.
+
+    Several fixtures in this suite deliberately pair a small reference
+    cell with a generous cutoff.  That is legitimate here precisely
+    because these tests do not depend on the absolute physics: they
+    check that two code paths agree, that an analytic derivative matches
+    a finite difference of the same truncated energy, or that a
+    save/load round-trip preserves what it was given -- all of which are
+    affected identically on both sides.  Requesting this fixture says so
+    explicitly; `grep -rl small_cell_ok tests/` then lists every test
+    that depends on a cell too small for its cutoff.
+
+    Do NOT use it to make a test that asserts a physical value pass.
+    """
+    with allow_minimum_image_violation():
+        yield

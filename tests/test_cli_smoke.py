@@ -349,7 +349,7 @@ def test_cmd_esm_smoke(tmp_path):
     assert (tmp_path / "esm_out" / "work_function.txt").is_file()
 
 
-def test_cmd_phonon_smoke(tmp_path, al_poscar):
+def test_cmd_phonon_smoke(tmp_path, al_poscar, small_cell_ok):
     cfg = {
         "structure": {"poscar": str(al_poscar)},
         "potential": {"type": "LJ", "species": ["Al"],
@@ -460,7 +460,7 @@ def _write_lj_training_set(tmp_path):
     return csv_path
 
 
-def test_cmd_fit_lj_end_to_end(tmp_path):
+def test_cmd_fit_lj_end_to_end(tmp_path, small_cell_ok):
     """F1/F2/F3/F5/F12 regression coverage: the consolidated `fit` command
     must recover parameters close to the true LJ potential used to
     generate the (synthetic) training data."""
@@ -486,7 +486,7 @@ def test_cmd_fit_lj_end_to_end(tmp_path):
     assert pair_params["sigma"] == pytest.approx(2.5, rel=0.2)
 
 
-def test_cmd_fit_lj_huber_loss_type_end_to_end(tmp_path):
+def test_cmd_fit_lj_huber_loss_type_end_to_end(tmp_path, small_cell_ok):
     """Phase 3 (Huber loss) regression: cfg["loss_type"]="huber" plus
     the required huber_delta_* keys must flow all the way from a JSON
     --config file through cmd_fit.py -> fit_potential ->
@@ -521,7 +521,7 @@ def test_cmd_fit_lj_huber_loss_type_end_to_end(tmp_path):
     assert pair_params["sigma"] == pytest.approx(2.5, rel=0.2)
 
 
-def test_cmd_fit_mie_end_to_end(tmp_path):
+def test_cmd_fit_mie_end_to_end(tmp_path, small_cell_ok):
     """Phase 2 registry regression: `fit --potential mie` must work
     end-to-end through the exact same cmd_fit.py/parser.py/templates.py
     code paths as the original six potentials, having required zero
@@ -571,7 +571,7 @@ def test_cmd_fit_mie_end_to_end(tmp_path):
     assert pair_params["sigma"] == pytest.approx(2.5, rel=0.2)
 
 
-def test_cmd_fit_r_cut_zero_is_not_ignored(tmp_path):
+def test_cmd_fit_r_cut_zero_is_not_ignored(tmp_path, small_cell_ok):
     """F12 regression: --r-cut 0 must not be silently dropped by a
     truthiness check (it must actually reach cfg["r_cut"])."""
     csv_path = _write_lj_training_set(tmp_path)

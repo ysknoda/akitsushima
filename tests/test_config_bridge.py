@@ -114,7 +114,7 @@ def test_mie_and_yukawa_via_yaml_work():
         assert np.linalg.norm(f) > 1e-8
 
 
-def test_morse_and_bornmayer_via_yaml_run_without_crashing():
+def test_morse_and_bornmayer_via_yaml_run_without_crashing(small_cell_ok):
     """S19 regression (Morse/BornMayer branches)."""
     lattice = np.eye(3) * 15.0
     positions = np.array([[5.0, 5.0, 5.0], [7.5, 5.0, 5.0]])

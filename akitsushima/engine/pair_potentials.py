@@ -6,7 +6,7 @@ import numpy as np
 
 from ..utils.jit import _HAS_NUMBA, _NUMBA_ENV
 from ..utils.mpi import _mpi_allreduce_sum, _mpi_allreduce_sum_scalar, _mpi_domain_split
-from .neighborlist import NeighbourList
+from .neighborlist import NeighbourList, _check_min_image
 from ._pair_kernels import _pair_body_jit, _pair_body_numpy
 
 
@@ -26,9 +26,22 @@ class BasePairPotential(ABC):
               If None, acts on all species pairs.
     """
 
-    def __init__(self, r_cut: float, species: Optional[list] = None):
+    def __init__(self, r_cut: float, species: Optional[list] = None,
+                 allow_minimum_image_violation: bool = False):
         self.r_cut = r_cut
         self.species = species   # None -> apply to every pair
+        # Opt out of the minimum-image precondition that compute()
+        # enforces on its neighbour-list-free O(N^2) path.  Set it only
+        # when the cell is deliberately too small for the cutoff AND the
+        # result's absolute physics does not matter -- a self-consistency
+        # check between two code paths, say, where both sides are
+        # affected identically.  It is NOT a way to make a physically
+        # meaningful calculation run in a cell that cannot host its
+        # cutoff: beyond the limit, `s -= np.round(s)` keeps exactly one
+        # image per pair and the other images inside the cutoff are
+        # never counted, with no error and no warning.
+        self.allow_minimum_image_violation = bool(
+            allow_minimum_image_violation)
 
     @abstractmethod
     def pair_energy_force(self,
@@ -112,6 +125,20 @@ class BasePairPotential(ABC):
         if neigh_list is not None:
             ii, jj = neigh_list.get_candidate_pairs()
         else:
+            # No neighbour list means no NeighbourList.build(), which is
+            # the only place the minimum-image precondition was ever
+            # enforced.  Without this check the branch below silently
+            # returns wrong numbers whenever r_cut reaches past half the
+            # smallest perpendicular cell width: `s -= np.round(s)` picks
+            # one image per pair, so the other images that are also inside
+            # the cutoff are simply never counted.  Measured on FCC Al
+            # with r_cut = 6.0 in the bare 4.05 A conventional cell (half
+            # width 2.02 A): a bulk modulus of 46 GPa against a converged
+            # ~250 GPa, and a force of 0.018 eV/A where inversion symmetry
+            # makes the exact answer zero.
+            if not getattr(self, "allow_minimum_image_violation", False):
+                _check_min_image(lattice, self.r_cut,
+                                 "BasePairPotential.compute")
             ii, jj = np.triu_indices(N, k=1)
 
         # Minimum-image displacements/distances at the CURRENT positions,
@@ -340,9 +367,12 @@ class LennardJonesPotential(BasePairPotential):
     def __init__(self,
                  params: dict,
                  r_cut: float = 10.0,
-                 shift: bool = True):
+                 shift: bool = True,
+                                  allow_minimum_image_violation: bool = False):
         species = sorted({s for pair in params for s in pair})
-        super().__init__(r_cut=r_cut, species=species)
+        super().__init__(
+            r_cut=r_cut, species=species,
+            allow_minimum_image_violation=allow_minimum_image_violation)
         self.params = params
         self.shift = shift
         self._cache_shift: dict = {}  # (sp1,sp2) -> (V_cut, dV_cut)
@@ -401,9 +431,12 @@ class MorsePotential(BasePairPotential):
     def __init__(self,
                  params: dict,
                  r_cut: float = 10.0,
-                 shift: bool = True):
+                 shift: bool = True,
+                                  allow_minimum_image_violation: bool = False):
         species = sorted({s for pair in params for s in pair})
-        super().__init__(r_cut=r_cut, species=species)
+        super().__init__(
+            r_cut=r_cut, species=species,
+            allow_minimum_image_violation=allow_minimum_image_violation)
         self.params = params
         self.shift = shift
         self._cache_shift: dict = {}
@@ -449,9 +482,12 @@ class BornMayerPotential(BasePairPotential):
     r_cut  : cut-off [A]
     """
 
-    def __init__(self, params: dict, r_cut: float = 10.0):
+    def __init__(self, params: dict, r_cut: float = 10.0,
+                     allow_minimum_image_violation: bool = False):
         species = sorted({s for pair in params for s in pair})
-        super().__init__(r_cut=r_cut, species=species)
+        super().__init__(
+            r_cut=r_cut, species=species,
+            allow_minimum_image_violation=allow_minimum_image_violation)
         self.params = params
 
     def pair_energy_force(self, r, sp_i=None, sp_j=None):
@@ -494,9 +530,12 @@ class BuckinghamPotential(BasePairPotential):
     r_cut  : cut-off [A]
     """
 
-    def __init__(self, params: dict, r_cut: float = 10.0):
+    def __init__(self, params: dict, r_cut: float = 10.0,
+                     allow_minimum_image_violation: bool = False):
         species = sorted({s for pair in params for s in pair})
-        super().__init__(r_cut=r_cut, species=species)
+        super().__init__(
+            r_cut=r_cut, species=species,
+            allow_minimum_image_violation=allow_minimum_image_violation)
         self.params = params
 
     def pair_energy_force(self, r, sp_i=None, sp_j=None):
@@ -547,11 +586,14 @@ class MiePotential(BasePairPotential):
                  n: float = 12.0,
                  m: float = 6.0,
                  r_cut: float = 10.0,
-                 shift: bool = True):
+                 shift: bool = True,
+                                  allow_minimum_image_violation: bool = False):
         if not n > m > 0:
             raise ValueError(f"MiePotential: require n > m > 0, got n={n}, m={m}")
         species = sorted({s for pair in params for s in pair})
-        super().__init__(r_cut=r_cut, species=species)
+        super().__init__(
+            r_cut=r_cut, species=species,
+            allow_minimum_image_violation=allow_minimum_image_violation)
         self.params = params
         self.n = float(n)
         self.m = float(m)
@@ -626,11 +668,14 @@ class YukawaPotential(BasePairPotential):
                  params: dict,
                  kappa: float,
                  r_cut: float = 10.0,
-                 shift: bool = True):
+                 shift: bool = True,
+                                  allow_minimum_image_violation: bool = False):
         if kappa <= 0:
             raise ValueError(f"YukawaPotential: kappa must be > 0, got {kappa}")
         species = sorted({s for pair in params for s in pair})
-        super().__init__(r_cut=r_cut, species=species)
+        super().__init__(
+            r_cut=r_cut, species=species,
+            allow_minimum_image_violation=allow_minimum_image_violation)
         self.params = params
         self.kappa = float(kappa)
         self.shift = shift

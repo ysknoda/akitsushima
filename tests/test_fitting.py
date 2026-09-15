@@ -93,14 +93,15 @@ def _perturbed_set(base_dict, n=3, magnitude=0.06):
 # generic_loss_function / fit_potential -- basic correctness
 # ===========================================================================
 
-def test_lj_loss_is_zero_at_true_parameters():
+def test_lj_loss_is_zero_at_true_parameters(small_cell_ok):
     al = fcc_al_dict()
     structs_raw = _perturbed_set(al)
     pair = frozenset({"Al"})
     true_lj = {pair: {"epsilon": 0.40, "sigma": 2.5}}
     engine_true = PotentialEngine()
     from akitsushima.engine import LennardJonesPotential
-    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True))
+    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
 
     structs = _make_training_structures(engine_true, structs_raw, r_cut=6.0)
 
@@ -121,7 +122,8 @@ def _lj_mismatched_loss_setup():
     true_lj = {pair: {"epsilon": 0.40, "sigma": 2.5}}
     engine_true = PotentialEngine()
     from akitsushima.engine import LennardJonesPotential
-    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True))
+    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
     structs = _make_training_structures(engine_true, [al], r_cut=6.0)
 
     wrong_lj = {pair: {"epsilon": 0.30, "sigma": 2.6}}
@@ -130,7 +132,7 @@ def _lj_mismatched_loss_setup():
     return param_set, structs, weights
 
 
-def test_loss_scale_key_squares_structure_contribution():
+def test_loss_scale_key_squares_structure_contribution(small_cell_ok):
     """Fix A (scale-wiring) regression: structure["scale"] must be read
     and applied SQUARED -- a scale of 2.0 must exactly quadruple that
     structure's contribution to the total loss, matching
@@ -150,7 +152,7 @@ def test_loss_scale_key_squares_structure_contribution():
     assert loss_scaled == pytest.approx(4.0 * loss_default, rel=1e-10)
 
 
-def test_loss_weight_key_scales_structure_contribution_linearly():
+def test_loss_weight_key_scales_structure_contribution_linearly(small_cell_ok):
     """Fix B (per-structure trust weight) regression: structure["weight"]
     must apply LINEARLY (unlike "scale", which applies squared) --
     weight=2.0 must exactly double that structure's loss contribution."""
@@ -176,7 +178,7 @@ def test_loss_huber_requires_explicit_deltas():
                               r_cut=6.0, ewald_alpha=None, loss_type="huber")
 
 
-def test_loss_huber_tempers_outlier_structure_relative_to_squared():
+def test_loss_huber_tempers_outlier_structure_relative_to_squared(small_cell_ok):
     """Fix C (Huber loss) regression: with one badly-off outlier
     structure and several well-behaved ones, Huber mode must give the
     outlier LESS influence over the total loss than plain squared mode
@@ -189,7 +191,8 @@ def test_loss_huber_tempers_outlier_structure_relative_to_squared():
     true_lj = {pair: {"epsilon": 0.40, "sigma": 2.5}}
     engine_true = PotentialEngine()
     from akitsushima.engine import LennardJonesPotential
-    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True))
+    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
 
     good_structs = _make_training_structures(
         engine_true, _perturbed_set(al, n=3, magnitude=0.03), r_cut=6.0)
@@ -227,14 +230,15 @@ def test_loss_huber_tempers_outlier_structure_relative_to_squared():
         "reproduce plain squared-error loss (the r <= delta branch only)")
 
 
-def test_fit_potential_reduces_loss_from_bad_initial_guess(tmp_path):
+def test_fit_potential_reduces_loss_from_bad_initial_guess(tmp_path, small_cell_ok):
     al = fcc_al_dict()
     structs_raw = _perturbed_set(al)
     pair = frozenset({"Al"})
     true_lj = {pair: {"epsilon": 0.40, "sigma": 2.5}}
     engine_true = PotentialEngine()
     from akitsushima.engine import LennardJonesPotential
-    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True))
+    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
     structs = _make_training_structures(engine_true, structs_raw, r_cut=6.0)
 
     bad_lj = {pair: {"epsilon": 0.10, "sigma": 2.9}}
@@ -253,14 +257,15 @@ def test_fit_potential_reduces_loss_from_bad_initial_guess(tmp_path):
     assert result["loss"] < initial_loss * 0.9
 
 
-def test_morse_param_set_round_trip():
+def test_morse_param_set_round_trip(small_cell_ok):
     al = fcc_al_dict()
     structs_raw = _perturbed_set(al, n=2)
     pair = frozenset({"Al"})
     true_morse = {pair: {"D_e": 0.5, "alpha": 1.2, "r0": 2.8}}
     engine_true = PotentialEngine()
     from akitsushima.engine import MorsePotential
-    engine_true.add(MorsePotential(true_morse, r_cut=6.0, shift=True))
+    engine_true.add(MorsePotential(true_morse, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
     structs = _make_training_structures(engine_true, structs_raw, r_cut=6.0)
 
     param_set = MorseParameterSet([pair], ["Al"], true_morse, r_cut=6.0, shift=True)
@@ -270,7 +275,7 @@ def test_morse_param_set_round_trip():
     assert loss < 1e-12
 
 
-def test_mie_param_set_round_trip():
+def test_mie_param_set_round_trip(small_cell_ok):
     """Phase 2: MieParameterSet with n/m fixed at their non-LJ-reducing
     values (14, 7), confirming the fixed hyperparameters actually flow
     through decode()/build_engine() into MiePotential correctly (not
@@ -281,7 +286,8 @@ def test_mie_param_set_round_trip():
     true_mie = {pair: {"epsilon": 0.4, "sigma": 2.6}}
     engine_true = PotentialEngine()
     from akitsushima.engine import MiePotential
-    engine_true.add(MiePotential(true_mie, n=14.0, m=7.0, r_cut=6.0, shift=True))
+    engine_true.add(MiePotential(true_mie, n=14.0, m=7.0, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
     structs = _make_training_structures(engine_true, structs_raw, r_cut=6.0)
 
     param_set = MieParameterSet([pair], ["Al"], true_mie, n=14.0, m=7.0,
@@ -292,7 +298,7 @@ def test_mie_param_set_round_trip():
     assert loss < 1e-12
 
 
-def test_yukawa_param_set_round_trip():
+def test_yukawa_param_set_round_trip(small_cell_ok):
     """Phase 2: YukawaParameterSet with a negative true A (attractive),
     confirming the signed (non-log-space) parameterisation round-trips
     correctly."""
@@ -302,7 +308,8 @@ def test_yukawa_param_set_round_trip():
     true_yukawa = {pair: {"A": -25.0}}
     engine_true = PotentialEngine()
     from akitsushima.engine import YukawaPotential
-    engine_true.add(YukawaPotential(true_yukawa, kappa=1.1, r_cut=6.0, shift=True))
+    engine_true.add(YukawaPotential(true_yukawa, kappa=1.1, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
     structs = _make_training_structures(engine_true, structs_raw, r_cut=6.0)
 
     param_set = YukawaParameterSet([pair], ["Al"], true_yukawa, kappa=1.1,
@@ -443,14 +450,15 @@ def test_load_potential_yukawa_preserves_kappa(tmp_path):
 # and must include the Coulomb contribution for ionic potentials.
 # ===========================================================================
 
-def test_evaluate_diagnostics_generic_uses_fitted_params_not_x0(tmp_path):
+def test_evaluate_diagnostics_generic_uses_fitted_params_not_x0(tmp_path, small_cell_ok):
     al = fcc_al_dict()
     structs_raw = _perturbed_set(al, n=2)
     pair = frozenset({"Al"})
     true_lj = {pair: {"epsilon": 0.40, "sigma": 2.5}}
     engine_true = PotentialEngine()
     from akitsushima.engine import LennardJonesPotential
-    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True))
+    engine_true.add(LennardJonesPotential(true_lj, r_cut=6.0, shift=True,
+    allow_minimum_image_violation=True))
     structs = _make_training_structures(engine_true, structs_raw, r_cut=6.0)
 
     bad_lj = {pair: {"epsilon": 0.10, "sigma": 2.9}}
@@ -472,13 +480,14 @@ def test_evaluate_diagnostics_generic_uses_fitted_params_not_x0(tmp_path):
     assert mae_true < 1e-8
 
 
-def test_evaluate_diagnostics_generic_includes_coulomb(tmp_path):
+def test_evaluate_diagnostics_generic_includes_coulomb(tmp_path, small_cell_ok):
     nacl = rocksalt_nacl_dict()
     structs_raw = _perturbed_set(nacl, n=2, magnitude=0.05)
     pair = frozenset({"Na", "Cl"})
     charges = {"Na": 1.0, "Cl": -1.0}
     true_buck = {pair: {"A": 1200.0, "rho": 0.32, "C": 25.0}}
-    engine_true = PotentialEngine().add(BuckinghamPotential(true_buck, r_cut=8.0))
+    engine_true = PotentialEngine().add(BuckinghamPotential(true_buck, r_cut=8.0,
+    allow_minimum_image_violation=True))
     structs = _make_training_structures(
         engine_true, structs_raw, r_cut=8.0, charges=charges)
 
@@ -749,7 +758,7 @@ def test_lightgbm_save_load_round_trip_without_pickle(tmp_path, monkeypatch):
 # wrapper equivalence
 # ===========================================================================
 
-def test_compute_all_thin_wrapper_matches_compute_all_general():
+def test_compute_all_thin_wrapper_matches_compute_all_general(small_cell_ok):
     nacl = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=7)
     pair = frozenset({"Na", "Cl"})
     charges = {"Na": 1.0, "Cl": -1.0}
@@ -758,7 +767,8 @@ def test_compute_all_thin_wrapper_matches_compute_all_general():
     e1, f1, s1 = compute_all(nacl["lattice"], nacl["positions"], nacl["atom_types"],
                               buck, charges, r_cut=8.0)
 
-    engine = PotentialEngine().add(BuckinghamPotential(buck, r_cut=8.0))
+    engine = PotentialEngine().add(BuckinghamPotential(buck, r_cut=8.0,
+    allow_minimum_image_violation=True))
     e2, f2, s2 = compute_all_general(nacl["lattice"], nacl["positions"],
                                       nacl["atom_types"], engine,
                                       charges=charges, r_cut=8.0)
@@ -768,7 +778,7 @@ def test_compute_all_thin_wrapper_matches_compute_all_general():
     assert np.allclose(s1, s2)
 
 
-def test_make_force_fn_buckingham_kind_and_engine():
+def test_make_force_fn_buckingham_kind_and_engine(small_cell_ok):
     pair = frozenset({"Na", "Cl"})
     charges = {"Na": 1.0, "Cl": -1.0}
     buck = {pair: {"A": 1200.0, "rho": 0.32, "C": 25.0}}
@@ -791,7 +801,8 @@ def test_make_force_fn_engine_kind_and_engine():
     pair = frozenset({"Al"})
     from akitsushima.engine import LennardJonesPotential
     engine = PotentialEngine().add(
-        LennardJonesPotential({pair: {"epsilon": 0.4, "sigma": 2.5}}, r_cut=6.0))
+        LennardJonesPotential({pair: {"epsilon": 0.4, "sigma": 2.5}}, r_cut=6.0,
+    allow_minimum_image_violation=True))
     fn = make_force_fn(engine)
     assert fn.kind == "engine"
     assert fn.engine is engine

@@ -118,7 +118,7 @@ def _finite_diff_cell_gradient(fn, lattice, positions, atom_types, delta=1e-5):
     return dEdh
 
 
-def test_generalised_force_cell_matches_finite_difference_dEdh():
+def test_generalised_force_cell_matches_finite_difference_dEdh(small_cell_ok):
     """Bug C regression: the 'generalized_force' cell-force branch must
     equal f_cell = -dE/dh, verified against a TRUE finite-difference
     oracle (not another hand-derived formula, which is exactly how the
@@ -1410,7 +1410,7 @@ def _asr_correct(H: np.ndarray, N: int) -> np.ndarray:
     return H_4d.reshape(N * 3, N * 3)
 
 
-def test_compute_ifc_matches_tsa_hessian_supercell_one():
+def test_compute_ifc_matches_tsa_hessian_supercell_one(small_cell_ok):
     """
     S2 regression: compute_ifc()'s finite-difference force-constant
     formula must include the same negative sign as
@@ -1485,7 +1485,7 @@ def test_debye_temperature_from_vsound_runs_without_attributeerror():
     assert np.isfinite(theta_D) and theta_D > 0.0
 
 
-def test_phonon_save_load_round_trip_preserves_atom_types(tmp_path):
+def test_phonon_save_load_round_trip_preserves_atom_types(tmp_path, small_cell_ok):
     """
     S11 regression: save_results() never wrote atom_types to ifc.npz, so
     load_ifc()'s d.get('atom_types', ['X', ...]) fallback always silently
