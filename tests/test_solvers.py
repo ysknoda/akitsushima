@@ -1929,3 +1929,54 @@ def test_save_best_records_a_real_best_for_every_method(method, tmp_path):
     assert result["best_energy"] <= result["energy"] + 1e-9, (
         f"{method}: best_energy {result['best_energy']:.9f} is HIGHER than "
         f"the returned energy {result['energy']:.9f}")
+
+
+@pytest.mark.slow
+def test_barostat_momentum_is_thermostatted(tmp_path):
+    """M2 regression: the barostat degree of freedom must be thermostatted.
+
+    The implementation was an undamped Andersen-Hoover barostat, not
+    MTTK, despite citing Martyna, Tuckerman, Tobias & Klein (1996): the
+    (d/N_f) 2 E_kin term in G_eps, the matching (1 + d/N_f) factor in the
+    velocity coupling, and any Nose-Hoover chain on p_eps were all
+    absent.  MTTK requires <p_eps^2 / W> = kT for the barostat's single
+    degree of freedom.
+
+    The oracle needs a system that is actually bound at the target
+    temperature -- with only first-shell interactions this LJ crystal's
+    cohesive energy is 0.0074 eV/atom against kT = 0.026 eV at 300 K, so
+    it sublimates and no equilibrium average means anything.  r_cut=5.0
+    on a 3x3x3 supercell reaches the second and third shells.  Measured:
+    2.0975 without the chain against 0.6889 with it, so the chain moves
+    the ratio 3.5x closer to 1.  It does not reach 1 exactly -- 2 ps of
+    production is only a few barostat correlation times for
+    tau_baro = 500 fs -- so the assertion is on the direction and
+    magnitude of the correction, not on equality.
+    """
+    fn = _lj_force_fn(r_cut=5.0)
+    al = _fcc_al_supercell(n=3)
+    lat_eq, frac_eq = _find_lj_equilibrium(fn, al, str(tmp_path / "eq"))
+
+    samples = []
+    orig = NPTSimulation._scale_step
+
+    def spy(self):
+        samples.append(self.p_eps ** 2 / self.W)
+        return orig(self)
+
+    with mock.patch.object(NPTSimulation, "_scale_step", spy):
+        NPTSimulation(lattice=lat_eq, positions=frac_eq @ lat_eq,
+                      atom_types=al["atom_types"], force_fn=fn, r_cut=5.0,
+                      timestep=0.5, n_steps=3000, equil_steps=1000,
+                      temperature=300.0, pressure=0.0, tau_nhc=100.0,
+                      tau_baro=500.0, traj_every=10**9, thermo_every=10**9,
+                      seed=42, verbose=False,
+                      output_dir=str(tmp_path / "npt")).run()
+
+    kT = K_B * 300.0
+    ratio = float(np.mean(samples[1000:])) / kT
+    # The unchained barostat measured 2.10 here.  Anything at or above
+    # 1.5 means the chain is not doing its job.
+    assert 0.3 < ratio < 1.5, (
+        f"<p_eps^2/W>/kT = {ratio:.4f}; the barostat momentum is not "
+        "being thermostatted")

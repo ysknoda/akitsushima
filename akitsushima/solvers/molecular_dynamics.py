@@ -1262,6 +1262,17 @@ class NPTSimulation(_BaseMDSimulation):
 
         self.W     = (self.n_dof + 3) * K_B * temperature * tau_baro**2
         self.p_eps = 0.0
+        # Nose-Hoover chain on the BAROSTAT momentum (MTTK requires one;
+        # without it p_eps is an undamped Andersen-Hoover degree of
+        # freedom and the volume performs large, essentially undamped
+        # oscillations instead of sampling the isothermal-isobaric
+        # distribution -- measured growing from ~700 to 134825 A^3 over
+        # 1 ps on 216-atom LJ starting at its own 0 K equilibrium).
+        # One degree of freedom, hence kT rather than n_dof*kT.
+        self.Q1_b   = K_B * temperature * tau_baro**2
+        self.Q2_b   = K_B * temperature * tau_baro**2
+        self.xi1_b  = 0.0;  self.xi2_b  = 0.0
+        self.vxi1_b = 0.0;  self.vxi2_b = 0.0
 
         self._tc = TimingCollector(enabled=timing)
         self._nl        = NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
@@ -1304,23 +1315,78 @@ class NPTSimulation(_BaseMDSimulation):
         # NHC PE  [eV]
         h_nhc_p = (self.n_dof * K_B * self.temperature * self.xi1
                    + K_B * self.temperature * self.xi2)
-        return ek + e_pot + self.P_ext * V + h_baro + h_nhc_k + h_nhc_p
+        # Barostat chain (1 DoF, so kT rather than n_dof kT)
+        kT      = K_B * self.temperature
+        h_bnhc  = (0.5 * self.Q1_b * self.vxi1_b**2
+                   + 0.5 * self.Q2_b * self.vxi2_b**2      # already eV
+                   + kT * self.xi1_b + kT * self.xi2_b)
+
+        return (ek + e_pot + self.P_ext * V + h_baro
+                + h_nhc_k + h_nhc_p + h_bnhc)
 
     # ------------------------------------------------------------------
     #  Barostat integration  (isotropic Andersen-Hoover half-step)
     # ------------------------------------------------------------------
 
+    def _nhc_baro_step(self) -> None:
+        """2-chain Nose-Hoover half-step acting on the barostat momentum.
+
+        Same propagator structure as :meth:`_BaseMDSimulation._nhc_step`,
+        but the thermostatted "kinetic energy" is the barostat's own,
+        ``p_eps**2 / W``, and it is a SINGLE degree of freedom -- so the
+        target is ``kT``, not ``n_dof kT``.
+
+        MTTK requires this chain; without it p_eps is undamped and the
+        volume oscillates without ever settling (see the note in
+        __init__).  It is also what makes the ``- (p_xi1_b/Q1_b) p_eps``
+        term of the p_eps equation of motion actually present.
+        """
+        dt = self.dt
+        Q1, Q2 = self.Q1_b, self.Q2_b
+        kT = K_B * self.temperature
+
+        e_baro = 0.5 * self.p_eps ** 2 / self.W
+        G1 = (2.0 * e_baro - kT) / Q1
+        G2 = (Q1 * self.vxi1_b ** 2 - kT) / Q2
+
+        self.vxi2_b += G2 * (dt * 0.25)
+
+        s_arg = float(np.clip(-self.vxi2_b * dt * 0.125, -350.0, 350.0))
+        sc    = np.exp(s_arg)
+        self.vxi1_b = sc * (sc * self.vxi1_b + G1 * dt * 0.25)
+
+        p_arg = float(np.clip(-self.vxi1_b * dt * 0.5, -350.0, 350.0))
+        self.p_eps *= np.exp(p_arg)
+
+        self.xi1_b += self.vxi1_b * dt * 0.5
+        self.xi2_b += self.vxi2_b * dt * 0.5
+
+        e_baro = 0.5 * self.p_eps ** 2 / self.W
+        G1 = (2.0 * e_baro - kT) / Q1
+        self.vxi1_b = sc * (sc * self.vxi1_b + G1 * dt * 0.25)
+
+        G2 = (Q1 * self.vxi1_b ** 2 - kT) / Q2
+        self.vxi2_b += G2 * (dt * 0.25)
+
     def _barostat_half_step(self, P_inst: float) -> None:
         """
         Half-step update of the barostat momentum p_eps.
 
-        Equation of motion:
-            xi_eps = 3 V (P_inst - P_ext) - xi1 p_eps
-        Symplectic approximation (xi1 coupling treated via NHC):
-            p_eps += 0.5 dt . 3 V (P_inst - P_ext)
+        Equation of motion (Martyna, Tuckerman, Tobias & Klein 1996,
+        isotropic cell, d = 3 dimensions, N_f = n_dof):
+
+            p_eps_dot = d V (P_inst - P_ext) + (d/N_f) 2 E_kin
+                        - (p_xi1_b / Q1_b) p_eps
+
+        The ``(d/N_f) 2 E_kin`` term is what makes the isotropic
+        barostat sample the correct distribution in a FINITE system; it
+        was missing, along with the matching ``(1 + d/N_f)`` factor in
+        _scale_step's velocity coupling and any thermostat on p_eps.
+        The chain coupling is applied separately by _nhc_baro_step.
         """
         V = self._volume()
-        G_eps = 3.0 * V * (P_inst - self.P_ext)   # [eV]
+        G_eps = (3.0 * V * (P_inst - self.P_ext)
+                 + (3.0 / self.n_dof) * 2.0 * self._kinetic_energy())  # [eV]
         self.p_eps += 0.5 * self.dt * G_eps
 
     def _scale_step(self) -> None:
@@ -1351,9 +1417,13 @@ class NPTSimulation(_BaseMDSimulation):
         self.lattice  = self.lattice * s    # scale all three axes equally
         self.positions = frac @ self.lattice
 
-        # Velocity rescaling from epsilon_dot coupling (MTTK):
-        # v_i -> v_i exp(-epsilon_dot dt)  (volume expansion slows particles)
-        self.velocities *= np.exp(-eps_dot * self.dt)
+        # Velocity rescaling from the epsilon_dot coupling.  The MTTK
+        # equation of motion carries a factor (1 + d/N_f), not 1 -- it is
+        # the partner of the (d/N_f) 2 E_kin term in _barostat_half_step,
+        # and the pair is what makes the finite-system distribution come
+        # out right.  Only the bare exponential was applied before.
+        self.velocities *= np.exp(-(1.0 + 3.0 / self.n_dof)
+                                  * eps_dot * self.dt)
 
     # ------------------------------------------------------------------
     #  Force evaluation
@@ -1455,8 +1525,9 @@ class NPTSimulation(_BaseMDSimulation):
                 P_inst  = self._pressure_inst(stress)   # [eV/A^3]
                 P_gpa   = P_inst * self._EV_ANG3_TO_GPA
 
-                # ---- 1. NHC half-step -----------------------------------
+                # ---- 1. NHC half-steps (particles, then barostat) -------
                 self._nhc_step()
+                self._nhc_baro_step()
 
                 # ---- 2. Barostat half-step (using current pressure) -----
                 self._barostat_half_step(P_inst)
@@ -1480,7 +1551,8 @@ class NPTSimulation(_BaseMDSimulation):
                 P_inst_new = self._pressure_inst(stress)
                 self._barostat_half_step(P_inst_new)
 
-                # ---- 8. NHC half-step ----------------------------------
+                # ---- 8. NHC half-steps (barostat, then particles) ------
+                self._nhc_baro_step()
                 self._nhc_step()
 
                 # ---- Optional velocity rescaling (early steps only) -----
