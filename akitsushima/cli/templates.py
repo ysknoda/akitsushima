@@ -102,13 +102,17 @@ relax:
   # GeometryOptimiser but were absent from this template, so the RFO
   # mode it offers above had none of its own settings reachable.
   max_displacement: 0.2              # A   per-component cap on one step
-  memory:        20                  # (s,y) pairs for lbfgs/diis/rmmdiis.
-                                     # rmmdiis is much faster at 3: its
-                                     # residual is projected out of the
-                                     # saved subspace, so the step length
-                                     # collapses as the subspace fills
-                                     # (measured 185 steps at 20 against
-                                     # 28 at 3 on the same system).
+  # memory:      20                  # (s,y) pairs for lbfgs/diis/rmmdiis.
+                                     # Left unset, the default is chosen
+                                     # per method: 3 for rmmdiis, 20 for
+                                     # the other two.  rmmdiis projects
+                                     # its residual out of the saved
+                                     # subspace, so the step length
+                                     # collapses as the subspace fills --
+                                     # measured 5-7x more steps at 20
+                                     # than at 3 -- while diis is
+                                     # slightly better at 20 and lbfgs is
+                                     # insensitive.
   uphill:        false               # true: Partitioned RFO, i.e. climb to
                                      # a saddle point instead of descending.
                                      # method: rfo only.

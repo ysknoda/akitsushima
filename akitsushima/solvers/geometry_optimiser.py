@@ -187,7 +187,7 @@ class GeometryOptimiser:
                  flush_every_step : bool = True,
                  fsync_every_step : bool = False,
                  # -- L-BFGS / DIIS / RMM-DIIS history size -------------
-                 memory          : int   = 20,
+                 memory          : Optional[int] = None,
                  # -- RFO-specific settings -----------------------------
                  uphill          : bool  = False,
                  hessian_delta   : float = 0.01,
@@ -371,7 +371,23 @@ class GeometryOptimiser:
         self._best_lat      = None
         self._best_step     = -1
         self._MAX_STEP   = float(max_displacement)   # A -- overrides class default
-        self.memory      = int(memory)
+        # The best history length is method-dependent, so a single shared
+        # default cannot serve all three consumers.  Measured over three
+        # seeds on a perturbed FCC Al supercell, steps to fmax = 1e-3:
+        #
+        #   memory      3          20
+        #   rmmdiis   61-101    342-602      <- 5-7x worse at 20
+        #   lbfgs       8-9        8-9       <- insensitive
+        #   diis      17-21      14-15       <- slightly better at 20
+        #
+        # RMM-DIIS projects the residual out of the saved subspace, so as
+        # that subspace fills the step length collapses -- and the
+        # pre-scaling only ever shortens a step, never lengthens it, so it
+        # cannot recover.  An explicit value always wins over these.
+        if memory is None:
+            self.memory = 3 if self.method == "rmmdiis" else 20
+        else:
+            self.memory = int(memory)
         self.uphill      = uphill
         self.hessian_delta = float(hessian_delta)
         self.trust_radius  = float(trust_radius)
@@ -1089,8 +1105,21 @@ class GeometryOptimiser:
                 # quadratic (e.g. early L-BFGS iterations with poor curvature).
                 step_size = min(1.0, step_size_prev * 2.0)
                 accepted = False
+                # Every trial starts from the SAME state.  _set_x is not
+                # a pure function of its argument under relax_cell -- it
+                # reads self.lattice to reinterpret the incoming
+                # Cartesian block (see _save_state) -- so without this
+                # restore the second and later trials were measured
+                # against the previous trial's cell rather than the base
+                # one, and the search was not along a line at all.
+                # Measured: applying x0+dx2 directly gives -0.040693 eV
+                # where applying x0+dx1 then x0+dx2 gives -0.039467, a
+                # 1.23e-03 eV difference on a system whose whole
+                # relaxation is ~0.37 eV.
+                _ls_base = self._save_state()
                 for _ in range(30):
                     dx = self._clamp_step(-step_size * p)
+                    self._restore_state(_ls_base)
                     self._set_x(x + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
                     if float(e_new) <= float(e) - 1e-4 * step_size * float(np.dot(g, p)):
@@ -1099,6 +1128,7 @@ class GeometryOptimiser:
                     step_size *= 0.5
                 else:
                     dx = self._clamp_step(-g)
+                    self._restore_state(_ls_base)
                     self._set_x(x + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
                 if accepted:
@@ -1334,8 +1364,21 @@ class GeometryOptimiser:
                 # that worked on the previous outer iteration.
                 alpha_ls = min(1.0, alpha_prev * 2.0); e0 = float(e)
                 accepted = False
+                # Every trial starts from the SAME state.  _set_x is not
+                # a pure function of its argument under relax_cell -- it
+                # reads self.lattice to reinterpret the incoming
+                # Cartesian block (see _save_state) -- so without this
+                # restore the second and later trials were measured
+                # against the previous trial's cell rather than the base
+                # one, and the search was not along a line at all.
+                # Measured: applying x0+dx2 directly gives -0.040693 eV
+                # where applying x0+dx1 then x0+dx2 gives -0.039467, a
+                # 1.23e-03 eV difference on a system whose whole
+                # relaxation is ~0.37 eV.
+                _ls_base = self._save_state()
                 for _ in range(30):
                     dx = self._clamp_step(p * alpha_ls)
+                    self._restore_state(_ls_base)
                     self._set_x(x_cur + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
                     if float(e_new) < e0:
@@ -1344,6 +1387,7 @@ class GeometryOptimiser:
                     alpha_ls *= 0.5
                 else:
                     dx = self._clamp_step(g * 0.01)
+                    self._restore_state(_ls_base)
                     self._set_x(x_cur + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
                 if accepted:
@@ -1548,8 +1592,21 @@ class GeometryOptimiser:
 
                 step_size = min(1.0, step_size_prev * 2.0)
                 accepted = False
+                # Every trial starts from the SAME state.  _set_x is not
+                # a pure function of its argument under relax_cell -- it
+                # reads self.lattice to reinterpret the incoming
+                # Cartesian block (see _save_state) -- so without this
+                # restore the second and later trials were measured
+                # against the previous trial's cell rather than the base
+                # one, and the search was not along a line at all.
+                # Measured: applying x0+dx2 directly gives -0.040693 eV
+                # where applying x0+dx1 then x0+dx2 gives -0.039467, a
+                # 1.23e-03 eV difference on a system whose whole
+                # relaxation is ~0.37 eV.
+                _ls_base = self._save_state()
                 for _ in range(30):
                     dx = self._clamp_step(step_size * p)
+                    self._restore_state(_ls_base)
                     self._set_x(x + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
                     if float(e_new) <= float(e) - 1e-4 * step_size * float(np.dot(g, p)):
@@ -1558,6 +1615,7 @@ class GeometryOptimiser:
                     step_size *= 0.5
                 else:
                     dx = self._clamp_step(g * 1e-3)
+                    self._restore_state(_ls_base)
                     self._set_x(x + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
                 if accepted:

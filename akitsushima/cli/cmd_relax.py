@@ -109,7 +109,9 @@ def cmd_relax(args) -> int:
         uphill       = rel_cfg.get("uphill",        False),
         trust_radius = rel_cfg.get("trust_radius",  0.3),
         hessian_delta = rel_cfg.get("hessian_delta", 0.01),
-        memory       = rel_cfg.get("memory",        20),
+        # None lets GeometryOptimiser pick per method (3 for rmmdiis,
+        # 20 otherwise); an explicit YAML value still wins.
+        memory       = rel_cfg.get("memory",        None),
         max_displacement = rel_cfg.get("max_displacement", 0.2),
         fix_cell     = rel_cfg.get("fix_cell",      None),
         flush_every_step = rel_cfg.get("flush_every_step", True),

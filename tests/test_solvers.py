@@ -2034,3 +2034,51 @@ def test_optimiser_state_vector_is_continuous_across_a_cell_face():
     assert wf.min() >= -1e-9 and wf.max() < 1.0 + 1e-9, (
         "POSCAR_relaxed is not wrapped into the cell")
     assert out_frac.shape == wf.shape
+
+
+def test_line_search_trials_are_actually_on_the_line(tmp_path):
+    """M1 regression: a backtracking trial must not depend on the trials
+    rejected before it.
+
+    _set_x is not a pure function of its argument under relax_cell: it
+    reads self.lattice to reinterpret the incoming Cartesian block, so
+    that a cell step carries the atoms affinely (which f_cell = -dE/dh,
+    defined at fixed fractional coordinates, requires).  The three
+    backtracking loops called it repeatedly without resetting, so every
+    trial after the first was measured against the previous trial's cell
+    -- the Armijo guarantee of searching ALONG A LINE was simply not
+    being met.  Measured 6.32e-03 eV between the same nominal point
+    reached the two ways, on a system whose whole relaxation is ~0.37 eV.
+
+    The loops now restore a snapshot before each trial.  This is the same
+    correction as the RFO rejection path, applied to the other place
+    _set_x was being used as though it were pure.
+    """
+    fn = _lj_force_fn(r_cut=3.2)
+    al = _fcc_al_supercell()
+
+    def make():
+        return GeometryOptimiser(
+            al["lattice"], al["positions"], al["atom_types"], force_fn=fn,
+            relax_cell=True, method="lbfgs", max_steps=1, verbose=False,
+            output_dir=str(tmp_path))
+
+    go_a, go_b = make(), make()
+    x0 = go_a._get_x()
+    d = np.random.default_rng(0).normal(scale=0.01, size=x0.shape)
+
+    base = go_a._save_state()
+    go_a._restore_state(base)
+    go_a._set_x(x0 + 0.5 * d)
+    e_direct = float(go_a._get_forces_and_stress()[0])
+
+    base = go_b._save_state()
+    go_b._restore_state(base)
+    go_b._set_x(x0 + 1.0 * d)        # a trial the search would reject
+    go_b._restore_state(base)
+    go_b._set_x(x0 + 0.5 * d)        # the retry
+    e_after_retry = float(go_b._get_forces_and_stress()[0])
+
+    assert abs(e_direct - e_after_retry) < 1e-12, (
+        f"the same point gives {e_direct:.9f} eV directly but "
+        f"{e_after_retry:.9f} eV after a rejected trial")

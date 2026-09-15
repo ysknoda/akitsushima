@@ -229,6 +229,26 @@ class _BaseMDSimulation:
                     f"{cls}: {name} must be > 0, got {tau}. The associated "
                     "mass is proportional to its square.")
 
+    def _warn_if_timestep_too_large_for_masses(self) -> None:
+        """Warn when the timestep is large relative to the fastest mode.
+
+        The stability limit is set by the shortest vibrational period in
+        the system, which scales as sqrt(m).  The default of 1.0 fs is
+        comfortable for the metals and for silicon, but an X-H stretch
+        has a period of roughly 10 fs, so 1 fs is only a tenth of it --
+        marginal, and nothing warned about it.  Mass is the signal
+        available here without a phonon calculation.
+        """
+        m_min = float(np.min(self.masses))
+        if m_min < 4.0 and self.dt > 0.5:
+            warnings.warn(
+                f"{self.__class__.__name__}: timestep {self.dt} fs with a "
+                f"lightest mass of {m_min:.3f} amu. An X-H stretch has a "
+                "period near 10 fs, so this is at most a tenth of the "
+                "fastest period and energy conservation will suffer; 0.25-0.5 "
+                "fs is the usual range for hydrogen-containing systems.",
+                UserWarning, stacklevel=3)
+
     @staticmethod
     def _compute_n_dof(N: int, fix_mask: np.ndarray) -> int:
         """
@@ -483,6 +503,7 @@ class NVTSimulation(_BaseMDSimulation):
         self.pppm_order     = pppm_order
 
         self.masses = self._build_masses(atom_types, masses)
+        self._warn_if_timestep_too_large_for_masses()
 
         self.velocities     = self._init_velocities()
         self._fix_mask = self._build_fix_mask(
@@ -556,9 +577,14 @@ class NVTSimulation(_BaseMDSimulation):
             self.lattice, self.positions, self.atom_types,
             neigh_list=self._nl)
 
-    def _write_xyz_frame(self, fh, step: int, e_pot: float) -> None:
+    def _write_trajectory_frame(self, fh) -> None:
         """
         Append one configuration to the open XDATCAR trajectory file.
+
+        Named for the format it writes.  It was _write_xyz_frame and took
+        `step` and `e_pot`, neither of which it used -- a leftover from an
+        XYZ writer that put them in the comment line.  XDATCAR has no
+        such field.
 
         NVT uses a fixed cell, so only the "Direct configuration="
         line and fractional coordinates are written per frame; the
@@ -720,7 +746,7 @@ class NVTSimulation(_BaseMDSimulation):
                     })
 
                 if is_prod and step % self.traj_every == 0:
-                    self._write_xyz_frame(traj_fh, step, e_pot)
+                    self._write_trajectory_frame(traj_fh)
 
                 # Push this step's output to disk for real-time
                 # monitoring during a long-running MD calculation.
@@ -940,6 +966,7 @@ class NVESimulation(_BaseMDSimulation):
         self.pppm_order     = pppm_order
 
         self.masses = self._build_masses(atom_types, masses)
+        self._warn_if_timestep_too_large_for_masses()
 
         self.velocities = velocities.copy() if velocities is not None \
                           else self._init_velocities(temperature)
@@ -976,7 +1003,7 @@ class NVESimulation(_BaseMDSimulation):
             self.lattice, self.positions, self.atom_types,
             neigh_list=self._nl)
 
-    def _write_xyz_frame(self, fh, step: int, e_pot: float) -> None:
+    def _write_trajectory_frame(self, fh) -> None:
         """Append one configuration to the open XDATCAR file (fixed cell)."""
         _write_xdatcar_frame(fh, self.positions, self.lattice,
                              self.atom_types, self._xdatcar_frame_idx,
@@ -1094,7 +1121,7 @@ class NVESimulation(_BaseMDSimulation):
                         print("  " + row)
 
                 if is_prod and step % self.traj_every == 0:
-                    self._write_xyz_frame(traj_fh, step, e_pot)
+                    self._write_trajectory_frame(traj_fh)
 
                 # Push this step's output to disk for real-time
                 # monitoring during a long-running MD calculation.
@@ -1316,6 +1343,7 @@ class NPTSimulation(_BaseMDSimulation):
         self.pppm_order     = pppm_order
 
         self.masses = self._build_masses(atom_types, masses)
+        self._warn_if_timestep_too_large_for_masses()
 
         self.velocities = self._init_velocities(temperature)
         # -- fix_atoms constraint mask -------------------------
@@ -1524,8 +1552,8 @@ class NPTSimulation(_BaseMDSimulation):
     #  Trajectory output
     # ------------------------------------------------------------------
 
-    def _write_xyz_frame(self, fh, step: int,
-                          e_pot: float, P_gpa: float) -> None:
+    def _write_trajectory_frame(self, fh, step: int,
+                                e_pot: float, P_gpa: float) -> None:
         """
         Append one configuration to the open XDATCAR file.
 
@@ -1679,7 +1707,7 @@ class NPTSimulation(_BaseMDSimulation):
                         print("  " + row)
 
                 if is_prod and step % self.traj_every == 0:
-                    self._write_xyz_frame(traj_fh, step, e_pot, P_gpa)
+                    self._write_trajectory_frame(traj_fh, step, e_pot, P_gpa)
 
                 # Push this step's output to disk for real-time
                 # monitoring during a long-running MD calculation.
