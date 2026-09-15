@@ -504,7 +504,11 @@ class GCMCMDSimulation(_BaseMDSimulation):
 
             # PBC wrap
             frac = self.positions @ inv_lat
+            # `frac -= np.floor(frac)` alone maps a tiny negative frac to
+            # exactly 1.0 in float64, which scipy's cKDTree rejects; see
+            # wrap_positions_into_cell.
             frac -= np.floor(frac)
+            frac[frac >= 1.0] = 0.0
             self.positions = frac @ self.lattice
 
             e_pot, forces, _ = self._get_forces()
@@ -1572,7 +1576,11 @@ class OSMMCSimulation(GCMCMDSimulation):
             self._ghost_vel  += 0.5 * dt * a_ghost
             self._ghost_pos  += dt * self._ghost_vel
             frac = self._ghost_pos @ inv_lat
+            # `frac -= np.floor(frac)` alone maps a tiny negative frac to
+            # exactly 1.0 in float64, which scipy's cKDTree rejects; see
+            # wrap_positions_into_cell.
             frac -= np.floor(frac)
+            frac[frac >= 1.0] = 0.0
             self._ghost_pos = frac @ self.lattice
 
             # Soft-core force on real atoms (half-step)

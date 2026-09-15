@@ -504,7 +504,11 @@ class NEBOptimiser:
                     # strictly within the box. Wrapping here matches the
                     # convention already used throughout GeometryOptimiser.
                     frac = pos @ inv_lat
+                    # `frac -= np.floor(frac)` alone maps a tiny negative frac to
+                    # exactly 1.0 in float64, which scipy's cKDTree rejects; see
+                    # wrap_positions_into_cell.
                     frac -= np.floor(frac)
+                    frac[frac >= 1.0] = 0.0
                     chain.images[k + 1] = frac @ chain.lattice
 
                 neb_f  = chain.evaluate()
