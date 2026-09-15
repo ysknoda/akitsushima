@@ -189,8 +189,15 @@ def test_variable_cell_relax_converges_from_sheared_cell():
     (non-orthogonal) starting cell must actually converge to a low-stress
     state, not diverge or stall -- an integration-level check that S1's
     fix is wired correctly into the FIRE dynamics."""
-    fn = _lj_force_fn()
-    al = fcc_al_dict()
+    # Cell size: r_cut + skin_width must stay under half the smallest
+    # perpendicular cell width.  The bare 4.05 A conventional FCC Al
+    # cell cannot host any useful cutoff, so use the same 2x2x2
+    # supercell + r_cut=3.2 pairing the MD tests below already use.
+    # Before GeometryOptimiser built a neighbour list at all this
+    # combination went unchecked, and these relax tests silently ran
+    # at r_cut=6.0 in a cell whose half-width is 2.02 A.
+    fn = _lj_force_fn(r_cut=3.2)
+    al = _fcc_al_supercell()
     lattice = al["lattice"] @ np.array([[1.0, 0.0, 0.0],
                                         [0.08, 1.0, 0.0],
                                         [0.0, 0.0, 1.0]])
@@ -237,8 +244,15 @@ def test_vasp_cell_scheme_drives_volume_in_correct_physical_direction():
     was already correct.) No code change was needed; this test exists
     purely to give this previously-untested branch permanent coverage.
     """
-    fn = _lj_force_fn()
-    al = fcc_al_dict()
+    # Cell size: r_cut + skin_width must stay under half the smallest
+    # perpendicular cell width.  The bare 4.05 A conventional FCC Al
+    # cell cannot host any useful cutoff, so use the same 2x2x2
+    # supercell + r_cut=3.2 pairing the MD tests below already use.
+    # Before GeometryOptimiser built a neighbour list at all this
+    # combination went unchecked, and these relax tests silently ran
+    # at r_cut=6.0 in a cell whose half-width is 2.02 A.
+    fn = _lj_force_fn(r_cut=3.2)
+    al = _fcc_al_supercell()
     N = len(al["positions"])
 
     lattice_eq, frac_eq = _find_lj_equilibrium(
@@ -275,7 +289,14 @@ def test_vasp_cell_scheme_drives_volume_in_correct_physical_direction():
 # ===========================================================================
 
 def test_relax_closes_file_handles_on_exception(tmp_path):
-    fn = _lj_force_fn()
+    # Cell size: r_cut + skin_width must stay under half the smallest
+    # perpendicular cell width.  The bare 4.05 A conventional FCC Al
+    # cell cannot host any useful cutoff, so use the same 2x2x2
+    # supercell + r_cut=3.2 pairing the MD tests below already use.
+    # Before GeometryOptimiser built a neighbour list at all this
+    # combination went unchecked, and these relax tests silently ran
+    # at r_cut=6.0 in a cell whose half-width is 2.02 A.
+    fn = _lj_force_fn(r_cut=3.2)
     call_count = [0]
 
     def flaky_fn(lattice, positions, atom_types, neigh_list=None):
@@ -285,7 +306,7 @@ def test_relax_closes_file_handles_on_exception(tmp_path):
         return fn(lattice, positions, atom_types, neigh_list=neigh_list)
 
     flaky_fn.r_cut = fn.r_cut
-    al = randomly_perturbed(fcc_al_dict(), magnitude=0.05, seed=1)
+    al = randomly_perturbed(_fcc_al_supercell(), magnitude=0.05, seed=1)
     go = GeometryOptimiser(al["lattice"], al["positions"], al["atom_types"],
                            force_fn=flaky_fn, method="fire", max_steps=500,
                            verbose=False, output_dir=str(tmp_path))

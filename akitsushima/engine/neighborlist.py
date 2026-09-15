@@ -37,6 +37,41 @@ def _minimum_image(rij: np.ndarray,
 _MAX_FRACTIONAL_MIN_IMAGE_DIST = np.sqrt(3.0) / 2.0
 
 
+def wrap_positions_into_cell(positions: np.ndarray,
+                            lattice: np.ndarray) -> np.ndarray:
+    """Wrap Cartesian ``positions`` into the ``[0, 1)`` fractional cell.
+
+    ``frac -= np.floor(frac)`` on its own is not sufficient.  For a
+    fractional coordinate just below zero -- say ``-1e-17``, which is what
+    an atom sitting exactly at ``frac = 0`` produces after any downward
+    displacement -- the subtraction evaluates ``1.0 + (-1e-17)``, which
+    rounds to exactly ``1.0`` in float64.  The atom lands on the far cell
+    face rather than inside the cell.
+
+    That matters because ``NeighbourList``'s periodic KD-tree backend hands
+    the coordinates to ``scipy.spatial.cKDTree(..., boxsize=...)``, which
+    requires every coordinate to be strictly below the box size and
+    otherwise raises "Some input data are greater than the size of the
+    periodic box."  The first atom of almost every POSCAR sits at
+    ``frac = 0``, so this is common rather than exotic.
+
+    Parameters
+    ----------
+    positions : (N, 3) Cartesian coordinates [A].
+    lattice   : (3, 3) row-vector lattice [A].
+
+    Returns
+    -------
+    (N, 3) Cartesian coordinates, every fractional component in ``[0, 1)``.
+    """
+    frac = positions @ np.linalg.inv(lattice)
+    frac -= np.floor(frac)
+    # Catch the components that rounded up to exactly 1.0 (and any that
+    # floating-point error pushed marginally past it).
+    frac[frac >= 1.0] = 0.0
+    return frac @ lattice
+
+
 def _cell_metrics(lattice: np.ndarray) -> Tuple[np.ndarray, float]:
     """
     Geometric reach limits of a periodic cell [A].
@@ -630,6 +665,13 @@ class NeighbourList:
         if is_ortho:
             box = np.diag(lattice)              # [Lx, Ly, Lz]
             pos_w = positions % box               # wrap to [0, box)
+            # `%` alone does not guarantee the half-open interval: for a
+            # coordinate just below zero (an atom at exactly 0 after any
+            # downward displacement gives ~-1e-38) the sum `x + box`
+            # rounds to exactly `box` in float64, and cKDTree rejects a
+            # coordinate equal to boxsize with "Some input data are
+            # greater than the size of the periodic box."
+            pos_w[pos_w >= box] = 0.0
             tree = _cKDTree(pos_w, boxsize=box)
             raw = tree.query_pairs(r_list, output_type='ndarray')  # (P,2)
 
@@ -645,6 +687,7 @@ class NeighbourList:
             # Fractional-space KD-tree
             frac = positions @ inv_lat
             frac -= np.floor(frac)                 # wrap to [0,1)
+            frac[frac >= 1.0] = 0.0                # see the note above
             tree = _cKDTree(frac, boxsize=1.0)
 
             # Fractional query radius.

@@ -29,7 +29,7 @@ from akitsushima.cli.cmd_phonon import cmd_phonon
 from akitsushima.cli.cmd_relax import cmd_relax
 from akitsushima.cli.cmd_tsa import cmd_tsa
 from akitsushima.cli.parser import _DISPATCH, build_parser
-from akitsushima.io.poscar import write_poscar
+from akitsushima.io.poscar import parse_poscar, write_poscar
 
 from conftest import fcc_al_dict, randomly_perturbed
 
@@ -57,6 +57,37 @@ def al_poscar(tmp_path):
 _LJ_POT = {"type": "LJ", "species": ["Al"],
           "params": {"epsilon": 0.4, "sigma": 2.5}, "r_cut": 5.0}
 
+# Same potential at a cutoff that actually fits a 2x2x2 FCC Al supercell:
+# NeighbourList requires r_cut + skin_width < half the smallest
+# perpendicular cell width, which is 4.05 A for that supercell.
+_LJ_POT_FITTED = {"type": "LJ", "species": ["Al"],
+                 "params": {"epsilon": 0.4, "sigma": 2.5}, "r_cut": 3.2}
+
+
+def _al_supercell_poscar(tmp_path, n=2, name="POSCAR"):
+    """Write an n x n x n FCC Al supercell POSCAR and return its path.
+
+    The bare 4.05 A conventional cell is too small to host any useful
+    cutoff.  Commands that drive a GeometryOptimiser (relax, and tsa via
+    its IRC relaxations) need this just as much as md does -- that only
+    became visible once GeometryOptimiser started building a neighbour
+    list, which is the one place the minimum-image precondition is
+    enforced.
+    """
+    base = fcc_al_dict()
+    lattice = base["lattice"] * n
+    positions, atom_types = [], []
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):
+                shift = np.array([i, j, k], dtype=float) @ base["lattice"]
+                positions.append(base["positions"] + shift)
+                atom_types.extend(base["atom_types"])
+    positions = np.concatenate(positions, axis=0)
+    poscar = tmp_path / name
+    write_poscar(str(poscar), lattice, positions, atom_types)
+    return poscar
+
 
 def test_dispatch_table_has_no_fitpot():
     """F1 regression: fitpot must be gone from the dispatch table."""
@@ -74,10 +105,11 @@ def test_parser_potential_choices_include_all_six():
         assert ns.potential == pot
 
 
-def test_cmd_relax_smoke(tmp_path, al_poscar):
+def test_cmd_relax_smoke(tmp_path):
+    poscar = _al_supercell_poscar(tmp_path)
     cfg = {
-        "structure": {"poscar": str(al_poscar)},
-        "potential": _LJ_POT,
+        "structure": {"poscar": str(poscar)},
+        "potential": _LJ_POT_FITTED,
         "relax": {"output_dir": str(tmp_path / "relax_out"),
                   "method": "fire", "fmax": 0.05, "max_steps": 100,
                   "verbose": False},
@@ -204,15 +236,16 @@ def test_cmd_neb_smoke(tmp_path):
 
 def test_cmd_tsa_smoke(tmp_path):
     """S6/S7/S22 regression coverage at the CLI level."""
-    al = fcc_al_dict()
+    poscar = _al_supercell_poscar(tmp_path, name="POSCAR_saddle")
+    st = parse_poscar(str(poscar))
     rng = np.random.default_rng(0)
-    pos = al["positions"] + rng.uniform(-0.05, 0.05, size=al["positions"].shape)
-    poscar = tmp_path / "POSCAR_saddle"
-    write_poscar(str(poscar), al["lattice"], pos, al["atom_types"])
+    pos = st["positions"] + rng.uniform(-0.05, 0.05,
+                                        size=st["positions"].shape)
+    write_poscar(str(poscar), st["lattice"], pos, st["atom_types"])
 
     cfg = {
         "structure": {"poscar": str(poscar)},
-        "potential": _LJ_POT,
+        "potential": _LJ_POT_FITTED,
         "tsa": {"output_dir": str(tmp_path / "tsa_out"), "delta": 0.01,
                "run_irc": True, "irc_delta": 0.05, "irc_max_steps": 30,
                "temperature": 300.0, "verbose": False},

@@ -8,6 +8,7 @@ Cell relaxation: the supercell matrix h and atomic positions are jointly
 optimised by treating the stress as the gradient of the enthalpy with
 respect to the strain tensor.
 """
+import inspect
 import os
 from collections import deque
 from typing import Callable, List, Optional
@@ -16,6 +17,8 @@ import numpy as np
 
 from ..constants import EV_ANG3_TO_GPA
 from ..engine.cell_gradient import cell_force_from_stress
+from ..engine.neighborlist import (NeighbourList,
+                                   wrap_positions_into_cell)
 from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
@@ -23,6 +26,24 @@ from ..utils.mpi import _mpi_rank
 from ..utils.timing import TimingCollector
 
 __all__ = ["GeometryOptimiser"]
+
+
+def _accepts_neigh_list(fn) -> bool:
+    """True when ``fn`` can be called with a ``neigh_list=`` keyword.
+
+    Every closure make_force_fn returns, and every potential's compute(),
+    takes one.  ESMCalculator.__call__ does not -- it resolves periodic
+    images through its own Green-function machinery, so it must be called
+    with the three positional arguments only.  Anything accepting **kwargs
+    is assumed to take it.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):       # C-implemented or unintrospectable
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "neigh_list" in params
 
 
 class GeometryOptimiser:
@@ -326,7 +347,23 @@ class GeometryOptimiser:
         self._force_fn, r_cut = _resolve_force_fn(
             force_fn, r_cut, buck_params, charges, ewald_alpha,
             coulomb_method, pppm_accuracy, pppm_mesh, pppm_order,
-            skin_width)
+            "GeometryOptimiser")
+        self.r_cut = float(r_cut)
+
+        # Verlet neighbour list.  This matters for more than speed:
+        # NeighbourList.build() is the only place the minimum-image
+        # precondition (r_cut + skin_width < half the smallest perpendicular
+        # cell width) is actually enforced, and check_and_rebuild() re-runs
+        # that check on every lattice change -- so a variable-cell relax
+        # that shrinks the cell past the limit now raises instead of
+        # silently returning wrong energies, forces and stresses.
+        #
+        # A force function that does not take a neigh_list argument
+        # (ESMCalculator is the one in this package) is driven without one:
+        # it does its own spatial bookkeeping, and imposing this list's
+        # precondition on it would reject cells it handles correctly.
+        self._nl = (NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
+                    if _accepts_neigh_list(self._force_fn) else None)
 
         if self.method not in ('fire', 'lbfgs', 'diis', 'rmmdiis', 'rfo', 'sd'):
             raise ValueError(
@@ -386,7 +423,12 @@ class GeometryOptimiser:
     # ------------------------------------------------------------------ #
 
     def _get_forces_and_stress(self):
-        return self._force_fn(self.lattice, self.positions, self.atom_types)
+        if self._nl is None:
+            return self._force_fn(self.lattice, self.positions,
+                                  self.atom_types)
+        self._nl.check_and_rebuild(self.lattice, self.positions)
+        return self._force_fn(self.lattice, self.positions, self.atom_types,
+                              neigh_list=self._nl)
 
     # ------------------------------------------------------------------ #
     #  Constraint helpers                                                  #
@@ -534,9 +576,8 @@ class GeometryOptimiser:
             frac   = self.positions @ np.linalg.inv(self.lattice)
             self.lattice   += d_cell
             self.positions  = frac @ self.lattice
-        frac = self.positions @ np.linalg.inv(self.lattice)
-        frac -= np.floor(frac)
-        self.positions = frac @ self.lattice
+        self.positions = wrap_positions_into_cell(self.positions,
+                                                  self.lattice)
 
     def _clamp_step(self, step: np.ndarray) -> np.ndarray:
         """
@@ -574,9 +615,8 @@ class GeometryOptimiser:
             frac = self.positions @ np.linalg.inv(self.lattice)
             self.lattice   = x[n_ion:].reshape(3, 3).copy()
             self.positions = frac @ self.lattice
-        frac = self.positions @ np.linalg.inv(self.lattice)
-        frac -= np.floor(frac)
-        self.positions = frac @ self.lattice
+        self.positions = wrap_positions_into_cell(self.positions,
+                                                  self.lattice)
 
     # ------------------------------------------------------------------ #
     #  Common run entry-point                                              #

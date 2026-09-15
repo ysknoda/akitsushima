@@ -75,11 +75,19 @@ def _relaxed_lj_fcc_al():
     """A genuinely-relaxed (near-zero-stress) LJ FCC Al structure --
     shared setup for both elastic-constant tests below, since a nonzero
     starting stress would bias the linear stress-strain fit. Uses a
-    n=3 supercell (see module docstring) so r_cut=6.0 stays comfortably
+    n=3 supercell (see module docstring).  r_cut is 5.0 rather than 6.0
+    for two reasons that only became visible once GeometryOptimiser
+    started building a neighbour list.  First, the bound NeighbourList
+    enforces is on r_cut + skin_width, not r_cut alone, so 6.0 + 0.5
+    already exceeds the unrelaxed cell's 6.075 A half-width.  Second,
+    this test RELAXES the cell before straining it, and the relaxed cell
+    shrinks to 11.9955 A (half-width 5.9978 A) -- so even 5.5 + 0.5
+    lands 0.0022 A over the line at the point where it matters.
+    5.0 + 0.5 = 5.5 leaves real headroom and keeps
     below half the shortest cell length."""
     engine = PotentialEngine().add(
         LennardJonesPotential({frozenset({"Al"}): {"epsilon": 0.4, "sigma": 2.5}},
-                              r_cut=6.0, shift=True))
+                              r_cut=5.0, shift=True))
     fn = make_force_fn(engine)
     al = _fcc_al_supercell(n=3)
     go = GeometryOptimiser(al["lattice"], al["positions"], al["atom_types"],
@@ -173,7 +181,7 @@ def test_two_instances_get_distinct_scratch_dirs(tmp_path):
 
     engine = PotentialEngine().add(
         LennardJonesPotential({frozenset({"Al"}): {"epsilon": 0.4, "sigma": 2.5}},
-                              r_cut=6.0, shift=True))
+                              r_cut=5.0, shift=True))
     fn = make_force_fn(engine)
     al = _fcc_al_supercell(n=3)
 
