@@ -557,3 +557,62 @@ def test_lj_on_hexagonal_cell_matches_neighbourless_evaluation(backend):
     assert e_nl == pytest.approx(e_exact, abs=1e-10)
     assert np.max(np.abs(f_nl - f_exact)) < 1e-10
     assert np.max(np.abs(s_nl - s_exact)) < 1e-12
+
+
+def test_rebuild_criterion_survives_a_pbc_wrap_and_a_deforming_cell():
+    """The skin must still buy something for an atom on a cell face, and
+    under a cell that changes every step.
+
+    Two separate defects met in check_and_rebuild.  The non-affine
+    displacement was measured as max|positions - ref| in raw Cartesian
+    coordinates, but the MD and relax loops PBC-wrap every step, so one
+    atom oscillating around a face appeared to jump a whole lattice
+    vector each step -- taking an NVE run from 43 rebuilds in 501 steps
+    to 501.  And any lattice change at all forced a rebuild, so NPT,
+    which changes the cell every step, rebuilt on 99.4% of them.
+
+    The replacement keeps the identical safety margin when the cell does
+    not deform: sigma_min = 1 reduces the test to d_max < skin/2.  It is
+    a correction to how d_max is measured, not a loosening.
+    """
+    # r_cut + skin = 4.2, so the cell must be wider than 8.4 A.
+    a = 12.0
+    lattice = np.eye(3) * a
+    rng = np.random.default_rng(0)
+    pos = rng.uniform(0.0, a, size=(40, 3))
+    pos[0] = [0.0, 0.3 * a, 0.3 * a]          # exactly on a face
+
+    nl = NeighbourList(r_cut=3.2, skin_width=1.0)
+    nl.build(lattice, pos)
+
+    # An atom stepping just across the face and back must not look like
+    # motion of a whole lattice vector.
+    rebuilds = 0
+    p = pos.copy()
+    for k in range(20):
+        p[0, 0] = -1e-9 if k % 2 else 1e-9
+        p[0, 0] %= a
+        rebuilds += int(nl.check_and_rebuild(lattice, p))
+    assert rebuilds == 0, (
+        f"a PBC wrap forced {rebuilds} rebuilds; the skin is being wasted")
+
+    # Cell deformation.  Expansion alone can never invalidate the list:
+    # it only pushes separations apart, so a pair that was outside
+    # r_list cannot reach r_cut.  Compression can, and must trigger a
+    # rebuild once sigma_min * r_list drops to r_cut -- here at
+    # sigma_min = 3.2 / 4.2 = 0.762.
+    nl2 = NeighbourList(r_cut=3.2, skin_width=1.0)
+    nl2.build(lattice, pos)
+    assert not nl2.check_and_rebuild(lattice * 1.5, pos * 1.5), (
+        "an expansion forced a rebuild it cannot need")
+    nl3 = NeighbourList(r_cut=3.2, skin_width=1.0)
+    nl3.build(lattice, pos)
+    assert not nl3.check_and_rebuild(lattice * 0.99, pos * 0.99)
+    # 0.75 * 4.2 = 3.15 < 3.2 triggers, and the compressed cell is still
+    # 9.0 A wide, so the rebuild it asks for is itself legal.  (0.70
+    # also triggers, but the 8.4 A cell it lands in cannot host
+    # r_list = 4.2, so build() rightly raises instead of returning.)
+    nl4 = NeighbourList(r_cut=3.2, skin_width=1.0)
+    nl4.build(lattice, pos)
+    assert nl4.check_and_rebuild(lattice * 0.75, pos * 0.75), (
+        "a compression past sigma_min = 0.762 did not trigger a rebuild")

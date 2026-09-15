@@ -10,6 +10,8 @@ Force      : eV/A  ->  amu.A/fs^2  via EV_ANG_TO_AMU_ANG_FS2
 import os
 from typing import Callable, List, Optional, Tuple
 
+import warnings
+
 import numpy as np
 
 from ..constants import ATOMIC_MASS, EV_ANG3_TO_GPA, EV_ANG_TO_AMU_ANG_FS2, K_B
@@ -178,6 +180,55 @@ class _BaseMDSimulation:
         return np.zeros((N, 3), dtype=bool)
 
     # ------------------------------------------------------------------ #
+    def _validate_md_inputs(self, *, timestep, n_steps, equil_steps,
+                            traj_every, thermo_every, temperature=None,
+                            tau_nhc=None, tau_baro=None) -> None:
+        """Reject settings that cannot produce a meaningful trajectory.
+
+        None of these were checked.  ``thermo_every = 0`` or
+        ``traj_every = 0`` raised ZeroDivisionError from ``step %
+        self.thermo_every`` partway into the run; ``temperature = 0`` or
+        ``tau_nhc = 0`` made ``Q1 = 0``, so G1 became nan and the run
+        finished silently producing NaN; and a negative ``timestep`` ran
+        to completion with time flowing backwards and reported a
+        plausible-looking mean temperature.
+        """
+        cls = self.__class__.__name__
+        if not (timestep > 0.0):
+            raise ValueError(f"{cls}: timestep must be > 0, got {timestep}.")
+        vrs = getattr(self, "velocity_rescale_steps", 0)
+        if vrs > equil_steps:
+            # Direct velocity rescaling is a hard projection onto the
+            # target temperature, not canonical sampling.  Applied past
+            # equil_steps it lands on PRODUCTION frames and biases every
+            # average taken from them.  Nothing tied the two together;
+            # the shipped templates happen to set them equal.
+            warnings.warn(
+                f"{cls}: velocity_rescale_steps ({vrs}) exceeds equil_steps "
+                f"({equil_steps}), so direct velocity rescaling will be "
+                "applied to production frames. That is not canonical "
+                "sampling and will bias the averages; keep it at or below "
+                "equil_steps.", UserWarning, stacklevel=3)
+        if n_steps < 0 or equil_steps < 0:
+            raise ValueError(
+                f"{cls}: n_steps and equil_steps must be >= 0, got "
+                f"{n_steps} and {equil_steps}.")
+        if traj_every <= 0 or thermo_every <= 0:
+            raise ValueError(
+                f"{cls}: traj_every and thermo_every must be >= 1 (they are "
+                f"used as `step % every`), got {traj_every} and "
+                f"{thermo_every}. Use a large value to disable output.")
+        if temperature is not None and not (temperature > 0.0):
+            raise ValueError(
+                f"{cls}: temperature must be > 0, got {temperature}. The "
+                "thermostat mass is proportional to it, so 0 gives a "
+                "division by zero and then NaN.")
+        for name, tau in (("tau_nhc", tau_nhc), ("tau_baro", tau_baro)):
+            if tau is not None and not (tau > 0.0):
+                raise ValueError(
+                    f"{cls}: {name} must be > 0, got {tau}. The associated "
+                    "mass is proportional to its square.")
+
     @staticmethod
     def _compute_n_dof(N: int, fix_mask: np.ndarray) -> int:
         """
@@ -330,7 +381,10 @@ class NVTSimulation(_BaseMDSimulation):
     """
     NVT molecular dynamics with Nose-Hoover chain (NHC) thermostat.
 
-    Integrator  : velocity Verlet + NHC of length 2 (Suzuki-Yoshida, 4 sub-steps)
+    Integrator  : velocity Verlet + NHC of length 2.  _nhc_step applies a
+                  SINGLE symmetric sub-step, not a 4-sub-step
+                  Suzuki-Yoshida decomposition -- its own docstring
+                  explains that the negative SY weight is avoided.
     Reference   : Martyna, Tobias & Klein, J. Chem. Phys. 97, 2635 (1992)
 
     Parameters
@@ -350,7 +404,7 @@ class NVTSimulation(_BaseMDSimulation):
 
     Output files
     ------------
-    trajectory.xyz   -- multi-frame XYZ with energy and temperature in comment
+    XDATCAR_nvt      -- every traj_every-th frame, VASP XDATCAR format
     thermo.log       -- step / time[ps] / E_pot / E_kin / E_tot / T / H_NHC
     POSCAR_final_MD  -- last frame as VASP 5 POSCAR
     """
@@ -393,6 +447,12 @@ class NVTSimulation(_BaseMDSimulation):
         self.atom_types     = list(atom_types)
         self.r_cut          = r_cut
         self.temperature    = temperature
+        self._validate_md_inputs(
+            timestep=timestep, n_steps=n_steps,
+            equil_steps=equil_steps, traj_every=traj_every,
+            thermo_every=thermo_every,
+            temperature=temperature,
+           tau_nhc=tau_nhc)
         self.dt             = timestep
         self.n_steps        = n_steps
         self.tau_nhc        = tau_nhc
@@ -804,7 +864,7 @@ class NVESimulation(_BaseMDSimulation):
 
     Output files
     ------------
-    trajectory.xyz   -- multi-frame XYZ
+    XDATCAR_nve      -- every traj_every-th frame, VASP XDATCAR format
     thermo.log       -- Step / Time(ps) / E_pot / E_kin / E_tot / T / dE_drift
     POSCAR_final_NVE -- final structure in VASP 5 format
     """
@@ -848,6 +908,11 @@ class NVESimulation(_BaseMDSimulation):
         self.positions      = positions.copy()
         self.atom_types     = list(atom_types)
         self.r_cut          = r_cut
+        self._validate_md_inputs(
+            timestep=timestep, n_steps=n_steps,
+            equil_steps=equil_steps, traj_every=traj_every,
+            thermo_every=thermo_every,
+            temperature=None)   # NVE: 0 K start is legal
         self.dt             = timestep
         self.n_steps        = n_steps
         self.equil_steps    = equil_steps
@@ -1126,8 +1191,17 @@ class NPTSimulation(_BaseMDSimulation):
 
     Unit notes
     ----------
-    p_V  [amu.A^3/fs]  --- conjugate momentum to volume V [A^3]
-    W    [amu.A^6]     --- barostat mass; epsilon_dot = p_V / W  [A^3/fs / A^3] = [fs^-1]
+    p_eps [eV.fs]      --- barostat momentum, conjugate to the strain
+                           variable epsilon (NOT to the volume directly)
+    W     [eV.fs^2]    --- barostat mass, W = (n_dof + 3) k_B T tau_baro^2,
+                           so epsilon_dot = p_eps / W is [eV.fs]/[eV.fs^2]
+                           = [fs^-1]
+
+    (These lines used to read p_V [amu.A^3/fs] and W [amu.A^6], with the
+    bracket arithmetic on the second line derived from those.  The
+    implementation was always dimensionally consistent; only the
+    annotation was wrong -- the barostat never enters the amu basis that
+    the particle kinetic energy uses.)
     Pressure          --- input in GPa; stored internally in eV/A^3
                         (1 eV/A^3 = 160.2176621 GPa)
 
@@ -1152,7 +1226,8 @@ class NPTSimulation(_BaseMDSimulation):
 
     Output files
     ------------
-    trajectory.xyz   -- multi-frame XYZ (cell vectors in comment line)
+    XDATCAR_npt      -- every traj_every-th frame, VASP XDATCAR format
+                        (full header per frame, since the cell changes)
     thermo.log       -- Step / Time / E_pot / E_kin / T / P_inst / V / H_NPT
     POSCAR_final_NPT -- final structure with updated cell
     md_npt_timeseries.png (if matplotlib available)
@@ -1207,6 +1282,12 @@ class NPTSimulation(_BaseMDSimulation):
         self.temperature  = temperature
         self.pressure_gpa = pressure
         self.P_ext        = pressure / self._EV_ANG3_TO_GPA
+        self._validate_md_inputs(
+            timestep=timestep, n_steps=n_steps,
+            equil_steps=equil_steps, traj_every=traj_every,
+            thermo_every=thermo_every,
+            temperature=temperature,
+           tau_nhc=tau_nhc, tau_baro=tau_baro)
         self.dt           = timestep
         self.n_steps      = n_steps
         self.equil_steps  = equil_steps
@@ -1238,7 +1319,11 @@ class NPTSimulation(_BaseMDSimulation):
 
         self.velocities = self._init_velocities(temperature)
         # -- fix_atoms constraint mask -------------------------
-        # fix_atoms : (N, 3) bool array.  True = frozen (never displaced).
+        # fix_atoms : (N, 3) bool array.  True = frozen.  Under NPT that
+        # means the FRACTIONAL coordinate is frozen: the barostat's
+        # affine rescale still moves the atom in Cartesian space with
+        # the cell, which is the conventional variable-cell meaning but
+        # is not "never displaced" as the NVT/NVE note says.
         # Equivalent to VASP Selective Dynamics 'F T T' etc.
         self._fix_mask = self._build_fix_mask(
             self.N, fix_atoms, self.__class__.__name__)

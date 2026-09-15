@@ -120,7 +120,9 @@ def test_cmd_md_npt_smoke(tmp_path):
         "potential": _LJ_POT_FITTED,
         "md": {"ensemble": "npt", "output_dir": str(tmp_path / "npt_out"),
               "temperature": 300.0, "pressure": 0.0, "timestep": 0.5,
-              "n_steps": 20, "equil_steps": 0, "tau_nhc": 100.0,
+              # equil_steps >= velocity_rescale_steps: rescaling past
+              # equilibration lands on production frames and warns.
+              "n_steps": 20, "equil_steps": 5, "tau_nhc": 100.0,
               "tau_baro": 1000.0, "velocity_rescale_steps": 5,
               "traj_every": 100, "thermo_every": 100, "verbose": False},
     }

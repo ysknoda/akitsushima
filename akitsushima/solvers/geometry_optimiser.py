@@ -717,8 +717,23 @@ class GeometryOptimiser:
     # ------------------------------------------------------------------ #
 
     def _open_log(self, extra_col: str = "metric"):
-        os.makedirs(self.output_dir, exist_ok=True)
-        log_path = os.path.join(self.output_dir, "relax.log")
+        # Rank guard.  Every MD solver in this package already routes its
+        # trajectory through `traj_path if _mpi_rank == 0 else os.devnull`
+        # and gates its prints on rank 0; GeometryOptimiser did neither,
+        # so under `mpirun -np N` all N ranks opened relax.log,
+        # XDATCAR_relax, POSCAR_relaxed and POSCAR_best in "w" mode on the
+        # same paths and printed the banner N times.  All ranks write
+        # byte-identical content, so this showed up as N-fold I/O and
+        # duplicated console output rather than corruption -- but the
+        # interleaving is only safe by accident, and flush_every_step
+        # (the default) multiplies the traffic.
+        self._is_root = (_mpi_rank == 0)
+        if self.verbose and not self._is_root:
+            self.verbose = False
+        if self._is_root:
+            os.makedirs(self.output_dir, exist_ok=True)
+        log_path = (os.path.join(self.output_dir, "relax.log")
+                    if self._is_root else os.devnull)
         header = (f"{'Step':>6}  {'Energy(eV)':>16}  "
                   f"{'Fmax(eV/A)':>12}  {'Pmax(GPa)':>10}  "
                   f"{extra_col:>12}")
@@ -737,7 +752,8 @@ class GeometryOptimiser:
         #                     before the optimisation loop starts, and
         #                     each step only appends a
         #                     "Direct configuration=" block.
-        xdatcar_path = os.path.join(self.output_dir, "XDATCAR_relax")
+        xdatcar_path = (os.path.join(self.output_dir, "XDATCAR_relax")
+                        if self._is_root else os.devnull)
         self._xdatcar_fh = open(xdatcar_path, "w")
         self._xdatcar_frame_idx = 1
         # Bug-fix note (code-check follow-up): the S9 fix wraps every
@@ -847,7 +863,8 @@ class GeometryOptimiser:
 
     def _finalise(self, e, forces, stress, converged, n_steps):
         status = "CONVERGED" if converged else "NOT CONVERGED (max steps reached)"
-        print(f"\n  Geometry optimisation -- {status}")
+        if self._is_root:
+            print(f"\n  Geometry optimisation -- {status}")
 
         # Save the true final positions/lattice BEFORE any restoration.
         # This is what POSCAR_relaxed will contain regardless of save_best.
@@ -861,39 +878,44 @@ class GeometryOptimiser:
         if self.save_best and self._best_pos is not None:
             best_is_different = (self._best_step != n_steps - 1)
             if best_is_different:
-                print(f"  Best energy found at step {self._best_step}: "
-                      f"{self._best_e:.6f} eV")
-                print(f"  (Final step energy was {e_final:.6f} eV; "
-                      f"best structure saved to POSCAR_best)")
+                if self._is_root:
+                    print(f"  Best energy found at step {self._best_step}: "
+                          f"{self._best_e:.6f} eV")
+                    print(f"  (Final step energy was {e_final:.6f} eV; "
+                          f"best structure saved to POSCAR_best)")
                 # Restore best into self for the force re-evaluation and
                 # for the returned result dict (callers receive best).
+                # NOT rank-guarded: _get_forces_and_stress is collective
+                # under MPI, so every rank must reach it.
                 self.positions = self._best_pos
                 self.lattice   = self._best_lat
                 e, forces, stress = self._get_forces_and_stress()
-            else:
+            elif self._is_root:
                 print(f"  Best energy coincides with final step "
                       f"({self._best_e:.6f} eV)")
 
             best_out = os.path.join(self.output_dir, "POSCAR_best")
             fa_out = (self._fix_ions.reshape(self.N, 3)
                       if np.any(self._fix_ions) else None)
-            write_poscar(best_out, self.lattice, self.positions,
-                         self.atom_types,
-                         title="Best-energy structure (akitsushima.py)",
-                         fix_atoms=fa_out)
-            print(f"  Best structure written to {best_out}")
+            if self._is_root:
+                write_poscar(best_out, self.lattice, self.positions,
+                             self.atom_types,
+                             title="Best-energy structure (akitsushima.py)",
+                             fix_atoms=fa_out)
+                print(f"  Best structure written to {best_out}")
 
-        print(f"  Final energy : {e_final:.6f} eV")
-        print(f"  Final Fmax   : {np.max(np.abs(forces)):.4f} eV/A")
         # POSCAR_relaxed always contains the LAST step structure,
         # regardless of whether save_best is active.
         out = os.path.join(self.output_dir, "POSCAR_relaxed")
         fa_out = (self._fix_ions.reshape(self.N, 3)
                   if np.any(self._fix_ions) else None)
-        write_poscar(out, final_lat, final_pos,
-                     self.atom_types, title="Relaxed by akitsushima.py",
-                     fix_atoms=fa_out)
-        print(f"  Relaxed structure written to {out}")
+        if self._is_root:
+            print(f"  Final energy : {e_final:.6f} eV")
+            print(f"  Final Fmax   : {np.max(np.abs(forces)):.4f} eV/A")
+            write_poscar(out, final_lat, final_pos,
+                         self.atom_types, title="Relaxed by akitsushima.py",
+                         fix_atoms=fa_out)
+            print(f"  Relaxed structure written to {out}")
         return {
             "energy"    : float(e),
             "lattice"   : self.lattice.copy(),
@@ -928,17 +950,21 @@ class GeometryOptimiser:
             g = self._generalised_force(forces, stress)
             e_prev = None
 
-            converged = False; step = 0
+            converged = False
+            # -1 so that _finalise(step + 1) reports 0 steps when the
+            # loop body never runs (max_steps = 0).  It used to start
+            # at 0 and report 1 step for a run that did nothing, which
+            # also fed _finalise's best_is_different comparison.
+            step = -1
             for step in range(self.max_steps):
                 self._tc.start("step")  # timing
-                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
-                                           f"{dt:.4f}")
-                self._tc.lap("step")   # timing
-                self._update_best(e, step)
-                if self._check_converged(fmax_v, stress, e, e_prev):
-                    converged = True; break
-                e_prev = e
-
+                # The FIRE dt/alpha update is applied BEFORE the log row.
+                # It used to come after, so the dt column reported the
+                # value entering the step rather than the one the step
+                # actually used -- step 0 logged 0.1000 while moving with
+                # 0.0500, because P = 0 on the first step takes the decay
+                # branch.  The log contradicted the template's own
+                # description of the decay.
                 P = np.dot(v, g)
                 g_norm = np.linalg.norm(g); v_norm = np.linalg.norm(v)
                 if g_norm > 1e-12:
@@ -952,8 +978,25 @@ class GeometryOptimiser:
                     v = np.zeros(ndof); n_pos = 0
                     dt *= self._F_DEC; alpha = self._ALPHA_START
 
+                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
+                                           f"{dt:.4f}")
+                self._tc.lap("step")   # timing
+                self._update_best(e, step)
+                if self._check_converged(fmax_v, stress, e, e_prev):
+                    converged = True; break
+                e_prev = e
+
                 v += 0.5 * dt * g
-                disp = self._clamp_step(dt * v)
+                raw  = dt * v
+                disp = self._clamp_step(raw)
+                # Keep the fictitious velocity consistent with the step
+                # actually taken.  When _clamp_step shortens the
+                # displacement, v used to keep its full magnitude and go
+                # on being integrated, so the FIRE dynamics carried a
+                # velocity the trajectory never had.
+                raw_max = float(np.max(np.abs(raw)))
+                if raw_max > 1e-30:
+                    v *= float(np.max(np.abs(disp))) / raw_max
                 self._apply_generalised_displacement(disp)
                 e, forces, stress = self._get_forces_and_stress()
                 g = self._generalised_force(forces, stress)
@@ -989,7 +1032,12 @@ class GeometryOptimiser:
             s_hist : deque = deque(maxlen=self.memory)
             y_hist : deque = deque(maxlen=self.memory)
 
-            converged = False; step = 0
+            converged = False
+            # -1 so that _finalise(step + 1) reports 0 steps when the
+            # loop body never runs (max_steps = 0).  It used to start
+            # at 0 and report 1 step for a run that did nothing, which
+            # also fed _finalise's best_is_different comparison.
+            step = -1
             step_size_prev = 1.0   # warm-start guess, updated after each accepted step
             e_prev = None
             for step in range(self.max_steps):
@@ -1101,7 +1149,12 @@ class GeometryOptimiser:
             x_buf : deque = deque(maxlen=self.memory)
             e_buf : deque = deque(maxlen=self.memory)   # error = residual = -force
 
-            converged = False; step = 0
+            converged = False
+            # -1 so that _finalise(step + 1) reports 0 steps when the
+            # loop body never runs (max_steps = 0).  It used to start
+            # at 0 and report 1 step for a run that did nothing, which
+            # also fed _finalise's best_is_different comparison.
+            step = -1
             e_prev = None
             for step in range(self.max_steps):
                 self._tc.start("step")  # timing
@@ -1211,7 +1264,12 @@ class GeometryOptimiser:
             x_buf : List[np.ndarray] = []
             r_buf : List[np.ndarray] = []
 
-            converged = False; step = 0
+            converged = False
+            # -1 so that _finalise(step + 1) reports 0 steps when the
+            # loop body never runs (max_steps = 0).  It used to start
+            # at 0 and report 1 step for a run that did nothing, which
+            # also fed _finalise's best_is_different comparison.
+            step = -1
             e_prev = None
             alpha_prev = 1.0   # warm-start guess, updated after each accepted step
             for step in range(self.max_steps):
@@ -1339,7 +1397,12 @@ class GeometryOptimiser:
 
             trust = self.trust_radius
             x_prev = x.copy(); g_prev = g.copy()
-            converged = False; step = 0
+            converged = False
+            # -1 so that _finalise(step + 1) reports 0 steps when the
+            # loop body never runs (max_steps = 0).  It used to start
+            # at 0 and report 1 step for a run that did nothing, which
+            # also fed _finalise's best_is_different comparison.
+            step = -1
             e_prev = None
 
             for step in range(self.max_steps):
@@ -1441,7 +1504,12 @@ class GeometryOptimiser:
             e, forces, stress = self._get_forces_and_stress()
             g = self._generalised_force(forces, stress)   # descent direction = +g
 
-            converged = False; step = 0
+            converged = False
+            # -1 so that _finalise(step + 1) reports 0 steps when the
+            # loop body never runs (max_steps = 0).  It used to start
+            # at 0 and report 1 step for a run that did nothing, which
+            # also fed _finalise's best_is_different comparison.
+            step = -1
             step_size_prev = 1.0
             e_prev = None
             for step in range(self.max_steps):

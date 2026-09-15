@@ -137,7 +137,10 @@ def cmd_md(args) -> int:
     # --- Results summary (rank 0 only) --------------------------------------
     _print_results_header(f"md ({ens.upper()})")
     thermo = result.get("thermo_log", [])
-    prod   = [r for r in thermo if r["step"] > equil] or thermo
+    # `>= equil`, matching the simulations' own `is_prod = step >=
+    # self.equil_steps`.  `> equil` dropped the first production
+    # frame from every CLI average.
+    prod   = [r for r in thermo if r["step"] >= equil] or thermo
     if prod:
         T_v   = [r["T_inst"] for r in prod]
         Ep_v  = [r["e_pot"]  for r in prod]
