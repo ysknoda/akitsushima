@@ -10,6 +10,7 @@ respect to the strain tensor.
 """
 import inspect
 import os
+import warnings
 from collections import deque
 from typing import Callable, List, Optional
 
@@ -48,7 +49,7 @@ def _accepts_neigh_list(fn) -> bool:
 
 class GeometryOptimiser:
     """
-    Geometry optimiser with five interchangeable algorithms.
+    Geometry optimiser with six interchangeable algorithms.
 
     Algorithms
     ----------
@@ -75,6 +76,14 @@ class GeometryOptimiser:
         Rational Function Optimisation (Simons et al. 1983; Baker 1986).
         Solves the augmented Hessian eigenproblem.  With ``uphill=True``
         implements Partitioned RFO for saddle-point (TS) refinement.
+        Note the cost: the initial finite-difference Hessian takes
+        2*(3N + 9) force evaluations, and every step then does a dense
+        (3N + 9)^2 eigendecomposition.
+
+    ``'sd'``
+        Steepest descent with a backtracking line search.  The simplest
+        and slowest of the six; useful as a reference when another
+        method behaves oddly.
 
     relax_cell = False  -> ionic positions only (fixed cell shape / volume)
     relax_cell = True   -> ions + cell jointly (variable-cell / NPT-like)
@@ -120,7 +129,9 @@ class GeometryOptimiser:
     Output files (written to *output_dir*)
     ----------------------------------------
     relax.log        -- step / energy / Fmax / Pmax / algorithm-specific metric
+    XDATCAR_relax    -- every step's structure, VASP XDATCAR format
     POSCAR_relaxed   -- final structure in VASP 5 format
+    POSCAR_best      -- lowest-energy structure seen (only with save_best)
     """
 
     # -- FIRE constants ------------------------------------
@@ -212,6 +223,22 @@ class GeometryOptimiser:
         #   is True, and skipped when relax_cell is False (there is no
         #   stress feedback on a fixed cell anyway).
         # check_stress=True/False -> explicit user override, always honoured.
+        # An explicit check_stress=True with relax_cell=False can never
+        # be satisfied: with the cell frozen there is no feedback path
+        # that drives the stress down, so the run simply burns every
+        # step and reports converged=False even once the forces are
+        # well inside fmax.  Measured: Fmax 0.00291 eV/A (satisfied)
+        # against Pmax 0.35680 GPa (pmax 0.1) after all 60 steps.  The
+        # relax template actively invites the combination, so say so
+        # rather than letting the user discover it from a silent
+        # non-convergence.
+        if check_stress is True and not relax_cell:
+            warnings.warn(
+                "GeometryOptimiser: check_stress=True with relax_cell=False "
+                "cannot converge -- a frozen cell gives the optimiser no way "
+                "to reduce the stress. Set relax_cell=True to relax the cell, "
+                "or leave check_stress at its default (None) to check forces "
+                "only.", UserWarning, stacklevel=2)
         self.check_stress = (relax_cell if check_stress is None
                              else bool(check_stress))
         self.check_energy = bool(check_energy)
@@ -286,17 +313,24 @@ class GeometryOptimiser:
         # constraints that are NOT expressible as a symmetric strain
         # (e.g. freezing a2 and a3 while leaving a1 fully free).
         #
-        # NOTE: because this mask acts on RAW lattice components rather
-        # than on a symmetrized strain tensor, it does not by itself
-        # guarantee suppression of the spurious cell-rotation drift
-        # described elsewhere in this file (an unsymmetrized cell force
-        # can, over long relaxations, slowly rotate the whole cell
-        # relative to the lab frame even though the physical shape/
-        # volume converges normally). If you do not need the extra
-        # flexibility of independent raw-component control and want the
-        # older automatic anti-rotation-drift behaviour, keep this at
-        # its default (None, fully free) rather than supplying a
-        # constraint pattern that only touches diagonal components.
+        # NOTE: this mask acts on RAW lattice components, not on a
+        # symmetrized strain tensor, so it does not suppress cell
+        # rotation.  Neither does anything else: there is no
+        # symmetrisation of the cell force anywhere in this class, and
+        # lattice_constraints=None produces a generalised force that is
+        # bit-identical to the all-ones pattern "1 1 1 1 1 1 1 1 1"
+        # (max|diff| = 0.000e+00).  The masked and unmasked paths differ
+        # only in which components get zeroed.
+        #
+        # This comment used to advise keeping the default "if you want
+        # the older automatic anti-rotation-drift behaviour", which does
+        # not exist and never did -- it would have steered users away
+        # from a constraint pattern they may legitimately want.  The
+        # residual rigid rotation after a default variable-cell relax
+        # from a sheared cell, measured by polar decomposition of
+        # h_new h_old^-1, is 0.0083 deg (fire), 0.0027 deg (lbfgs) and
+        # 0.0061 deg (sd), so the risk was overstated as well as
+        # misattributed.
         self._lattice_constraints_mask = \
             self._parse_lattice_constraints(lattice_constraints)
 
@@ -582,8 +616,16 @@ class GeometryOptimiser:
     def _clamp_step(self, step: np.ndarray) -> np.ndarray:
         """
         Clamp the generalised displacement so that:
-          - no atom moves more than _MAX_STEP Angstrom, AND
-          - no cell-vector component changes by more than _MAX_STEP Angstrom.
+          - no single Cartesian COMPONENT of an atom's displacement
+            exceeds _MAX_STEP Angstrom, AND
+          - no cell-vector component changes by more than _MAX_STEP
+            Angstrom.
+
+        The bound is per component, not per atom: a displacement of
+        [0.2, 0.2, 0.2] with _MAX_STEP = 0.2 passes unchanged at
+        |d| = 0.3464 A, which is sqrt(3) times the nominal cap.  This
+        docstring used to promise "no atom moves more than _MAX_STEP",
+        which is the stricter statement the code does not make.
 
         Both ionic and cell sub-vectors are scaled by the SAME factor so the
         search direction is preserved; clamping only the ionic part (as in

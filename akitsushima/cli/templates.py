@@ -97,6 +97,30 @@ relax:
 
   max_steps:     2000
   skin_width:    0.5
+
+  # Step control and method-specific knobs.  These reach
+  # GeometryOptimiser but were absent from this template, so the RFO
+  # mode it offers above had none of its own settings reachable.
+  max_displacement: 0.2              # A   per-component cap on one step
+  memory:        20                  # (s,y) pairs for lbfgs/diis/rmmdiis.
+                                     # rmmdiis is much faster at 3: its
+                                     # residual is projected out of the
+                                     # saved subspace, so the step length
+                                     # collapses as the subspace fills
+                                     # (measured 185 steps at 20 against
+                                     # 28 at 3 on the same system).
+  uphill:        false               # true: Partitioned RFO, i.e. climb to
+                                     # a saddle point instead of descending.
+                                     # method: rfo only.
+  trust_radius:  0.3                 # A   initial RFO trust region
+  hessian_delta: 0.01                # A   RFO finite-difference Hessian step.
+                                     # That Hessian costs 2*(3N+9) force
+                                     # evaluations before step 0.
+  # fix_cell:    [1, 1, 1, 0, 0, 0]  # Voigt mask, 1 = frozen
+  flush_every_step: true             # flush relax.log/XDATCAR each step
+  fsync_every_step: false            # fsync too (slow; for crash safety)
+  timing:        true
+
   save_best:     false               # true: save lowest-energy structure seen
                                      # during the run as POSCAR_best, and
                                      # return it as the final result.

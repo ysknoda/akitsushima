@@ -99,7 +99,22 @@ def cmd_relax(args) -> int:
         dt_max       = rel_cfg.get("dt_max",       None),
         cell_update_scheme = rel_cfg.get("cell_update_scheme", "generalized_force"),
         lattice_constraints = rel_cfg.get("lattice_constraints", None),
-        timing       = True,
+        # These eight reach GeometryOptimiser for the first time here.
+        # The template offers method: rfo but exposed none of the
+        # RFO-specific knobs, so P-RFO saddle-point mode (uphill) and
+        # the trust radius were unreachable from YAML; memory is the one
+        # parameter that lets a user work around RMM-DIIS's default of
+        # 20 being 6.6x slower than 3; and max_displacement is the
+        # headline control the class docstring documents.
+        uphill       = rel_cfg.get("uphill",        False),
+        trust_radius = rel_cfg.get("trust_radius",  0.3),
+        hessian_delta = rel_cfg.get("hessian_delta", 0.01),
+        memory       = rel_cfg.get("memory",        20),
+        max_displacement = rel_cfg.get("max_displacement", 0.2),
+        fix_cell     = rel_cfg.get("fix_cell",      None),
+        flush_every_step = rel_cfg.get("flush_every_step", True),
+        fsync_every_step = rel_cfg.get("fsync_every_step", False),
+        timing       = bool(rel_cfg.get("timing", True)),
     )
     if force_fn is not None:
         kw["force_fn"] = force_fn

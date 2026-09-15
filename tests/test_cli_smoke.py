@@ -712,3 +712,33 @@ def test_esm_template_rcut_matches_the_cell_size_it_documents():
             assert width < required_width, "fixture sanity"
             with pytest.raises(ValueError, match="perpendicular"):
                 nl.build(lat, probe)
+
+
+def test_relax_template_keys_are_all_read_by_cmd_relax():
+    """Every key the relax template ships must actually be consumed.
+
+    This project has hit the template-key/loader-mismatch defect
+    repeatedly: a GCMC template using epsilon_Ar_Ar where the code reads
+    epsilon, an SW fit template missing the r_cut key cmd_fit reads
+    unconditionally, and an MD template shipping `timing:` that cmd_md
+    never looked at.  A key that the loader ignores is worse than a
+    missing one -- the user sets it, sees no effect, and has no way to
+    tell which of the two happened.
+
+    Structural rather than behavioural on purpose: it fails the moment
+    someone adds a key to the template without wiring it up, which is
+    exactly when the mistake is cheap to fix.
+    """
+    import inspect
+    import yaml as _yaml
+    from akitsushima.cli import cmd_relax as _cmd_relax_mod
+    from akitsushima.cli.templates import _YAML_RELAX_DEFAULT
+
+    cfg = _yaml.safe_load(_YAML_RELAX_DEFAULT)
+    src = inspect.getsource(_cmd_relax_mod)
+    unread = [k for k in cfg.get("relax", {})
+              if f'rel_cfg.get("{k}"' not in src
+              and f"rel_cfg.get('{k}'" not in src
+              and f'rel_cfg["{k}"]' not in src]
+    assert not unread, (
+        f"relax template keys never read by cmd_relax: {unread}")

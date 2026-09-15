@@ -65,9 +65,14 @@ def cmd_md(args) -> int:
         print(f"  Equil steps  : {equil}  ({equil*dt/1000:.4f} ps)")
         print(f"  Prod  steps  : {n_steps}  ({n_steps*dt/1000:.4f} ps)")
         print(f"  Total steps  : {total}  ({total*dt/1000:.4f} ps)")
-        if ens in ("nvt","npt"):
-            print(f"  Tau NHC      : {md_cfg.get('tau_nhc', 20.0)} fs")
+        if ens in ("nvt", "npt"):
+            # The defaults differ per ensemble and must match what the
+            # constructors below actually receive: printing 20.0 for an
+            # NPT run that then ran at 100.0 was simply a false report.
+            _tau_default = 20.0 if ens == "nvt" else 100.0
+            print(f"  Tau NHC      : {md_cfg.get('tau_nhc', _tau_default)} fs")
         if ens == "npt":
+            print(f"  Tau baro     : {md_cfg.get('tau_baro', 1000.0)} fs")
             print(f"  Pressure     : {md_cfg.get('pressure', 0.0)} GPa")
 
     output_dir = md_cfg.get("output_dir", f"./{ens}_output")
@@ -90,7 +95,9 @@ def cmd_md(args) -> int:
         skin_width   = md_cfg.get("skin_width",   0.5),
         seed         = md_cfg.get("seed",         42),
         verbose      = verbose,
-        timing       = True,
+        # The MD templates all ship a `timing:` key; it used to be
+        # ignored here, so setting `timing: false` had no effect.
+        timing       = bool(md_cfg.get("timing", True)),
     )
     if force_fn is not None:
         common["force_fn"] = force_fn
