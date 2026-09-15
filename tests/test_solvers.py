@@ -1774,3 +1774,76 @@ def test_gcmc_mu_is_the_full_chemical_potential(tmp_path):
             f"this fails, either the acceptance rule's ideal-gas "
             f"normalisation changed, or mu is no longer the full "
             f"chemical potential")
+
+
+def test_npt_reduces_to_nve_in_the_weak_coupling_limit():
+    """C1 regression: NPTSimulation had no free-flight drift.
+
+    `_scale_step` applied the affine cell rescale and the barostat
+    velocity rescale but never `r += dt*v`, which NVT and NVE both do.
+    The affine rescale is a similarity transform, so every fractional
+    coordinate stayed exactly put: the trajectory was one frozen
+    structure with a breathing lattice, evaluated at a force that never
+    changed.  With positions frozen the velocity half-steps integrate a
+    constant acceleration forever, so <T> ran away (1704 K against an
+    NVE reference of 342 K on the reporter's system).
+
+    The oracle needs no reference data: as tau_nhc and tau_baro go to
+    infinity the thermostat and barostat decouple and NPT must reduce
+    to NVE exactly.  That limit is what pins both the diagnosis and the
+    fix -- a static-cell bug cannot pass it, and the corrected
+    integrator reproduces NVE to rounding.
+    """
+    fn = _lj_force_fn(r_cut=3.2)
+    al = _fcc_al_supercell()
+    common = dict(lattice=al["lattice"], positions=al["positions"],
+                  atom_types=al["atom_types"], force_fn=fn, r_cut=3.2,
+                  timestep=0.5, n_steps=200, equil_steps=0,
+                  temperature=600.0, traj_every=10**9, thermo_every=10**9,
+                  seed=42, verbose=False)
+    nve = NVESimulation(**common,
+                        output_dir="/tmp/akitsushima_test_npt_nve_a").run()
+    npt = NPTSimulation(**common, pressure=0.0, tau_nhc=1e8, tau_baro=1e8,
+                        output_dir="/tmp/akitsushima_test_npt_nve_b").run()
+
+    assert np.max(np.abs(npt["positions"] - nve["positions"])) < 1e-8, (
+        "NPT does not reduce to NVE in the weak-coupling limit")
+    assert abs(npt["T_mean"] - nve["T_mean"]) < 1e-6
+
+    # And, directly: the atoms must actually move relative to the cell.
+    frac_0 = al["positions"] @ np.linalg.inv(al["lattice"])
+    frac_N = npt["positions"] @ np.linalg.inv(npt["lattice"])
+    assert np.max(np.abs(frac_N - frac_0)) > 1e-6, (
+        "fractional coordinates are unchanged -- the drift is missing")
+
+
+def test_nhc_conserved_quantity_is_actually_conserved():
+    """H2 regression: the Nose-Hoover chain kinetic term was divided by
+    EV_ANG_TO_AMU_ANG_FS2, inflating it by 1/0.0096485 = 103.6x.
+
+    Q1 = n_dof*k_B[eV/K]*T[K]*tau[fs]^2 is eV*fs^2 and vxi is fs^-1, so
+    0.5*Q1*vxi^2 is already eV; unlike the particle kinetic energy it
+    never enters the amu basis.  The dynamics were unaffected -- the
+    factor appeared only in the diagnostic -- but H_NHC is the only
+    integrator-health signal the package reports, and a user tuning
+    their timestep against it would have concluded their step was far
+    too large.
+
+    Conservation is its own oracle here: the exact invariant of the NHC
+    equations of motion must not drift.  Before the fix this run
+    spanned 27.13 eV and drifted +9.46 eV.
+    """
+    fn = _lj_force_fn(r_cut=3.2)
+    al = _fcc_al_supercell()
+    res = NVTSimulation(lattice=al["lattice"], positions=al["positions"],
+                        atom_types=al["atom_types"], force_fn=fn, r_cut=3.2,
+                        timestep=0.1, n_steps=3000, equil_steps=0,
+                        temperature=300.0, tau_nhc=50.0, traj_every=10**9,
+                        thermo_every=1, seed=42, verbose=False,
+                        output_dir="/tmp/akitsushima_test_nhc_conserved").run()
+    H = np.array([r["H_nhc"] for r in res["thermo_log"]])
+    span = float(H.max() - H.min())
+    # Two orders of magnitude tighter than the pre-fix 27.13 eV, and two
+    # orders looser than the 1.3e-05 eV actually measured, so this is a
+    # discrimination test rather than a fit to one machine's rounding.
+    assert span < 1e-3, f"H_NHC is not conserved: span {span:.4e} eV"

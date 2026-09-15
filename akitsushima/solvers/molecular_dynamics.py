@@ -13,7 +13,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from ..constants import ATOMIC_MASS, EV_ANG3_TO_GPA, EV_ANG_TO_AMU_ANG_FS2, K_B
-from ..engine.neighborlist import NeighbourList
+from ..engine.neighborlist import NeighbourList, wrap_positions_into_cell
 from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
@@ -270,6 +270,61 @@ class _BaseMDSimulation:
 #  Integrator : velocity Verlet with Nose-Hoover chain (NHC) of length 2
 #  Reference  : Martyna, Tobias & Klein, J. Chem. Phys. 97, 2635 (1992).
 # ============================================================================
+    # ------------------------------------------------------------------
+    #  Volume and instantaneous pressure (shared by all three ensembles)
+    # ------------------------------------------------------------------
+    #  These used to live on NPTSimulation alone, and NVESimulation's
+    #  thermo.log computed its own P_inst as -Tr(stress)/3 with no
+    #  kinetic term -- the wrong sign under this codebase's stress
+    #  convention AND missing the ideal-gas contribution.  One shared
+    #  implementation is the point: the duplicated cell-gradient
+    #  formula that diverged from its twin is recorded in
+    #  docs/adr/0001, and this was the same shape of mistake.
+    def _volume(self) -> float:
+        return float(abs(np.linalg.det(self.lattice)))
+
+    def _pressure_inst(self, stress: np.ndarray) -> float:
+        """
+        Instantaneous pressure [eV/A^3] from kinetic + virial contributions.
+
+        P_inst = 2 E_kin / (3V) + Tr(stress) / 3
+
+        Bug-fix note (NPT barostat sign): this used to compute
+        ``Pv = -np.trace(stress) / 3.0``. In THIS codebase's own
+        already-verified stress convention (tensile-positive, confirmed
+        via finite-difference cross-checks throughout
+        ``test_engine_forces.py`` and independently re-derived during
+        the Bug C investigation: sigma_ab = -(1/V) dE/dT_ab under
+        h'=h@T), a cell compressed BELOW its mechanical equilibrium
+        volume has a POSITIVE stress trace (energy increases moving
+        away from the minimum in either direction, so dE/ds < 0 for
+        scale s < 1, giving sigma = -(1/V)(dE/dT) > 0) -- the opposite
+        of the textbook engineering-mechanics convention where P =
+        -Tr(sigma)/3, which assumes a different sign convention for
+        "tensile-positive" than the one this codebase's own dE/dT
+        derivation produces.
+
+        With the old ``Pv = -Tr(stress)/3``, a compressed cell (positive
+        stress trace) was reported as having LOWER pressure than the
+        target, and the MTTK barostat (``_barostat_half_step``'s
+        ``G_eps = 3V(P_inst - P_ext)``, correctly implementing the
+        standard restoring dynamics) then drove it to shrink FURTHER
+        rather than relieve the compression -- i.e. the feedback loop
+        pushed the cell away from equilibrium instead of toward it, in
+        BOTH directions (a compressed cell shrank further, an expanded
+        cell grew further), confirmed directly: monkey-patching this
+        sign and re-running showed the old formula moving volume in the
+        wrong direction in both the compressed and expanded case, while
+        this fixed formula (``Pv = +Tr(stress)/3``) moves volume in the
+        physically correct direction (compressed -> expands, expanded ->
+        contracts) with a small, bounded H_NPT drift in both cases (see
+        the corresponding test in test_solvers.py).
+        """
+        V  = self._volume()
+        Pk = 2.0 * self._kinetic_energy() / (3.0 * V)
+        Pv = np.trace(stress) / 3.0   # stress already divided by V in compute_all
+        return Pk + Pv
+
 
 class NVTSimulation(_BaseMDSimulation):
     """
@@ -411,12 +466,25 @@ class NVTSimulation(_BaseMDSimulation):
         """
         Conserved quantity for the 2-chain Nose-Hoover thermostat:
           H_NHC = E_kin + E_pot
-                + (Q1*vxi1^2 + Q2*vxi2^2) / (2 * EV_ANG)
+                + 0.5*Q1*vxi1^2 + 0.5*Q2*vxi2^2
                 + n_dof*kT*xi1 + kT*xi2
+
+        The chain kinetic term is ALREADY in eV and must not be unit
+        converted.  Q1 = n_dof*k_B[eV/K]*T[K]*tau[fs]^2 is eV*fs^2 and
+        vxi is fs^-1 (G1 = (2E_kin - n_dof kT)/Q1 is fs^-2, integrated
+        over dt), so 0.5*Q1*vxi^2 is eV directly.  Unlike the particle
+        kinetic energy it never enters the amu basis.  Dividing it by
+        EV_ANG_TO_AMU_ANG_FS2, as this did, inflated it by 103.6x and
+        destroyed the invariant: over 3000 steps of 32-atom LJ Al at
+        tau_nhc = 50 fs the quantity ranged over 27.13 eV and drifted
+        +9.46 eV, against 1.33e-05 eV and +9.75e-06 eV once the division
+        is removed -- six orders of magnitude, with conservation itself
+        as the oracle.  The dynamics were never affected; the factor
+        appears only in this diagnostic.
         """
         ek    = self._kinetic_energy()
         t_nhc = (0.5 * self.Q1 * self.vxi1**2
-                 + 0.5 * self.Q2 * self.vxi2**2) / EV_ANG_TO_AMU_ANG_FS2
+                 + 0.5 * self.Q2 * self.vxi2**2)
         v_nhc = (self.n_dof * K_B * self.temperature * self.xi1
                  + K_B * self.temperature * self.xi2)
         return ek + e_pot + t_nhc + v_nhc
@@ -939,7 +1007,12 @@ class NVESimulation(_BaseMDSimulation):
 
                 self._tc.lap("step")  # timing
                 if step % self.thermo_every == 0:
-                    P_gpa = -np.trace(stress) / 3.0 * GPa_fac
+                    # Shared helper: kinetic + virial, with the sign
+                    # this codebase's stress convention actually
+                    # implies.  This line used to read
+                    # -np.trace(stress)/3.0, which flipped the sign
+                    # and dropped 2*E_kin/(3V) entirely.
+                    P_gpa = self._pressure_inst(stress) * GPa_fac
                     row = (f"{step:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
                            f"{e_kin:12.6f}  {e_tot:14.6f}  "
                            f"{T_inst:10.2f}  {P_gpa:12.4f}  {drift:14.6f}")
@@ -1112,11 +1185,13 @@ class NPTSimulation(_BaseMDSimulation):
                  masses         : Optional[np.ndarray] = None,
                  fix_atoms      : Optional[np.ndarray] = None,
                  timing         : bool  = False,
+                 velocity_rescale_steps : int = 0,
                  flush_every_step : bool = True,
                  fsync_every_step : bool = False):
 
         self.flush_every_step = bool(flush_every_step)
         self.fsync_every_step = bool(fsync_every_step)
+        self.velocity_rescale_steps = int(velocity_rescale_steps)
         self.lattice      = lattice.copy()
         self.positions    = positions.copy()
         self.atom_types   = list(atom_types)
@@ -1162,6 +1237,15 @@ class NPTSimulation(_BaseMDSimulation):
         # Bug-fix note (S8): n_dof now accounts for fix_atoms -- see
         # _BaseMDSimulation._compute_n_dof.
         self.n_dof = self._compute_n_dof(self.N, self._fix_mask)
+        # Zero the frozen components, the way NVTSimulation and
+        # NVESimulation both do at this point.  NPT did not, so until
+        # _nhc_step happened to zero them on its first call the frozen
+        # DoF carried Maxwell-Boltzmann kinetic energy: it inflated the
+        # reported T_inst, biased the step-0 barostat kick through the
+        # kinetic pressure, and -- because H_ref is taken before that
+        # first _nhc_step -- biased the reported H_npt_drift by almost
+        # exactly the spurious kinetic energy.
+        self.velocities[self._fix_mask] = 0.0
 
         self.Q1   = self.n_dof * K_B * temperature * tau_nhc**2
         self.Q2   =              K_B * temperature * tau_nhc**2
@@ -1192,57 +1276,12 @@ class NPTSimulation(_BaseMDSimulation):
         """Maxwell-Boltzmann velocities at T; delegates to base."""
         return _BaseMDSimulation._init_velocities_mb(T, self.masses, self.rng)
 
-    def _volume(self) -> float:
-        return float(abs(np.linalg.det(self.lattice)))
-
-    def _pressure_inst(self, stress: np.ndarray) -> float:
-        """
-        Instantaneous pressure [eV/A^3] from kinetic + virial contributions.
-
-        P_inst = 2 E_kin / (3V) + Tr(stress) / 3
-
-        Bug-fix note (NPT barostat sign): this used to compute
-        ``Pv = -np.trace(stress) / 3.0``. In THIS codebase's own
-        already-verified stress convention (tensile-positive, confirmed
-        via finite-difference cross-checks throughout
-        ``test_engine_forces.py`` and independently re-derived during
-        the Bug C investigation: sigma_ab = -(1/V) dE/dT_ab under
-        h'=h@T), a cell compressed BELOW its mechanical equilibrium
-        volume has a POSITIVE stress trace (energy increases moving
-        away from the minimum in either direction, so dE/ds < 0 for
-        scale s < 1, giving sigma = -(1/V)(dE/dT) > 0) -- the opposite
-        of the textbook engineering-mechanics convention where P =
-        -Tr(sigma)/3, which assumes a different sign convention for
-        "tensile-positive" than the one this codebase's own dE/dT
-        derivation produces.
-
-        With the old ``Pv = -Tr(stress)/3``, a compressed cell (positive
-        stress trace) was reported as having LOWER pressure than the
-        target, and the MTTK barostat (``_barostat_half_step``'s
-        ``G_eps = 3V(P_inst - P_ext)``, correctly implementing the
-        standard restoring dynamics) then drove it to shrink FURTHER
-        rather than relieve the compression -- i.e. the feedback loop
-        pushed the cell away from equilibrium instead of toward it, in
-        BOTH directions (a compressed cell shrank further, an expanded
-        cell grew further), confirmed directly: monkey-patching this
-        sign and re-running showed the old formula moving volume in the
-        wrong direction in both the compressed and expanded case, while
-        this fixed formula (``Pv = +Tr(stress)/3``) moves volume in the
-        physically correct direction (compressed -> expands, expanded ->
-        contracts) with a small, bounded H_NPT drift in both cases (see
-        the corresponding test in test_solvers.py).
-        """
-        V  = self._volume()
-        Pk = 2.0 * self._kinetic_energy() / (3.0 * V)
-        Pv = np.trace(stress) / 3.0   # stress already divided by V in compute_all
-        return Pk + Pv
-
     def _npt_conserved(self, e_pot: float) -> float:
         """
         NPT conserved quantity [eV]:
         H_NPT = E_kin + E_pot + P_ext V
               + 0.5 W epsilon_dot^2
-              + NHC kinetic (0.5 Q1 vxi1^2 + 0.5 Q2 vxi2^2) / EV_ANG_TO_AMU_ANG_FS2
+              + NHC kinetic (0.5 Q1 vxi1^2 + 0.5 Q2 vxi2^2)   [already eV]
               + NHC potential (n_dof k_B T xi1 + k_B T xi2)
         """
         ek   = self._kinetic_energy()
@@ -1252,9 +1291,8 @@ class NPTSimulation(_BaseMDSimulation):
         h_baro  = 0.5 * self.W * eps_dot**2
 
         # NHC KE  [eV]  (same formula as NVT._nhc_conserved)
-        h_nhc_k = ((0.5 * self.Q1 * self.vxi1**2
-                    + 0.5 * self.Q2 * self.vxi2**2)
-                   / EV_ANG_TO_AMU_ANG_FS2)
+        h_nhc_k = (0.5 * self.Q1 * self.vxi1**2
+                   + 0.5 * self.Q2 * self.vxi2**2)   # already eV
         # NHC PE  [eV]
         h_nhc_p = (self.n_dof * K_B * self.temperature * self.xi1
                    + K_B * self.temperature * self.xi2)
@@ -1289,10 +1327,19 @@ class NPTSimulation(_BaseMDSimulation):
         eps_dot = self.p_eps / self.W       # [fs^-1]
         s       = np.exp(eps_dot * self.dt) # linear scale per axis
 
-        inv_lat       = np.linalg.inv(self.lattice)
-        frac          = self.positions @ inv_lat
-        frac         -= np.floor(frac)      # wrap fractional coords
+        # Free-flight drift.  Without this the atoms never move relative
+        # to the cell: the affine rescale below is a similarity transform
+        # that leaves every fractional coordinate exactly unchanged, so a
+        # trajectory would be one frozen structure with a breathing
+        # lattice, evaluated at a force that never changes.  NVTSimulation
+        # and NVESimulation apply the identical update; NPT was missing
+        # it.  With this line the tau_nhc = tau_baro -> infinity limit
+        # reproduces NVE bit-for-bit, which is how the omission was found.
+        self.positions += self.dt * self.velocities
+        self.positions = wrap_positions_into_cell(self.positions,
+                                                  self.lattice)
 
+        frac          = self.positions @ np.linalg.inv(self.lattice)
         self.lattice  = self.lattice * s    # scale all three axes equally
         self.positions = frac @ self.lattice
 
@@ -1427,6 +1474,21 @@ class NPTSimulation(_BaseMDSimulation):
 
                 # ---- 8. NHC half-step ----------------------------------
                 self._nhc_step()
+
+                # ---- Optional velocity rescaling (early steps only) -----
+                # Same equilibration-transient guard NVTSimulation applies;
+                # see the comment there.  cmd_md and the shipped NPT
+                # template both already passed this parameter, which
+                # NPTSimulation did not accept -- `akitsushima md` with
+                # ensemble: npt raised TypeError before reaching step 0.
+                if (self.velocity_rescale_steps > 0
+                        and step < self.velocity_rescale_steps):
+                    ek_now = self._kinetic_energy()
+                    T_now  = (2.0 * ek_now / (self.n_dof * K_B)
+                              if ek_now > 0 else 0.0)
+                    if T_now > 1e-12:
+                        self.velocities *= np.sqrt(self.temperature / T_now)
+                        self.velocities *= ~self._fix_mask
 
                 # ---- Output --------------------------------------------
                 e_kin  = self._kinetic_energy()

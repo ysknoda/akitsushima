@@ -105,6 +105,31 @@ def test_parser_potential_choices_include_all_six():
         assert ns.potential == pot
 
 
+def test_cmd_md_npt_smoke(tmp_path):
+    """C2 regression: `akitsushima md` with ensemble: npt raised
+    TypeError before reaching step 0, because cmd_md passed
+    velocity_rescale_steps -- an NVTSimulation-only parameter -- to
+    NPTSimulation unconditionally.  The shipped NPT template sets that
+    key too, so removing it from the YAML did not help.  The NPT CLI
+    path had never run.  Exercised with the key present, which is the
+    combination that used to fail.
+    """
+    poscar = _al_supercell_poscar(tmp_path)
+    cfg = {
+        "structure": {"poscar": str(poscar)},
+        "potential": _LJ_POT_FITTED,
+        "md": {"ensemble": "npt", "output_dir": str(tmp_path / "npt_out"),
+              "temperature": 300.0, "pressure": 0.0, "timestep": 0.5,
+              "n_steps": 20, "equil_steps": 0, "tau_nhc": 100.0,
+              "tau_baro": 1000.0, "velocity_rescale_steps": 5,
+              "traj_every": 100, "thermo_every": 100, "verbose": False},
+    }
+    yaml_path = tmp_path / "npt.yaml"
+    _write_yaml(yaml_path, cfg)
+    assert cmd_md(_ns(yaml_path)) == 0
+    assert (tmp_path / "npt_out" / "POSCAR_final_NPT").is_file()
+
+
 def test_cmd_relax_smoke(tmp_path):
     poscar = _al_supercell_poscar(tmp_path)
     cfg = {

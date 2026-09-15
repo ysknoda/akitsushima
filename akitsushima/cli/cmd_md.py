@@ -148,6 +148,31 @@ def cmd_md(args) -> int:
             print(f"  H_NHC drift : {Hdr:.4e} eV  ({Hdr/N:.4e} eV/atom)")
         if thermo:
             print(f"  NL builds   : {thermo[-1].get('nl_builds','?')}")
+    else:
+        # Only NVTSimulation accumulates a per-frame thermo_log; NVE and
+        # NPT return flat summary keys instead.  Without this branch the
+        # entire [Thermodynamics] block was silently skipped for those two
+        # ensembles -- an NPT run reported neither pressure nor volume,
+        # the two quantities the ensemble exists to control.
+        print("\n[Thermodynamics  (run summary)]")
+        if result.get("T_mean") is not None:
+            print(f"  T_mean      : {result['T_mean']:.2f} K  "
+                  f"(target {md_cfg.get('temperature',300.0):.1f} K)")
+            print(f"  T_std       : {result.get('T_std', float('nan')):.2f} K")
+        if result.get("e_pot_mean") is not None:
+            ep = result["e_pot_mean"]
+            print(f"  <E_pot>     : {ep:.4f} eV  ({ep/N:.6f} eV/atom)")
+        if result.get("P_mean_gpa") is not None:
+            print(f"  P_mean      : {result['P_mean_gpa']:.4f} GPa  "
+                  f"(target {md_cfg.get('pressure',0.0):.4f} GPa)")
+            print(f"  P_std       : {result.get('P_std_gpa', float('nan')):.4f} GPa")
+        if result.get("V_mean") is not None:
+            print(f"  V_mean      : {result['V_mean']:.3f} A^3")
+        for key, label in (("e_tot_drift", "E_tot drift "),
+                           ("H_npt_drift", "H_NPT drift ")):
+            if result.get(key) is not None:
+                print(f"  {label}: {result[key]:.4e} eV  "
+                      f"({result[key]/N:.4e} eV/atom)")
 
     _print_output_files(output_dir)
 
