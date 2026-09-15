@@ -25,4 +25,6 @@ htmlcov/
 # AI-assisted-development tooling (process artifacts, not the package)
 .claude/
 .code-check/
+.github_release/
+# legacy status-note path, from before the skill was renamed
 .pip_preparation/
