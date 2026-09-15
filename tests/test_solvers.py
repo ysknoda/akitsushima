@@ -1847,3 +1847,85 @@ def test_nhc_conserved_quantity_is_actually_conserved():
     # orders looser than the 1.3e-05 eV actually measured, so this is a
     # discrimination test rather than a fit to one machine's rounding.
     assert span < 1e-3, f"H_NHC is not conserved: span {span:.4e} eV"
+
+
+def test_rfo_variable_cell_result_is_self_consistent():
+    """The energy/forces a relaxation returns must belong to the
+    structure it returns.
+
+    _set_x is deliberately not a pure function of its argument when
+    relax_cell is on: it converts the incoming Cartesian block to
+    fractional against the CURRENT lattice before re-expanding it in the
+    new cell, because f_cell = -dE/dh is defined at fixed fractional
+    coordinates (see _finite_diff_cell_gradient above) and a cell step
+    must therefore carry the atoms with it.
+
+    RFO's trust-region rejection branch used that same call to "restore"
+    the pre-trial geometry -- but by then self.lattice was the rejected
+    trial's, so the restore silently landed somewhere else.  From that
+    point the run carried forward an energy and forces describing a
+    configuration it no longer held: 20.5% apart on the reporter's
+    sheared 32-atom cell, with POSCAR_relaxed and the printed energy
+    describing different structures.  Only the variable-cell branch was
+    affected, and only RFO has a rejection path that calls _set_x to
+    undo, which is why the other five methods stayed self-consistent.
+    """
+    fn = _lj_force_fn(r_cut=3.2)
+    al = randomly_perturbed(_fcc_al_supercell(), magnitude=0.05, seed=3)
+    lattice = al["lattice"] @ np.array([[1.0, 0.0, 0.0],
+                                        [0.05, 1.0, 0.0],
+                                        [0.0, 0.02, 1.0]])
+    go = GeometryOptimiser(lattice, al["positions"], al["atom_types"],
+                           force_fn=fn, relax_cell=True, method="rfo",
+                           fmax=5e-3, pmax=5e-2, max_steps=60, verbose=False,
+                           output_dir="/tmp/akitsushima_test_rfo_selfcons")
+    result = go.run()
+
+    e_at_returned, f_at_returned, _ = fn(
+        result["lattice"], result["positions"], al["atom_types"])
+    assert abs(result["energy"] - float(e_at_returned)) < 1e-9, (
+        f"returned energy {result['energy']:.9f} eV does not belong to the "
+        f"returned structure ({float(e_at_returned):.9f} eV)")
+    assert np.max(np.abs(result["forces"] - f_at_returned)) < 1e-9
+
+
+@pytest.mark.parametrize("method",
+                         ["fire", "lbfgs", "diis", "rmmdiis", "rfo", "sd"])
+def test_save_best_records_a_real_best_for_every_method(method, tmp_path):
+    """H1 regression: save_best must return the lowest energy it saw.
+
+    _update_best was called at five sites for six methods -- _run_rfo
+    never called it at all, so `best_step` stayed -1 and `best_energy`
+    stayed float('inf'), which the CLI then printed verbatim as
+    "E_pot : inf eV  (at step -1)" next to a POSCAR_best that was never
+    written.  The other four non-FIRE methods called it AFTER the
+    convergence `break`, so the converged final step -- usually the
+    lowest-energy one -- was never a candidate, and save_best returned a
+    structure up to 3.7e-04 eV HIGHER in energy than the one it
+    discarded.  `grep -rn save_best tests/` returned nothing before this.
+    """
+    fn = _lj_force_fn(r_cut=3.2)
+    al = randomly_perturbed(_fcc_al_supercell(), magnitude=0.05, seed=7)
+    go = GeometryOptimiser(al["lattice"], al["positions"], al["atom_types"],
+                           force_fn=fn, method=method, fmax=1e-3,
+                           max_steps=120, save_best=True, verbose=False,
+                           output_dir=str(tmp_path))
+    result = go.run()
+
+    assert result["best_step"] is not None and result["best_step"] >= 0, (
+        f"{method}: no best step was ever recorded")
+    assert np.isfinite(result["best_energy"]), (
+        f"{method}: best_energy is {result['best_energy']}")
+    assert (tmp_path / "POSCAR_best").is_file()
+
+    # The best must be at least as low as the energy actually returned --
+    # that is the whole contract of the flag.
+    # 1e-9 rather than exact: _finalise restores the best state and
+    # re-evaluates it, so the returned energy is a fresh sum that can
+    # differ in the last bits (a neighbour-list rebuild reorders the
+    # summation).  Measured noise is ~1.4e-11 eV, while the defect this
+    # guards against produced 4.5e-05 to 3.7e-04 eV -- four to five
+    # orders of magnitude clear of the tolerance.
+    assert result["best_energy"] <= result["energy"] + 1e-9, (
+        f"{method}: best_energy {result['best_energy']:.9f} is HIGHER than "
+        f"the returned energy {result['energy']:.9f}")

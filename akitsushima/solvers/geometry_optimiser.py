@@ -607,6 +607,28 @@ class GeometryOptimiser:
                                    self.lattice.ravel()])
         return self.positions.ravel().copy()
 
+    def _save_state(self) -> tuple:
+        """Snapshot the full geometric state for an exact later restore.
+
+        _set_x is NOT a pure function of its argument when relax_cell is
+        on: it reads self.lattice to convert the incoming Cartesian block
+        to fractional coordinates before re-expanding it in the new cell.
+        That affine coupling is deliberate and physically required --
+        f_cell = -dE/dh is defined at FIXED FRACTIONAL coordinates (see
+        _finite_diff_cell_gradient in tests/test_solvers.py), so a cell
+        step must carry the atoms with it.
+
+        The consequence is that `self._set_x(x_old)` does not undo a
+        rejected trial: by then self.lattice is the rejected lattice, so
+        x_old's positions get reinterpreted against the wrong cell.  Use
+        this pair wherever an exact restore is meant.
+        """
+        return (self.positions.copy(), self.lattice.copy())
+
+    def _restore_state(self, state: tuple) -> None:
+        """Restore a snapshot taken by :meth:`_save_state`."""
+        self.positions, self.lattice = state[0].copy(), state[1].copy()
+
     def _set_x(self, x: np.ndarray) -> None:
         """Unpack a 1-D coordinate vector back into positions (+ cell)."""
         n_ion = self.N * 3
@@ -932,10 +954,10 @@ class GeometryOptimiser:
                 self._tc.start("step")  # timing
                 fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
                                            f"{np.linalg.norm(g):.3e}")
+                self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
                     self._tc.lap("step")   # timing
                     converged = True; break
-                self._update_best(e, step)
                 e_prev = e
 
                 p = self._lbfgs_direction(g, s_hist, y_hist)   # H^-1 g
@@ -1044,10 +1066,10 @@ class GeometryOptimiser:
                 g     = self._generalised_force(forces, stress)
                 fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
                                            f"{len(x_buf)}")
+                self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
                     self._tc.lap("step")   # timing
                     converged = True; break
-                self._update_best(e, step)
                 e_prev = e
 
                 x_cur = self._get_x()
@@ -1154,10 +1176,10 @@ class GeometryOptimiser:
                 self._tc.start("step")  # timing
                 g = self._generalised_force(forces, stress)   # residual
                 fmax_v, _ = self._log_row(log_fh, step, e, forces, stress, "---")
+                self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
                     self._tc.lap("step")   # timing
                     converged = True; break
-                self._update_best(e, step)
                 e_prev = e
 
                 x_cur = self._get_x()
@@ -1283,6 +1305,7 @@ class GeometryOptimiser:
                 fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
                                            f"{trust:.4f}")
                 self._tc.lap("step")   # timing
+                self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
                     converged = True; break
                 e_prev = e
@@ -1300,6 +1323,9 @@ class GeometryOptimiser:
 
                 dx = self._clamp_step(p)
                 x_new = x + dx
+                # Snapshot the accepted geometry before the trial move, so
+                # a rejection can be undone exactly (see _save_state).
+                state_accepted = self._save_state()
                 self._set_x(x_new)
                 e_new, f_new, st_new = self._get_forces_and_stress()
                 g_new = -self._generalised_force(f_new, st_new)
@@ -1317,7 +1343,18 @@ class GeometryOptimiser:
                 if actual_de <= 0.0 or self.uphill:
                     x, e, forces, stress, g = x_new, e_new, f_new, st_new, g_new
                 else:
-                    self._set_x(x); trust *= 0.5; continue
+                    # Exact restore.  This used to call self._set_x(x),
+                    # which is not an undo: self.lattice is the rejected
+                    # trial's by now, so x's Cartesian block was
+                    # reinterpreted against the wrong cell.  The run then
+                    # carried forward an e/forces/stress belonging to a
+                    # configuration self.positions/self.lattice no longer
+                    # held -- measured at 20.5% energy discrepancy on a
+                    # sheared 32-atom cell, with POSCAR_relaxed and the
+                    # reported energy describing different structures.
+                    self._restore_state(state_accepted)
+                    trust *= 0.5
+                    continue
 
                 # Hessian update
                 s_vec = x - x_prev; y_vec = g - g_prev
@@ -1369,10 +1406,10 @@ class GeometryOptimiser:
                 self._tc.start("step")  # timing
                 fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
                                            f"{step_size_prev:.3e}")
+                self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
                     self._tc.lap("step")   # timing
                     converged = True; break
-                self._update_best(e, step)
                 e_prev = e
 
                 x = self._get_x()
@@ -1413,17 +1450,26 @@ class GeometryOptimiser:
         """Central-difference Hessian via force finite differences."""
         delta  = self.hessian_delta
         x_save = self._get_x()
+        # Snapshot to reset from before EVERY probe.  _set_x is not a
+        # pure function of x under relax_cell (see _save_state), so
+        # taking the minus-side probe straight after the plus-side one
+        # measured it relative to the plus-side lattice rather than the
+        # reference: 31.5% error against a Hessian that resets between
+        # probes, feeding straight into the RFO/P-RFO search direction.
+        state_save = self._save_state()
         H      = np.zeros((ndof, ndof))
         for j in range(ndof):
+            self._restore_state(state_save)
             xp = x_save.copy(); xp[j] += delta; self._set_x(xp)
             _, fp, sp = self._get_forces_and_stress()
             gp = -self._generalised_force(fp, sp)
+            self._restore_state(state_save)
             xm = x_save.copy(); xm[j] -= delta; self._set_x(xm)
             _, fm, sm = self._get_forces_and_stress()
             gm = -self._generalised_force(fm, sm)
             H[:, j] = (gp - gm) / (2.0 * delta)
         H = 0.5 * (H + H.T)
-        self._set_x(x_save)
+        self._restore_state(state_save)
         return H
 
     @staticmethod

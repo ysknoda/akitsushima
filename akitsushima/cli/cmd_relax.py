@@ -134,7 +134,13 @@ def cmd_relax(args) -> int:
     print(f"  Conv  : {result.get('converged', '?')}")
     print(f"  Steps : {result.get('n_steps','?')}")
 
-    if rel_cfg.get("save_best") and result.get("best_energy") is not None:
+    # `is not None` is not enough: _best_e starts at float("inf") and
+    # stays there if no step ever recorded a best, which printed
+    # "E_pot : inf eV  (at step -1)" alongside a POSCAR_best that was
+    # never written.  _run_rfo used to reach the CLI in exactly that
+    # state on every run, because it never called _update_best.
+    _be = result.get("best_energy")
+    if rel_cfg.get("save_best") and _be is not None and np.isfinite(_be):
         be = result["best_energy"]; bs = result["best_step"]
         print(f"\n[Best structure (lowest E)]")
         print(f"  E_pot : {be:.6f} eV  (at step {bs})")
