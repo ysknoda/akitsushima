@@ -167,7 +167,10 @@ def load_potential(path    : str,
     path    : path to the JSON file (.json extension auto-appended).
     r_cut   : override the cutoff stored in the file [A].
     species : override the species list stored in the file.
-    shift   : apply force-shift for LJ / Morse / BornMayer (default True).
+    shift   : apply force-shifted truncation (default True).  Honoured
+              by LJ, Morse, BornMayer and Buckingham.  The last two
+              used to ignore it -- they had no shift support at all --
+              which this docstring already claimed for BornMayer.
 
     Returns
     -------
@@ -237,7 +240,7 @@ def load_potential(path    : str,
         engine.add(MorsePotential(params, r_cut=rc, shift=shift))
 
     elif pot_type in ('bornmayer', 'born_mayer'):
-        engine.add(BornMayerPotential(params, r_cut=rc))
+        engine.add(BornMayerPotential(params, r_cut=rc, shift=shift))
 
     elif pot_type == 'buckingham':
         # Bug-fix note (F4, load side): the original reconstructed only a
@@ -246,7 +249,7 @@ def load_potential(path    : str,
         # way.  Now that BuckinghamPotential(A, rho, C) exists, build it
         # directly from the full deserialised params -- no information
         # is lost and no extra reload step is required.
-        engine.add(BuckinghamPotential(params, r_cut=rc))
+        engine.add(BuckinghamPotential(params, r_cut=rc, shift=shift))
 
     elif pot_type in ('sw', 'stillinger_weber', 'stillingerweber'):
         engine.add(StillingerWeberPotential(params, r_cut=None,

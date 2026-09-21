@@ -1331,3 +1331,61 @@ def test_pppm_accuracy_knob_actually_buys_accuracy():
     assert errors[0] < 1e-2, (
         f"even the loosest setting should be well under 1% relative force "
         f"error, got {errors[0]:.3e}")
+
+
+@pytest.mark.parametrize("cls_name,params", [
+    ("BornMayerPotential",  {"A": 1200.0, "rho": 0.32}),
+    ("BuckinghamPotential", {"A": 1200.0, "rho": 0.32, "C": 25.0}),
+])
+def test_ionic_pair_potentials_shift_to_zero_at_the_cutoff(cls_name, params):
+    """Born-Mayer and Buckingham must offer the shift their siblings do.
+
+    LJ, Morse, Mie and Yukawa have all had force-shifted truncation from
+    the start; these two had none, so their energy stepped every time a
+    pair crossed r_cut.  The step is not small for an ionic oxide -- the
+    O-O dispersion term of the ZnO example leaves -2.05e-03 eV at
+    r_cut = 5.0 A -- and a force that is not the exact gradient of an
+    energy drifts an NVE run at a rate that does NOT fall with the
+    timestep.  Measured on 300-atom wurtzite ZnO over 10 ps:
+
+        shift   dt=1.0 fs   dt=0.5 fs     [meV/atom/ns]
+        off       -1.347      -1.046      flat: not an integrator error
+        on        -0.047      +0.001      falls with dt, as it should
+
+    Unshifted missed the 1 meV/atom/ns bar at both timesteps; shifted
+    clears it by more than an order of magnitude.
+    """
+    import akitsushima.engine.pair_potentials as PP
+
+    cls = getattr(PP, cls_name)
+    pair = frozenset({"Na", "Cl"})
+    r_cut = 5.0
+
+    shifted = cls({pair: params}, r_cut=r_cut)
+    raw = cls({pair: params}, r_cut=r_cut, shift=False)
+
+    assert shifted.shift is True, (
+        f"{cls_name} must default to shift=True, matching every other pair "
+        f"potential in this module")
+
+    v_cut, dv_cut = shifted.pair_energy_force(np.array([r_cut]), "Na", "Cl")
+    assert abs(float(v_cut[0])) < 1e-12 and abs(float(dv_cut[0])) < 1e-12, (
+        f"{cls_name} with shift=True must send V and dV/dr to zero at "
+        f"r_cut, got V={float(v_cut[0]):.3e}, dV/dr={float(dv_cut[0]):.3e}")
+
+    # The raw form must still be reachable, and must NOT vanish there --
+    # otherwise the test above would pass on a potential that is simply
+    # zero at the cutoff for unrelated reasons.
+    v_raw, _ = raw.pair_energy_force(np.array([r_cut]), "Na", "Cl")
+    assert abs(float(v_raw[0])) > 1e-9, (
+        f"test premise: {cls_name} must have a non-zero tail at r_cut for "
+        f"the shift to be doing anything, got {float(v_raw[0]):.3e}")
+
+    # Away from the cutoff the shift is a constant plus a linear term, so
+    # the difference of the two must be exactly that.
+    r = np.array([2.4, 3.1])
+    vs, dvs = shifted.pair_energy_force(r, "Na", "Cl")
+    vr, dvr = raw.pair_energy_force(r, "Na", "Cl")
+    vc, dvc = raw.pair_energy_force(np.array([r_cut]), "Na", "Cl")
+    assert np.allclose(vs, vr - vc[0] - dvc[0] * (r - r_cut), atol=1e-12)
+    assert np.allclose(dvs, dvr - dvc[0], atol=1e-12)

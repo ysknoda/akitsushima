@@ -383,11 +383,25 @@ def test_buckingham_build_engine_includes_dispersion_term():
         "that silently discards C")
     assert pot.params[pair]["C"] == pytest.approx(30.0)
 
-    # Cross-check against the hand-written V(r) = A exp(-r/rho) - C/r^6
+    # Cross-check against the hand-written V(r) = A exp(-r/rho) - C/r^6.
+    # The engine force-shifts by default (as every pair potential in that
+    # module now does), so compare against the raw form with the shift
+    # switched off -- the point of this test is that C survives, not how
+    # the tail is truncated.
+    raw = BuckinghamParameterSet(
+        [pair], ["Mg", "O"], true_buck, charges={"Mg": 2.0, "O": -2.0},
+        shift=False, fix_charges=True).build_engine(decoded)._potentials[0]
     r = 2.4
     V_expected = 1000.0 * np.exp(-r / 0.30) - 30.0 / r ** 6
-    V_actual, _ = pot.pair_energy_force(r, "Mg", "O")
+    V_actual, _ = raw.pair_energy_force(r, "Mg", "O")
     assert V_actual == pytest.approx(V_expected, rel=1e-10)
+
+    # And with the shift on, the potential must vanish AT the cutoff --
+    # which is the property that makes an NVE trajectory conserve energy.
+    V_cut, dV_cut = pot.pair_energy_force(pot.r_cut, "Mg", "O")
+    assert abs(V_cut) < 1e-12 and abs(dV_cut) < 1e-12, (
+        f"force-shifted truncation must send V and dV/dr to zero at r_cut, "
+        f"got V={V_cut:.3e}, dV/dr={dV_cut:.3e}")
 
 
 def test_load_potential_buckingham_preserves_dispersion(tmp_path):
@@ -491,8 +505,15 @@ def test_evaluate_diagnostics_generic_includes_coulomb(tmp_path, small_cell_ok):
     structs = _make_training_structures(
         engine_true, structs_raw, r_cut=8.0, charges=charges)
 
+    # r_cut must match the one the reference data was generated with.
+    # build_engine used to hard-code 10.0 and ignore it; that was
+    # invisible while Buckingham had no force shift (the neighbour list
+    # capped pairs at the caller's smaller cutoff anyway) and became a
+    # 6.1e-04 eV energy bias the moment it gained one, because the
+    # subtracted V(r_cut) is evaluated at the engine's own cutoff.
     param_set = BuckinghamParameterSet(
-        [pair], ["Na", "Cl"], true_buck, charges=charges, fix_charges=True)
+        [pair], ["Na", "Cl"], true_buck, charges=charges, r_cut=8.0,
+        fix_charges=True)
     fitted_params = param_set.decode(param_set.x0)
 
     diag = evaluate_diagnostics_generic(
@@ -971,3 +992,52 @@ def test_every_model_routes_its_split_through_the_grouped_helper(
     assert calls, (
         f"{model_module}'s fit() did not call structure_grouped_split -- "
         f"it is still splitting rows on its own")
+
+
+def test_make_force_fn_engine_backend_honours_charges(small_cell_ok):
+    """charges= must not be accepted and dropped.
+
+    It is keyword-only and shared with the 'buckingham' backend, and the
+    PotentialEngine branch used to ignore it silently.  Asking for an
+    ionic crystal and getting a neutral one back is the largest silent
+    error this function can make: for wurtzite ZnO it moves the energy
+    from -19.7 to +3.1 eV/atom, bound to unbound.
+
+    The two backends build the same Buckingham potential, so with the
+    same charges they must return the same numbers.
+    """
+    from akitsushima.engine import BuckinghamPotential, PotentialEngine
+    from akitsushima.fitting.force_fn import make_force_fn
+
+    nacl = rocksalt_nacl_dict()
+    pair = frozenset({"Na", "Cl"})
+    buck = {pair: {"A": 1200.0, "rho": 0.32, "C": 25.0}}
+    charges = {"Na": 1.0, "Cl": -1.0}
+    r_cut = 4.0
+
+    engine = PotentialEngine().add(
+        BuckinghamPotential(buck, r_cut=r_cut,
+                            allow_minimum_image_violation=True))
+    fn_engine = make_force_fn(engine, charges=charges, r_cut=r_cut)
+    fn_legacy = make_force_fn("buckingham", buck_params=buck,
+                              charges=charges, r_cut=r_cut)
+
+    args = (nacl["lattice"], nacl["positions"], nacl["atom_types"])
+    e_eng, f_eng, s_eng = fn_engine(*args)
+    e_leg, f_leg, s_leg = fn_legacy(*args)
+
+    assert e_eng == pytest.approx(e_leg, rel=1e-12), (
+        f"engine backend with charges= gave {e_eng:.6f} eV against the "
+        f"'buckingham' backend's {e_leg:.6f} eV -- a gap this size is the "
+        f"electrostatic energy going missing")
+    assert np.allclose(f_eng, f_leg, atol=1e-12)
+    assert np.allclose(s_eng, s_leg, atol=1e-12)
+
+    # And the electrostatics must actually be present, or the test above
+    # would pass on two equally neutral calculations.
+    fn_neutral = make_force_fn(engine, r_cut=r_cut)
+    e_neutral, _, _ = fn_neutral(*args)
+    assert abs(e_eng - e_neutral) > 1.0, (
+        f"test premise: the Coulomb term must be a large part of this "
+        f"energy, but with and without charges differ by only "
+        f"{abs(e_eng - e_neutral):.3e} eV")

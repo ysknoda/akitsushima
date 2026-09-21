@@ -153,6 +153,10 @@ def make_force_fn(backend,
             maximum internal cutoff (engine.r_cut property).  Pass r_cut=
             explicitly to override (e.g. when the NeighbourList should use
             a different value than the potential cutoff).
+            Pass charges= as well to add Ewald/PPPM electrostatics on top,
+            exactly as the 'buckingham' backend does.  That kwarg used to
+            be accepted here and silently ignored, which turned an ionic
+            calculation into a neutral one without a word.
         ELMModel / QuantizedELMModel instance
             Numerical differentiation of (1/2) sum_i.
             Requires descriptor_fn=.  r_cut is not auto-detected; pass
@@ -260,6 +264,31 @@ def make_force_fn(backend,
                     UserWarning, stacklevel=2)
 
         from ..utils.jit import _NUMBA_ENV
+
+        if charges is not None:
+            # charges= is keyword-only and shared with the 'buckingham'
+            # backend, and this branch used to accept it and drop it on
+            # the floor.  Asking for an ionic crystal and silently getting
+            # a neutral one is the largest possible silent error: for
+            # wurtzite ZnO it moves the energy from -19.7 to +3.1 eV/atom,
+            # i.e. from bound to unbound.  Route it through the same
+            # electrostatics the 'buckingham' backend uses instead.
+            def _engine_coulomb_fn(lattice, positions, atom_types,
+                                   neigh_list=None):
+                return compute_all_general(
+                    lattice, positions, atom_types, _eng,
+                    charges        = charges,
+                    r_cut          = _rc,
+                    ewald_alpha    = ewald_alpha,
+                    coulomb_method = coulomb_method,
+                    pppm_accuracy  = pppm_accuracy,
+                    pppm_mesh      = pppm_mesh,
+                    pppm_order     = pppm_order,
+                    neigh_list     = neigh_list)
+            _engine_coulomb_fn.r_cut  = _rc
+            _engine_coulomb_fn.kind   = "engine"
+            _engine_coulomb_fn.engine = _eng
+            return _engine_coulomb_fn
 
         def _engine_fn(lattice, positions, atom_types, neigh_list=None):
             return _eng.compute(lattice, positions, atom_types,

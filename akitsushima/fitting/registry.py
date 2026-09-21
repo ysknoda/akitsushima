@@ -209,7 +209,8 @@ def _build_param_set_buckingham(cfg, all_species, pairs, r_cut):
             charges[sp] = 0.0
     return BuckinghamParameterSet(
         pairs=list(initial_buck.keys()), species=all_species,
-        initial_buck=initial_buck, charges=charges,
+        initial_buck=initial_buck, charges=charges, r_cut=r_cut,
+        shift=bool(cfg.get("shift", True)),
         fix_charges=cfg.get("fix_charges", True))
 
 
@@ -422,7 +423,8 @@ def _build_from_yaml_bornmayer(pot_cfg):
     params  = pot_cfg.get("params", {})
     pair_params, r_cut = _pairs_to_frozenset_dict(params, species, pot_cfg, "BornMayer")
     engine = PotentialEngine().add(
-        BornMayerPotential(params=pair_params, r_cut=r_cut))
+        BornMayerPotential(params=pair_params, r_cut=r_cut,
+                          shift=bool(pot_cfg.get("shift", True))))
     return make_force_fn(engine), r_cut
 
 

@@ -88,12 +88,16 @@ class BuckinghamParameterSet(FittableParameterSet):
                  species      : list,
                  initial_buck : dict,
                  charges      : dict,
-                 fix_charges  : bool = True):
+                 r_cut        : float = 10.0,
+                 shift        : bool  = True,
+                 fix_charges  : bool  = True):
         self.pairs        = pairs
         self.pair_list    = list(pairs)
         self.species      = species
         self.charges      = charges.copy()
         self.fix_charges  = fix_charges
+        self.r_cut        = r_cut
+        self.shift        = shift
 
         _x0, _lo, _hi = [], [], []
         for pair in self.pair_list:
@@ -143,9 +147,23 @@ class BuckinghamParameterSet(FittableParameterSet):
         BuckinghamPotential(A, rho, C) exists as a first-class
         BasePairPotential subclass, build it directly from the full
         decoded dict.
+
+        Second bug-fix note: this used to hard-code ``r_cut = 10.0``,
+        ignoring the cutoff the caller and the reference data actually
+        use -- every other parameter set in this module passes
+        ``self.r_cut``.  While the potential had no force shift the
+        mismatch was invisible, because the neighbour list only ever
+        supplied pairs out to the caller's (smaller) cutoff, so the
+        engine's larger one never bit.  With the shift it does: the
+        subtracted constant V(r_cut) is evaluated at the engine's r_cut,
+        so a mismatch biases every pair.  Surfaced by
+        test_evaluate_diagnostics_generic_includes_coulomb, whose energy
+        MAE jumped from below 1e-6 to 6.1e-04 the moment Buckingham
+        gained a shift.
         """
-        r_cut = 10.0
-        return PotentialEngine().add(BuckinghamPotential(params["buck"], r_cut=r_cut))
+        return PotentialEngine().add(
+            BuckinghamPotential(params["buck"], r_cut=self.r_cut,
+                                shift=self.shift))
 
 
 # ---------------------------------------------------------------------------
@@ -322,12 +340,14 @@ class BornMayerParameterSet(FittableParameterSet):
                  initial_bm  : dict,
                  charges     : dict,
                  r_cut       : float = 10.0,
+                 shift       : bool  = True,
                  fix_charges : bool  = True):
         self.pair_list  = list(pairs)
         self.species    = species
         self.charges    = charges.copy()
         self.fix_charges = fix_charges
         self.r_cut      = r_cut
+        self.shift      = shift
 
         _x0, _lo, _hi = [], [], []
         for pair in self.pair_list:
@@ -368,7 +388,8 @@ class BornMayerParameterSet(FittableParameterSet):
 
     def build_engine(self, params: dict) -> PotentialEngine:
         return (PotentialEngine()
-                .add(BornMayerPotential(params["bm"], r_cut=self.r_cut)))
+                .add(BornMayerPotential(params["bm"], r_cut=self.r_cut,
+                                       shift=self.shift)))
 
 
 # ---------------------------------------------------------------------------
