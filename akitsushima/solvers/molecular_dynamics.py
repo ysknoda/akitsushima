@@ -1100,6 +1100,18 @@ class NVESimulation(_BaseMDSimulation):
                 drift  = e_tot - e_tot_ref
 
                 is_prod = step >= self.equil_steps
+                if is_prod and not t_list:
+                    # Same re-referencing as NPT, for the same reason:
+                    # the summary's averages are over the production
+                    # window, so its drift should be too.  NVE does not
+                    # rescale velocities, so here this only excludes the
+                    # initial transient in which the Maxwell-Boltzmann
+                    # draw equipartitions into potential energy -- which
+                    # conserves E_tot but is not what a reader asking
+                    # about integrator quality wants included.  With
+                    # equil_steps = 0 this changes nothing.
+                    e_tot_ref = e_tot
+                    drift = 0.0
                 if is_prod:
                     t_list.append(T_inst)
                     ep_list.append(e_pot)
@@ -1692,6 +1704,19 @@ class NPTSimulation(_BaseMDSimulation):
 
                 is_prod = step >= self.equil_steps
                 if is_prod:
+                    # Re-reference the conserved quantity at the first
+                    # production step.  H_ref was taken before the loop,
+                    # so the reported drift spanned the equilibration
+                    # phase -- during which velocity_rescale_steps
+                    # DELIBERATELY rescales velocities and therefore
+                    # breaks conservation.  The number that came out was
+                    # not an integrator diagnostic at all: a healthy
+                    # 128-atom GeSn run reported 3.2053 eV of "H_NPT
+                    # drift" against 0.0007 eV across its actual
+                    # production window, a factor of 4600.  With
+                    # equil_steps = 0 this changes nothing.
+                    if not T_list:
+                        H_ref = H_NPT
                     T_list.append(T_inst)
                     P_list.append(P_gpa)
                     V_list.append(V_inst)

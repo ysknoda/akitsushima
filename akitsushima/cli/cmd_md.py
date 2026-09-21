@@ -166,8 +166,15 @@ def cmd_md(args) -> int:
         # the two quantities the ensemble exists to control.
         print("\n[Thermodynamics  (run summary)]")
         if result.get("T_mean") is not None:
-            print(f"  T_mean      : {result['T_mean']:.2f} K  "
-                  f"(target {md_cfg.get('temperature',300.0):.1f} K)")
+            # NVE has no target temperature -- `temperature` there is the
+            # Maxwell-Boltzmann draw the velocities start from, and
+            # equipartition sends about half of it into potential energy,
+            # so an NVE run started at 600 K settles near 300 K.  Labelling
+            # that "target 600.0 K" reads as a run that missed by 2x.
+            t_set = md_cfg.get("temperature", 300.0)
+            note = (f"(initial MB draw {t_set:.1f} K; equipartition halves it)"
+                    if ens == "nve" else f"(target {t_set:.1f} K)")
+            print(f"  T_mean      : {result['T_mean']:.2f} K  {note}")
             print(f"  T_std       : {result.get('T_std', float('nan')):.2f} K")
         if result.get("e_pot_mean") is not None:
             ep = result["e_pot_mean"]

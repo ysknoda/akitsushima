@@ -2082,3 +2082,45 @@ def test_line_search_trials_are_actually_on_the_line(tmp_path):
     assert abs(e_direct - e_after_retry) < 1e-12, (
         f"the same point gives {e_direct:.9f} eV directly but "
         f"{e_after_retry:.9f} eV after a rejected trial")
+
+
+def test_npt_drift_is_measured_over_production_not_equilibration(tmp_path):
+    """The reported H_NPT drift must be an integrator diagnostic.
+
+    ``H_ref`` used to be taken before the loop, so the drift spanned the
+    equilibration phase -- during which ``velocity_rescale_steps``
+    DELIBERATELY rescales velocities and therefore breaks conservation by
+    construction.  What came out was a measure of the thermostat's warm-up,
+    not of the integrator: a healthy 128-atom GeSn run reported 3.2053 eV
+    against 0.0007 eV across its actual production window.
+
+    The bar here is the one this module's own section header sets for a
+    conserved quantity, |delta| / N / ns < 1 meV/atom/ns.  With rescaling
+    active over the whole equilibration phase, the old reference point
+    missed that bar by more than two orders of magnitude while the
+    dynamics were perfectly healthy.
+    """
+    fn = _lj_force_fn(r_cut=3.2)
+    al = _fcc_al_supercell()
+    n_steps, dt = 400, 0.5
+
+    drifts = {}
+    for label, rescale in (("no rescaling", 0), ("rescaling on", 200)):
+        sim = NPTSimulation(
+            al["lattice"], al["positions"], al["atom_types"],
+            force_fn=fn, temperature=300.0, pressure=0.0,
+            timestep=dt, n_steps=n_steps, equil_steps=200,
+            velocity_rescale_steps=rescale,
+            tau_nhc=50.0, tau_baro=500.0, seed=1, verbose=False,
+            thermo_every=1000000, traj_every=1000000,
+            output_dir=str(tmp_path / label.replace(" ", "_")))
+        res = sim.run()
+        n_atoms = len(al["atom_types"])
+        prod_ns = n_steps * dt * 1e-6              # fs -> ns
+        drifts[label] = abs(res["H_npt_drift"]) / n_atoms / prod_ns
+
+    for label, rate in drifts.items():
+        assert rate < 1.0, (
+            f"H_NPT drift with {label}: {rate:.3f} meV/atom/ns, past the "
+            f"1 meV/atom/ns bar this module sets for a conserved quantity "
+            f"(all rates: { {k: round(v, 4) for k, v in drifts.items()} })")
