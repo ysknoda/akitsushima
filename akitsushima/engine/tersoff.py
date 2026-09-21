@@ -2,6 +2,32 @@
 
 Reference: Tersoff, Phys. Rev. Lett. 56, 632 (1986);
            Phys. Rev. B 37, 6991 (1988); Phys. Rev. B 38, 9902 (1988).
+
+Pair-sum convention (four duplicated kernels depend on it)
+----------------------------------------------------------
+The total energy is
+
+    E = (1/2) sum_{i != j} fc(r_ij) [ fR(r_ij) + b_ij fA(r_ij) ]
+
+and every kernel here iterates over ``NeighbourList.get_candidate_pairs()``,
+which yields each pair EXACTLY ONCE (i < j), with the bond order already
+symmetrised as ``b_avg = (b_ij + b_ji) / 2``.  Summing
+``fc * (fR + b_avg * fA)`` over those unique pairs therefore reproduces the
+double sum with a prefactor of 1, not 1/2 -- the 1/2 is already spent on
+symmetrising ``b``.  For the same reason the three-body force correction
+carries ``d(b_avg)/d(zeta_ij) = (1/2) db_ij/d(zeta_ij)``, i.e. ``coeff =
+0.5 * fc_ij * fA * dbij``.
+
+This is spelled out because an earlier revision carried an extra 0.5 at
+all sixteen of those sites, returning exactly HALF the correct energy,
+forces and stress for every Tersoff calculation.  It was invisible to the
+finite-difference tests, which compare forces against the derivative of
+this same (uniformly halved) energy, and to the numba-vs-NumPy tests,
+which compare two paths that were halved identically.  What caught it was
+an absolute check against a published reference value -- Tersoff T3
+silicon, whose parameter set is fit to a0 = 5.432 A and E_coh = 4.63
+eV/atom; see tests/test_engine_forces.py::
+test_tersoff_t3_silicon_reproduces_published_cohesive_energy.
 """
 import math
 from typing import Optional, Tuple
@@ -167,7 +193,7 @@ def _te_3body_force_numpy(p_start, p_end,
                 fc_ik = _te_fc(r_ik, R, D)
                 if fc_ik == 0.0:
                     continue
-                coeff = 0.25 * fc_ij * fa_ij * dbi
+                coeff = 0.5 * fc_ij * fa_ij * dbi
 
                 dzj0 = (_te_zterm_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
                         - _te_zterm_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
@@ -227,7 +253,7 @@ def _te_3body_force_numpy(p_start, p_end,
                 fc_jk = _te_fc(r_jk, R, D)
                 if fc_jk == 0.0:
                     continue
-                coeff = 0.25 * fc_ij * fa_ij * dbj
+                coeff = 0.5 * fc_ij * fa_ij * dbj
 
                 dzi0 = (_te_zterm_scalar(rjix + hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
                         - _te_zterm_scalar(rjix - hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
@@ -316,7 +342,7 @@ def _te_3body_force_numpy_par(p_start, p_end,
                 fc_ik = _te_fc(r_ik, R, D)
                 if fc_ik == 0.0:
                     continue
-                coeff = 0.25 * fc_ij * fa_ij * dbi
+                coeff = 0.5 * fc_ij * fa_ij * dbi
 
                 dzj0 = (_te_zterm_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
                         - _te_zterm_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
@@ -376,7 +402,7 @@ def _te_3body_force_numpy_par(p_start, p_end,
                 fc_jk = _te_fc(r_jk, R, D)
                 if fc_jk == 0.0:
                     continue
-                coeff = 0.25 * fc_ij * fa_ij * dbj
+                coeff = 0.5 * fc_ij * fa_ij * dbj
 
                 dzi0 = (_te_zterm_scalar(rjix + hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
                         - _te_zterm_scalar(rjix - hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
@@ -614,9 +640,9 @@ def _te_multi_pass3_numpy(p_start, p_end,
         fa = -B_t * _nb_exp(-l2 * r_ij)
         b_avg = 0.5 * (bij_ij[p] + bij_ji[p])
 
-        energy += 0.5 * fc_ij * (fr + b_avg * fa)
-        dEdr = 0.5 * (dfc_ij * (fr + b_avg * fa)
-                      + fc_ij * (-l1 * fr + b_avg * (-l2 * fa)))
+        energy += fc_ij * (fr + b_avg * fa)
+        dEdr = (dfc_ij * (fr + b_avg * fa)
+                + fc_ij * (-l1 * fr + b_avg * (-l2 * fa)))
         cx = dEdr / r_ij
         for d in range(3):
             fv = cx * rij_arr[p, d]
@@ -652,7 +678,7 @@ def _te_multi_pass3_numpy(p_start, p_end,
                 l3 = tri_l3[si, sj, sk]
                 m_t = tri_m[si, sj, sk]
                 gam = tri_gam[si, sj, sk]
-                coeff = 0.25 * fc_ij * fa * dbi
+                coeff = 0.5 * fc_ij * fa * dbi
 
                 dzj0 = (_te_zterm_scalar_multi(rijx + hh, rijy, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
                         - _te_zterm_scalar_multi(rijx - hh, rijy, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
@@ -723,7 +749,7 @@ def _te_multi_pass3_numpy(p_start, p_end,
                 l3 = tri_l3[sj, si, sk]
                 m_t = tri_m[sj, si, sk]
                 gam = tri_gam[sj, si, sk]
-                coeff = 0.25 * fc_ij * fa * dbj
+                coeff = 0.5 * fc_ij * fa * dbj
 
                 dzi0 = (_te_zterm_scalar_multi(rjix + hh, rjiy, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
                         - _te_zterm_scalar_multi(rjix - hh, rjiy, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
@@ -1132,8 +1158,8 @@ class TersoffPotential:
         fr_l = A_t * np.exp(-l1 * r_loc)
         fa_l = -B_t * np.exp(-l2 * r_loc)
 
-        energy += float((0.5 * fc_l * (fr_l + bij_avg * fa_l)).sum())
-        dEdr = 0.5 * (dfc_l * (fr_l + bij_avg * fa_l) + fc_l * (-l1 * fr_l + bij_avg * (-l2 * fa_l)))
+        energy += float((fc_l * (fr_l + bij_avg * fa_l)).sum())
+        dEdr = (dfc_l * (fr_l + bij_avg * fa_l) + fc_l * (-l1 * fr_l + bij_avg * (-l2 * fa_l)))
         fij = (dEdr / r_loc)[:, None] * rij_loc
         np.add.at(forces, ii_loc, fij)
         np.add.at(forces, jj_loc, -fij)
@@ -1184,7 +1210,7 @@ class TersoffPotential:
                         fc_ik = _fc1(r_ik)
                         if fc_ik == 0.0:
                             continue
-                        coeff = 0.25 * fc_ij * fa_ij * dbi
+                        coeff = 0.5 * fc_ij * fa_ij * dbi
                         dz_dposj, dz_dposk = self._zeta_grad(
                             rij_v, rik_v, 1.0, R_t, D_t, c_t, d_t, h_t, l3, 3.0,
                             _fc_pair)
@@ -1209,7 +1235,7 @@ class TersoffPotential:
                         fc_jk = _fc1(r_jk)
                         if fc_jk == 0.0:
                             continue
-                        coeff = 0.25 * fc_ij * fa_ij * dbj
+                        coeff = 0.5 * fc_ij * fa_ij * dbj
                         # Derivation roles: "i"=j(real), "j"=i(real), "k"=k(real)
                         dz_dposi, dz_dposk = self._zeta_grad(
                             rji_v, rjk_v, 1.0, R_t, D_t, c_t, d_t, h_t, l3, 3.0,
@@ -1565,9 +1591,9 @@ class TersoffPotential:
                 fa = -B_t * math.exp(-l2 * r_ij)
                 b_avg = 0.5 * (bij_ij[p] + bij_ji[p])
 
-                energy += 0.5 * fc_ij * (fr + b_avg * fa)
-                dEdr = 0.5 * (dfc_ij * (fr + b_avg * fa)
-                              + fc_ij * (-l1 * fr + b_avg * (-l2 * fa)))
+                energy += fc_ij * (fr + b_avg * fa)
+                dEdr = (dfc_ij * (fr + b_avg * fa)
+                        + fc_ij * (-l1 * fr + b_avg * (-l2 * fa)))
                 fij = (dEdr / r_ij) * rij_v
                 forces[ii] += fij
                 forces[jj] -= fij
@@ -1602,7 +1628,7 @@ class TersoffPotential:
                         l3 = float(tri['lambda3'])
                         m_t = float(tri.get('m', 3.0))
                         gam = float(tri.get('gamma', 1.0))
-                        coeff = 0.25 * fc_ij * fa * dbi
+                        coeff = 0.5 * fc_ij * fa * dbi
                         dz_dposj, dz_dposk = self._zeta_grad(
                             rij_v, rik_v, gam, R_ik, D_ik, c_t, d_t, h_t, l3, m_t,
                             lambda r_: (_fc1(r_, R_ik, D_ik), _dfc1(r_, R_ik, D_ik)))
@@ -1638,7 +1664,7 @@ class TersoffPotential:
                         l3 = float(tri['lambda3'])
                         m_t = float(tri.get('m', 3.0))
                         gam = float(tri.get('gamma', 1.0))
-                        coeff = 0.25 * fc_ij * fa * dbj
+                        coeff = 0.5 * fc_ij * fa * dbj
                         # Derivation roles: "i"=j(real), "j"=i(real), "k"=k(real)
                         dz_dposi, dz_dposk = self._zeta_grad(
                             rji_v, rjk_v, gam, R_jk, D_jk, c_t, d_t, h_t, l3, m_t,

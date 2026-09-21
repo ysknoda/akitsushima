@@ -1059,3 +1059,113 @@ def test_pppm_cache_key_distinguishes_r_cut():
     assert len(_pppm_cache) == 2, (
         "the two distinct r_cut values must occupy two distinct cache "
         "entries")
+
+
+# ===========================================================================
+# Absolute reference-value checks
+#
+# Every other test in this file is RELATIVE: finite-difference oracles
+# compare forces against the derivative of the same code's energy, and the
+# numba-vs-NumPy tests compare two paths against each other.  A constant
+# factor applied uniformly to energy, forces and stress is invisible to
+# both -- the FD check still agrees, and both paths are wrong identically.
+#
+# Exactly that happened: every Tersoff kernel carried a spurious 0.5 on
+# the pair term (and the matching 0.25 on the three-body correction) and
+# returned HALF the correct energy, forces and stress, while the whole
+# suite stayed green.  The tests below close that hole by pinning the two
+# many-body potentials to numbers their authors published, which no
+# internal consistency check can reproduce by construction.
+# ===========================================================================
+
+def _diamond_supercell(a: float, species: str, n: int = 2):
+    """Conventional diamond cell repeated n^3 times, lattice constant a."""
+    base = np.array([[0.0, 0.0, 0.0], [0.25, 0.25, 0.25],
+                     [0.0, 0.5, 0.5], [0.25, 0.75, 0.75],
+                     [0.5, 0.0, 0.5], [0.75, 0.25, 0.75],
+                     [0.5, 0.5, 0.0], [0.75, 0.75, 0.25]])
+    lattice = np.eye(3) * (a * n)
+    frac = np.concatenate([base + [i, j, k]
+                           for i in range(n) for j in range(n)
+                           for k in range(n)]) / n
+    return lattice, frac @ lattice, [species] * len(frac)
+
+
+def _energy_volume_minimum(pot, a_grid, species, r_cut):
+    """(a_at_minimum, E_per_atom_at_minimum) over a lattice-constant scan."""
+    from akitsushima.engine import NeighbourList
+
+    out = {}
+    for a in a_grid:
+        lattice, positions, types = _diamond_supercell(a, species)
+        nl = NeighbourList(r_cut=r_cut, skin_width=0.0)
+        nl.build(lattice, positions)
+        e, _, _ = pot.compute(lattice, positions, types, neigh_list=nl)
+        out[a] = e / len(types)
+    a_min = min(out, key=out.get)
+    return a_min, out[a_min]
+
+
+def test_tersoff_t3_silicon_reproduces_published_cohesive_energy():
+    """Tersoff T3 silicon was fit to two measured numbers, which any
+    correct implementation of the T3 parameter set must return:
+
+        a0 = 5.432 A,  E_coh = 4.63 eV/atom
+
+    (Tersoff, Phys. Rev. B 38, 9902 (1988), Table I and the surrounding
+    text; the same pair of values LAMMPS' shipped Si.tersoff reproduces.)
+
+    This is an ABSOLUTE check, and that is the whole point -- see the
+    section header above.  When this file's Tersoff kernels carried an
+    extra factor of 1/2, the lattice constant below still came out at
+    exactly 5.432 A (a uniform scale factor cannot move the minimum of
+    E(a)) while the cohesive energy came out at 2.3148 eV/atom, half of
+    the published 4.63.  Only the energy assertion catches that."""
+    from akitsushima.engine import TersoffPotential
+
+    pot = TersoffPotential(dict(_TERSOFF_SI_PARAMS), species=["Si"])
+    a_min, e_min = _energy_volume_minimum(
+        pot, np.round(np.arange(5.35, 5.51, 0.002), 3), "Si", r_cut=3.0)
+
+    assert a_min == pytest.approx(5.432, abs=0.005), (
+        f"Tersoff T3 silicon must minimise at the published a0 = 5.432 A, "
+        f"got {a_min:.3f} A")
+    assert abs(e_min) == pytest.approx(4.63, rel=0.01), (
+        f"Tersoff T3 silicon must give the published E_coh = 4.63 eV/atom, "
+        f"got {abs(e_min):.4f} eV/atom (ratio {abs(e_min) / 4.63:.4f}) -- a "
+        f"ratio near 0.5 means the pair sum is being halved twice: the "
+        f"candidate-pair list already holds each pair once and b_avg "
+        f"already carries the 1/2, so the pair prefactor is 1")
+
+
+def test_sw_silicon_reproduces_published_cohesive_energy():
+    """The original Stillinger-Weber silicon parameter set is constructed
+    so that the diamond structure sits at
+
+        a0 = 5.431 A,  E_coh = 2 * epsilon = 4.3366 eV/atom
+
+    (Stillinger and Weber, Phys. Rev. B 31, 5262 (1985): epsilon is
+    defined as 50 kcal/mol = 2.16826 eV, and the remaining parameters are
+    chosen to put the diamond lattice at exactly -2 epsilon per atom.)
+
+    SW was correct when the Tersoff halving was found, so this test went
+    in green.  It stays because it is the companion check that tells the
+    two apart: if a future change to the shared pair-list convention
+    halves one of them, exactly one of these two tests moves."""
+    from akitsushima.engine import StillingerWeberPotential
+
+    epsilon = 2.16826
+    params = dict(epsilon=epsilon, sigma=2.0951, a=1.80, A=7.049556277,
+                  B=0.6022245584, p=4.0, q=0.0, lam=21.0, gamma=1.20,
+                  costheta0=-1.0 / 3.0)
+    pot = StillingerWeberPotential(params=params, species=["Si"])
+    a_min, e_min = _energy_volume_minimum(
+        pot, np.round(np.arange(5.35, 5.51, 0.002), 3), "Si",
+        r_cut=1.80 * 2.0951)
+
+    assert a_min == pytest.approx(5.431, abs=0.005), (
+        f"SW silicon must minimise at the published a0 = 5.431 A, got "
+        f"{a_min:.3f} A")
+    assert abs(e_min) == pytest.approx(2.0 * epsilon, rel=0.001), (
+        f"SW silicon must give E_coh = 2*epsilon = {2 * epsilon:.4f} "
+        f"eV/atom, got {abs(e_min):.4f} eV/atom")
