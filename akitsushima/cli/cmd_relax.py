@@ -6,6 +6,7 @@ import numpy as np
 
 from ..constants import EV_ANG3_TO_GPA
 from ..solvers import GeometryOptimiser
+from ..fitting.force_fn import _resolve_force_fn
 from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..utils.mpi import _mpi_rank
 from .common import (
@@ -59,10 +60,35 @@ def cmd_relax(args) -> int:
             print(f"  cell_update_scheme : {rel_cfg.get('cell_update_scheme', 'generalized_force')}")
             print(f"  lattice_constraints: {rel_cfg.get('lattice_constraints', None)} (null=all free)")
 
-    # Initial energy
+    # Initial energy.
+    #
+    # This used to call force_fn() directly, which is fine for every
+    # potential whose YAML bridge returns a callable -- but NOT for the
+    # Buckingham branch of _build_force_fn_from_yaml, which by design
+    # returns force_fn=None plus (buck_params, charges) for the solver's
+    # legacy constructor kwargs (see that function's docstring).  The
+    # `if force_fn is not None` guard that handles this sits further
+    # down, where the GeometryOptimiser kwargs are assembled, so
+    # `akitsushima relax` on a `potential: {type: Buckingham}` config
+    # died here with "'NoneType' object is not callable" before it ever
+    # reached the optimiser -- i.e. the Buckingham + Coulomb relax path
+    # had never run.  (`akitsushima md` was unaffected: cmd_md has no
+    # equivalent pre-call.)
+    #
+    # Resolving through the same helper GeometryOptimiser itself uses
+    # also guarantees the energy printed below is the one the optimiser
+    # goes on to see, rather than a separately constructed lookalike.
+    eval_fn, _ = _resolve_force_fn(
+        force_fn, r_cut, buck_params, charges,
+        pot_cfg.get("ewald_alpha"),
+        pot_cfg.get("coulomb_method", "ewald"),
+        pot_cfg.get("pppm_accuracy", 1e-5),
+        pot_cfg.get("pppm_mesh"),
+        pot_cfg.get("pppm_order", 6),
+        "cmd_relax")
     t_fe0 = _time.perf_counter()
-    E0, F0, S0 = force_fn(pos_data["lattice"], pos_data["positions"],
-                           pos_data["atom_types"])
+    E0, F0, S0 = eval_fn(pos_data["lattice"], pos_data["positions"],
+                          pos_data["atom_types"])
     t_fe0 = _time.perf_counter() - t_fe0
     fmax0 = float(np.max(np.abs(F0)))
     pmax0 = float(np.max(np.abs(S0))) * EV_ANG3_TO_GPA

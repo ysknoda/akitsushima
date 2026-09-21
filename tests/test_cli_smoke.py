@@ -147,6 +147,83 @@ def test_cmd_relax_smoke(tmp_path):
     assert (tmp_path / "relax_out" / "POSCAR_relaxed").is_file()
 
 
+def test_cmd_relax_buckingham_coulomb_runs(tmp_path):
+    """`relax` on a Buckingham + Coulomb config must actually run.
+
+    The Buckingham branch of _build_force_fn_from_yaml deliberately
+    returns force_fn=None plus (buck_params, charges), which the solver
+    takes as legacy constructor kwargs.  cmd_relax used to evaluate the
+    initial state by calling force_fn() directly, before the guard that
+    handles the None, so this whole path died with "'NoneType' object is
+    not callable" and the Buckingham + Coulomb relax had never run.  The
+    `md` equivalent was fine, which is why nothing else caught it.
+
+    Rocksalt MgO with the Lewis-Catlow parameters: perfect symmetry, so
+    the forces are zero and the run converges immediately -- this test
+    is about the path executing at all, not about the optimiser.  The
+    energy assertion pins the one number that would move if the legacy
+    Buckingham kwargs were silently dropped rather than forwarded.
+    """
+    import json
+
+    a, n = 4.212, 2
+    lattice = np.eye(3) * a * n
+    fcc = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0]])
+    base = np.concatenate([fcc, fcc + [.5, 0, 0]])
+    frac, types = [], []
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):
+                frac.append((base + [i, j, k]) / n)
+                types += ["Mg"] * 4 + ["O"] * 4
+    positions = np.concatenate(frac) @ lattice
+
+    poscar = tmp_path / "POSCAR_MgO"
+    write_poscar(str(poscar), lattice, positions, types)
+
+    pot_json = tmp_path / "mgo_buck.json"
+    pot_json.write_text(json.dumps({
+        "potential_type": "buckingham",
+        "r_cut": 3.5, "species": ["Mg", "O"], "final_loss": 0.0,
+        "params": {"Mg-O":  {"A": 1279.69,  "rho": 0.29969, "C": 0.0},
+                   "O-O":   {"A": 22764.30, "rho": 0.14900, "C": 27.88},
+                   "Mg-Mg": {"A": 0.0,      "rho": 0.1,     "C": 0.0}},
+        "charges": {"Mg": 2.0, "O": -2.0},
+    }))
+
+    cfg = {
+        "structure": {"poscar": str(poscar)},
+        "potential": {"type": "Buckingham", "potential_json": str(pot_json),
+                      "r_cut": 3.5, "coulomb_method": "ewald"},
+        "relax": {"output_dir": str(tmp_path / "buck_out"), "method": "fire",
+                  "fmax": 0.05, "max_steps": 5, "verbose": False},
+    }
+    yaml_path = tmp_path / "relax_buck.yaml"
+    _write_yaml(yaml_path, cfg)
+
+    assert cmd_relax(_ns(yaml_path)) == 0
+    assert (tmp_path / "buck_out" / "POSCAR_relaxed").is_file()
+
+    # MgO's measured lattice energy is about -41 eV per MgO formula unit,
+    # i.e. -20.5 eV/atom; these parameters reproduce it.  A path that
+    # lost the charges would come out near the (tiny, purely repulsive)
+    # short-range energy instead, and a path that lost the short-range
+    # term would come out far too negative.
+    log = (tmp_path / "buck_out" / "relax.log").read_text().splitlines()
+    energies = []
+    for ln in log:                      # skip the header and "Converged:" rows
+        f = ln.split()
+        if len(f) >= 2:
+            try:
+                energies.append(float(f[1]))
+            except ValueError:
+                pass
+    assert energies, "relax.log carried no energy rows"
+    assert -21.5 < energies[-1] / len(types) < -19.5, (
+        f"MgO Buckingham + Ewald should give about -20.6 eV/atom, got "
+        f"{energies[-1] / len(types):.3f}")
+
+
 def test_cmd_md_smoke(tmp_path):
     # NeighbourList enforces r_cut + skin_width < half the shortest cell
     # vector (bug E5); the bare 4.05 A conventional FCC Al cell is too
