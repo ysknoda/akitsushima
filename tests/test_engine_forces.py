@@ -1272,3 +1272,62 @@ def test_ewald_points_at_pppm_instead_of_silently_truncating():
     # it must NOT be capped.
     e, _, _ = ewald_sum(lattice, positions, q, alpha=1.0, r_cut=5.0, k_max=4)
     assert np.isfinite(e)
+
+
+def test_pppm_accuracy_knob_actually_buys_accuracy():
+    """Asking PPPM for more accuracy must not deliver less.
+
+    ``pppm_accuracy`` sets alpha, and a larger alpha means narrower
+    Gaussian clouds, which the mesh then has to resolve: the error is
+    governed by alpha*h with h = L/M, not by M alone.  The mesh rule used
+    to be M >= 2 alpha L / pi, which after rounding up to a power of two
+    and a floor of 16 returned M = 16 for every accuracy from 1e-4 to
+    1e-7 on a 300-atom wurtzite ZnO cell.  So alpha climbed, the mesh
+    stood still, and each tightening of the knob made the forces
+    monotonically WORSE -- 0.019, 0.057, 0.125, 0.225 eV/A rms against an
+    rms force of 2.37.  A 20 ps NVT run of that cell drifted 17 eV, more
+    than its whole kinetic energy.
+
+    The oracle is the Ewald sum, which is independently pinned by
+    test_ewald_energy_per_atom_is_supercell_invariant.  The cell has to
+    be big enough that the old rule saturates at its floor of 16, or the
+    test passes on a mesh that was accidentally generous.
+    """
+    from akitsushima.engine.coulomb.ewald import ewald_sum
+    from akitsushima.engine.coulomb.pppm import (PPPMSolver,
+                                                 _pppm_alpha_from_accuracy,
+                                                 _pppm_mesh_from_alpha)
+
+    a, n = 5.64, (3, 3, 3)
+    lattice, positions, q = _rocksalt_charges(a, n)
+    positions = positions + np.random.default_rng(0).normal(
+        0.0, 0.08, positions.shape)                  # break the symmetry
+    r_cut = 5.0
+
+    errors, meshes = [], []
+    for accuracy in (1e-4, 1e-5, 1e-6):
+        alpha = _pppm_alpha_from_accuracy(r_cut, accuracy)
+        mesh = _pppm_mesh_from_alpha(lattice, alpha, 6, accuracy)
+        meshes.append(mesh)
+
+        _, f_ref, _ = ewald_sum(lattice, positions, q, alpha=alpha,
+                                r_cut=r_cut, accuracy=1e-10)
+        _, f_pppm, _ = PPPMSolver(lattice=lattice, alpha=alpha, mesh=mesh,
+                                  order=6, r_cut=r_cut).compute(positions, q)
+        df = f_pppm - f_ref
+        errors.append(float(np.sqrt((df ** 2).sum(axis=1)).mean()
+                            / np.sqrt((f_ref ** 2).sum(axis=1)).mean()))
+
+    assert meshes[0] > 16, (
+        f"test premise: this cell must need a mesh above the floor of 16, "
+        f"or the old saturating rule is not being exercised; got {meshes}")
+    assert meshes == sorted(meshes), (
+        f"a tighter accuracy must not ask for a coarser mesh: {meshes}")
+    for tight, loose in zip(errors[1:], errors[:-1]):
+        assert tight < loose, (
+            f"tightening pppm_accuracy made the forces worse: {errors} "
+            f"for meshes {meshes} -- this is the defect being guarded "
+            f"against, not a tolerance failure")
+    assert errors[0] < 1e-2, (
+        f"even the loosest setting should be well under 1% relative force "
+        f"error, got {errors[0]:.3e}")

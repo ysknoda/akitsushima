@@ -39,6 +39,7 @@ References
 from typing import Optional, Tuple
 
 import numpy as np
+from scipy.fft import next_fast_len
 
 from ...constants import K_E
 from ..neighborlist import _cell_metrics
@@ -598,19 +599,38 @@ def _pppm_alpha_from_accuracy(r_cut: float, accuracy: float = 1e-5) -> float:
 
 def _pppm_mesh_from_alpha(lattice: np.ndarray,
                            alpha: float,
-                           order: int = 6) -> int:
+                           order: int = 6,
+                           accuracy: float = 1e-5) -> int:
     """
-    Estimate the mesh size M needed to resolve the Gaussian charge clouds
-    of width 1/alpha.
+    Mesh size M that resolves Gaussian charge clouds of width 1/alpha.
 
-    Rule of thumb from LAMMPS / Deserno & Holm:
-        M >= 2 * alpha * L_max / pi   where L_max = max lattice vector length.
-    Round up to the nearest power of 2 for FFT efficiency.
+    The requirement is on the mesh SPACING relative to that width, not on
+    M on its own: B-spline assignment can only represent a cloud it can
+    sample, so the reciprocal-space error is set by alpha*h with
+    h = L/M.  Measured on this implementation (wurtzite ZnO, 300 atoms,
+    order 6, forces against a converged Ewald sum):
+
+        M / (alpha L)   1.0      2.0      3.0      4.0
+        rel. rms error  3.8e-1   6.9e-4   4.2e-5   4.0e-6
+
+    -- a bit over a decade per unit.  Anchoring at 3 for a 1e-4 target
+    gives K = -log10(accuracy) - 1, floored at 3.
+
+    Bug-fix note.  This rule used to be ``M >= 2 alpha L / pi``, i.e.
+    K = 0.64, which after rounding up to a power of two and a floor of 16
+    returned M = 16 for EVERY accuracy from 1e-4 to 1e-7 on the cell
+    above.  Tightening ``accuracy`` does raise alpha (that is what shifts
+    work out of the real-space sum), so alpha*h grew while the mesh stood
+    still and asking for more accuracy made the forces monotonically
+    WORSE -- rms force error 0.019, 0.057, 0.125, 0.225 eV/A across those
+    four settings, against an rms force of 2.37 eV/A.  An NVT run of that
+    cell drifted 17 eV in 20 ps, larger than its entire kinetic energy.
+
+    Rounding is to the next FFT-friendly (5-smooth) length rather than
+    the next power of two, which for this cell is 48 instead of 64 and
+    saves a factor of 2.4 in mesh points at the same accuracy.
     """
     L_max = np.max(np.linalg.norm(lattice, axis=1))
-    M_min = int(np.ceil(2.0 * alpha * L_max / np.pi))
-    # Round up to next power of 2
-    M = 1
-    while M < M_min:
-        M *= 2
-    return max(M, 16)   # minimum sensible mesh size
+    K = max(3.0, -np.log10(max(float(accuracy), 1e-30)) - 1.0)
+    M_min = max(int(np.ceil(K * alpha * L_max)), 16)
+    return int(next_fast_len(M_min))

@@ -148,7 +148,8 @@ def compute_all_general(
             if coulomb_method == "pppm":
                 alpha = (_pppm_alpha_from_accuracy(rc, pppm_accuracy)
                          if ewald_alpha is None else ewald_alpha)
-                mesh = (_pppm_mesh_from_alpha(lattice, alpha, pppm_order)
+                mesh = (_pppm_mesh_from_alpha(lattice, alpha, pppm_order,
+                                              pppm_accuracy)
                         if pppm_mesh is None else pppm_mesh)
                 # Bug-fix note (stale r_cut on a cache hit): the key used
                 # to omit ``rc``, even though PPPMSolver takes r_cut as a
