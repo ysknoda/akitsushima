@@ -1169,3 +1169,106 @@ def test_sw_silicon_reproduces_published_cohesive_energy():
     assert abs(e_min) == pytest.approx(2.0 * epsilon, rel=0.001), (
         f"SW silicon must give E_coh = 2*epsilon = {2 * epsilon:.4f} "
         f"eV/atom, got {abs(e_min):.4f} eV/atom")
+
+
+def _rocksalt_charges(a: float, n):
+    """Rocksalt AB supercell: (lattice, positions, charges = +1/-1)."""
+    lattice = np.diag([a * n[0], a * n[1], a * n[2]])
+    sub = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0]])
+    base = np.concatenate([sub, sub + [.5, 0, 0]])
+    frac, q = [], []
+    for i in range(n[0]):
+        for j in range(n[1]):
+            for k in range(n[2]):
+                frac.append((base + [i, j, k]) / np.array(n))
+                q += [1.0] * 4 + [-1.0] * 4
+    frac = np.concatenate(frac)
+    return lattice, frac @ lattice, np.array(q)
+
+
+def test_ewald_energy_per_atom_is_supercell_invariant():
+    """One infinite crystal, several supercells -- one energy per atom.
+
+    This is reference-free: 2x2x2 and 2x2x4 rocksalt describe the SAME
+    crystal, so whatever the Ewald sum returns per atom must not depend
+    on which one is handed to it.  It is the sharpest statement of what
+    went wrong with the old reciprocal-space cutoff.
+
+    ``k_max`` was a fixed integer shell count -- a cutoff on the INDEX,
+    not on |k|.  With k = h b1 + k b2 + l b3 and
+    |b_i| = 2 pi / (perpendicular width along i), eight shells reach a
+    physical cutoff that SHRINKS as an axis lengthens, so stretching c
+    quietly stopped resolving the c direction at all.  The second half of
+    this test pins that: the legacy path disagrees with itself by 0.086
+    eV/atom, and the error is always negative, which is what drove a
+    variable-cell ZnO relaxation to inflate its cell 7x while reporting
+    an energy drop that a converged sum puts at a rise.
+
+    The Madelung check at the end is the absolute one, since a sum can be
+    self-consistent and still wrong: rocksalt's energy per atom is
+    -alpha_M k_e / (2 r_nn) with the Madelung constant alpha_M =
+    1.7475646, and nothing inside the implementation knows that number.
+    """
+    from akitsushima.constants import K_E
+    from akitsushima.engine.coulomb.ewald import ewald_sum
+
+    a = 5.64                                    # NaCl
+    cells = [(2, 2, 2), (2, 2, 3), (2, 2, 4)]
+
+    auto, legacy = [], []
+    for n in cells:
+        lattice, positions, q = _rocksalt_charges(a, n)
+        auto.append(ewald_sum(lattice, positions, q, alpha=1.0, r_cut=5.0,
+                              accuracy=1e-8)[0] / len(q))
+        legacy.append(ewald_sum(lattice, positions, q, alpha=1.0, r_cut=5.0,
+                                k_max=8)[0] / len(q))
+
+    spread = max(auto) - min(auto)
+    assert spread < 1e-8, (
+        f"the same crystal gave different energies per atom across "
+        f"supercells {cells}: {auto} (spread {spread:.3e} eV/atom)")
+
+    # Control: the old fixed-shell cutoff does NOT satisfy the invariant.
+    # Without this the test above could pass on a build where the shells
+    # happen to be generous, and would have no teeth.
+    legacy_spread = max(legacy) - min(legacy)
+    assert legacy_spread > 1e-3, (
+        f"the legacy fixed-shell path was expected to break supercell "
+        f"invariance (that is the defect being guarded against), but its "
+        f"spread was only {legacy_spread:.3e} eV/atom -- if this ever "
+        f"fires, the fixture is too small to exercise the anisotropy")
+
+    madelung = 1.7475645946
+    expected = -madelung * K_E / (2.0 * (a / 2.0))
+    assert auto[0] == pytest.approx(expected, rel=1e-4), (
+        f"rocksalt Ewald energy must reproduce the Madelung constant: "
+        f"expected {expected:.6f} eV/atom, got {auto[0]:.6f}")
+
+
+def test_ewald_points_at_pppm_instead_of_silently_truncating():
+    """A cell too large for an explicit Ewald sum must say so.
+
+    The failure mode being replaced was silence: the old cutoff simply
+    stopped resolving the long axis and returned a number.  Refusing, and
+    naming the mesh solver that does scale, is the behaviour pinned here.
+
+    The trigger is a plain large box, not a contrived one -- the number
+    of k-vectors inside a fixed |k| cutoff grows with the cell volume as
+    V k_cut^3 / (6 pi^2), so a 50 A cube at the default accuracy already
+    needs over a million of them.  That is a real system, and an explicit
+    Ewald sum is simply the wrong tool for it.
+    """
+    from akitsushima.engine.coulomb.ewald import ewald_sum
+
+    lattice = np.eye(3) * 50.0
+    positions = np.array([[0.0, 0.0, 0.0], [2.8, 0.0, 0.0]])
+    q = np.array([1.0, -1.0])
+
+    with pytest.raises(ValueError, match="pppm"):
+        ewald_sum(lattice, positions, q, alpha=1.0, r_cut=5.0, accuracy=1e-8)
+
+    # The same call with an explicit k_max is the caller overriding on
+    # purpose, and is how a brute-force reference value gets computed, so
+    # it must NOT be capped.
+    e, _, _ = ewald_sum(lattice, positions, q, alpha=1.0, r_cut=5.0, k_max=4)
+    assert np.isfinite(e)

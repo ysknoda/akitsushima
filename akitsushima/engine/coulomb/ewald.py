@@ -1,4 +1,5 @@
 """Ewald summation -- fully vectorised (no Python loops over atoms or k)."""
+import math
 from typing import Optional, Tuple
 
 import numpy as np
@@ -124,12 +125,39 @@ def real_space_coulomb(lattice: np.ndarray,
     return energy, forces, stress
 
 
+# Guard rails for the reciprocal-space sum.  Ewald's cost is N * Nk, and
+# this implementation builds the (N, Nk) phase matrix, so a cell large
+# enough to need more than this many k-vectors wants PPPM instead -- the
+# mesh-based solver in coulomb/pppm.py, whose cost scales as M^3 log M
+# with the mesh rather than with the number of k-vectors.
+_K_TRIPLET_LIMIT = 5_000_000       # before the spherical mask
+_K_VECTOR_LIMIT  = 1_000_000       # after it
+_K_CHUNK_ELEMS   = 4_000_000       # bound the (N, chunk) phase matrix
+
+
+def _auto_k_shells(recip: np.ndarray, alpha: float,
+                   accuracy: float) -> Tuple[np.ndarray, float]:
+    """Per-axis integer shell counts reaching a PHYSICAL |k| cutoff.
+
+    The reciprocal sum's terms carry exp(-k^2 / 4 alpha^2), so truncating
+    at ``k_cut = 2 alpha sqrt(-ln accuracy)`` leaves a relative residue of
+    about ``accuracy``.  Converting that to index space needs one shell
+    count per axis, because |b_i| = 2 pi / (perpendicular width along i)
+    differs from axis to axis -- which is exactly what a single shared
+    integer cutoff cannot express.
+    """
+    k_cut = 2.0 * alpha * math.sqrt(-math.log(accuracy))
+    b_norm = np.linalg.norm(recip, axis=1)
+    return np.maximum(1, np.ceil(k_cut / b_norm).astype(int)), k_cut
+
+
 def ewald_sum(lattice: np.ndarray,
               positions: np.ndarray,
               charges: np.ndarray,
               alpha: Optional[float] = None,
-              k_max: int = 8,
-              r_cut: float = 12.0) -> Tuple[float, np.ndarray, np.ndarray]:
+              k_max: Optional[int] = None,
+              r_cut: float = 12.0,
+              accuracy: float = 1e-8) -> Tuple[float, np.ndarray, np.ndarray]:
     """
     Ewald summation -- fully vectorised (no Python loops over atoms or k).
 
@@ -209,7 +237,30 @@ def ewald_sum(lattice: np.ndarray,
     positions : (N,3) Cartesian positions [A].
     charges   : (N,)  formal charges [e].
     alpha     : Ewald splitting [A^-1]; auto-set to 5/r_cut if None.
-    k_max     : reciprocal-space shell cutoff.
+    k_max     : LEGACY manual override -- a fixed integer shell count,
+                applied identically to all three reciprocal axes and with
+                no spherical selection.  Leave it None (the default) to
+                have the shells chosen from ``accuracy``.
+
+                This parameter used to default to 8, and that was a
+                defect rather than a tuning choice: a shell count is a
+                cutoff on the INDEX, not on |k|.  Since
+                |b_i| = 2 pi / (perpendicular width along axis i), eight
+                shells reach a physical cutoff that SHRINKS as a cell
+                axis lengthens, so the accuracy silently depended on cell
+                size and shape.  Small fixtures were fine -- rocksalt
+                NaCl at a = 5.6 A reaches |k| = 9.0 A^-1, residue 1.7e-9
+                -- which is why the finite-difference tests, all of which
+                compare forces against the derivative of the same
+                truncated energy, never saw it.  A 300-atom wurtzite ZnO
+                cell was already 39.2 eV (0.55%) off, and the error is
+                always NEGATIVE and grows as a cell stretches, so a
+                variable-cell relaxation or an NPT run sees a spurious
+                energy gain from expanding.  One did: ZnO ran away from
+                3572 to 24751 A^3, with c growing 4.7x, while reporting a
+                1967 eV energy DROP that a converged sum puts at a rise.
+    accuracy  : target relative residue of the reciprocal sum, used to
+                pick the shell counts when ``k_max`` is None.
     r_cut     : real-space cutoff [A].
 
     Returns
@@ -230,26 +281,60 @@ def ewald_sum(lattice: np.ndarray,
     # =========================================================================
     # Reciprocal-space part  (vectorised over all k-vectors simultaneously)
     # =========================================================================
-    # Build integer (h, k, l) triplets, excluding (0, 0, 0)
-    rng = np.arange(-k_max, k_max + 1)
-    H, K, L = np.meshgrid(rng, rng, rng, indexing='ij')
-    H, K, L = H.ravel(), K.ravel(), L.ravel()
-    keep = ~((H == 0) & (K == 0) & (L == 0))
-    H, K, L = H[keep], K[keep], L[keep]                        # (Nk,)
+    # Build the integer (h, k, l) triplets.  Shell counts come per axis
+    # from a physical |k| cutoff (see _auto_k_shells and the k_max entry
+    # in the docstring); a legacy integer k_max reproduces the old cubic
+    # index-space box with no spherical selection.
+    if k_max is None:
+        n_shell, k_cut = _auto_k_shells(recip, alpha, accuracy)
+    else:
+        n_shell, k_cut = np.array([int(k_max)] * 3), np.inf
 
-    k_start, k_end = _mpi_domain_split(len(H))
-    H, K, L = H[k_start:k_end], K[k_start:k_end], L[k_start:k_end]
+    n_triplet = int(np.prod(2 * n_shell + 1))
+    if n_triplet > _K_TRIPLET_LIMIT:
+        raise ValueError(
+            f"ewald_sum: this cell needs {n_shell.tolist()} reciprocal "
+            f"shells ({n_triplet} triplets) to reach |k| = {k_cut:.2f} A^-1 "
+            f"at accuracy {accuracy:g}, which is past the practical limit "
+            f"for an explicit Ewald sum.  Use coulomb_method='pppm' (the "
+            f"mesh solver scales with the FFT mesh, not with the number of "
+            f"k-vectors), or raise `accuracy`, or lower `alpha` to move "
+            f"work into the real-space sum.")
+
+    H, K, L = np.meshgrid(*[np.arange(-n, n + 1) for n in n_shell],
+                          indexing='ij')
+    H, K, L = H.ravel(), K.ravel(), L.ravel()
+
+    kvecs_all = (H[:, None] * recip[0] + K[:, None] * recip[1]
+                 + L[:, None] * recip[2])
+    k2_all = np.einsum('ki,ki->k', kvecs_all, kvecs_all)
+    # Spherical selection: (0,0,0) always drops out via k2 > 0.
+    keep = (k2_all > 1e-12) & (k2_all <= k_cut ** 2)
+    kvecs_all, k2_all = kvecs_all[keep], k2_all[keep]
+
+    # Only the automatic path is capped: an explicit k_max is the caller
+    # deliberately overriding, and is how a reference value is computed.
+    if k_max is None and len(kvecs_all) > _K_VECTOR_LIMIT:
+        raise ValueError(
+            f"ewald_sum: {len(kvecs_all)} k-vectors needed at accuracy "
+            f"{accuracy:g}; use coulomb_method='pppm' instead, or relax "
+            f"`accuracy`.")
+
+    k_start, k_end = _mpi_domain_split(len(kvecs_all))
+    kvecs_all, k2_all = kvecs_all[k_start:k_end], k2_all[k_start:k_end]
 
     recip_energy = 0.0
     recip_forces = np.zeros((N, 3))
     recip_stress = np.zeros((3, 3))
 
-    if len(H) > 0:
-        # Physical k-vectors: kvec[m] = H[m]*b1 + K[m]*b2 + L[m]*b3   (Nk, 3)
-        kvecs = (H[:, None] * recip[0]
-                 + K[:, None] * recip[1]
-                 + L[:, None] * recip[2])
-        k2 = np.einsum('ki,ki->k', kvecs, kvecs)                 # (Nk,)
+    # Chunked over k: the phase matrix is (N, Nk), which for a large cell
+    # is the memory bottleneck of the whole routine.  The arithmetic is a
+    # plain sum over k, so chunking changes nothing but the peak
+    # footprint.
+    chunk = max(1, int(_K_CHUNK_ELEMS // max(N, 1)))
+    for c0 in range(0, len(kvecs_all), chunk):
+        kvecs = kvecs_all[c0:c0 + chunk]
+        k2 = k2_all[c0:c0 + chunk]
 
         # Prefactors: pref[m] = 4pi k_e / V * exp(-k^2/4alpha^2) / k^2
         pref = (K_E * 4.0 * np.pi / volume
@@ -268,9 +353,7 @@ def ewald_sum(lattice: np.ndarray,
         # Im(e^{i phi} S*) = sin(phi)*Re(S) - cos(phi)*Im(S)
         imag_mat = (ephi.real * SF.imag[None, :]                    # (N, Nk)
                     - ephi.imag * SF.real[None, :])
-        # weighted[i,m] = pref[m] * imag_mat[i,m]
-        # F[i,alpha] = -q[i] * sum_m weighted[i,m] * kvec[m,alpha]
-        recip_forces -= charges[:, None] * (imag_mat * pref[None, :]) @ kvecs  # (N, 3)
+        recip_forces -= charges[:, None] * (imag_mat * pref[None, :]) @ kvecs
 
         # Stress: sigma_ab = (1/V) sum_k coeff[k] * [delta_ab - w[k] * khat_a khat_b],
         # w[k] = 2 + k^2/(2 alpha^2),  khat = k / |k|  -- see bug-fix note 3 above.
