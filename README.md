@@ -1,9 +1,15 @@
 # akitsushima
 
-> **Beta release.** This project is feature-complete for its intended
-> scope but still being validated; bugs may still be found and fixed
-> before a stable release. Use in production with caution, and pin the
-> exact version you tested against.
+> **Alpha release.** This project is under active development.
+> Interfaces, behavior, and output formats may change without notice
+> between releases, and it has not yet been broadly tested. Do not
+> rely on it for production use. This release in particular changes
+> computed values relative to 0.1.0b2: Tersoff energies, forces and
+> stresses were being halved; Buckingham and Born-Mayer gained the
+> force-shifted truncation their sibling pair potentials already had;
+> and the Ewald and PPPM cutoffs are now chosen from the accuracy you
+> ask for rather than from a fixed index. Numbers from 0.1.0b2 are not
+> comparable.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
