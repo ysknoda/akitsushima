@@ -196,7 +196,11 @@ class ThermalConductivityCalculator:
         J : (3,) [eV/(A^2.fs)]
         """
         V   = abs(np.linalg.det(self.lattice))
-        e_kin_i = 0.5 * self.masses * np.sum(velocities ** 2, axis=1)  # [eV]
+        # Bug-fix note: masses are in amu and velocities in A/fs, so
+        # 0.5 m v^2 is in amu A^2/fs^2 = 103.6 eV; it was used as eV, leaving
+        # the kinetic part of the convective term 103.6x too small.
+        e_kin_i = (0.5 * self.masses * np.sum(velocities ** 2, axis=1)
+                   / EV_ANG_TO_AMU_ANG_FS2)                           # [eV]
         E_i     = e_kin_i + e_pot_i    # total energy per atom [eV]
 
         J_conv   = np.einsum('i,ix->x', E_i, velocities)  # (3,)
@@ -281,7 +285,13 @@ class ThermalConductivityCalculator:
             vi = velocities[idx_i]
             vj = velocities[idx_j]
             coeff = np.einsum('ka,ka->k', fij, vi + vj)
-            J_vir_exact += 0.5 * np.einsum('k,ka->a', coeff, rij)
+            # Bug-fix note: compute_pairs() returns rij = r_j - r_i with
+            # fij the force on i, while the formula above uses
+            # r_ij = r_i - r_j.  The term carried the wrong sign: checked
+            # against J V = d/dt sum_i r_i E_i by central differences on an
+            # isolated LJ cluster, the old sign was off by 230% and the
+            # corrected one agrees to 1e-8.
+            J_vir_exact -= 0.5 * np.einsum('k,ka->a', coeff, rij)
             stress_pair -= np.einsum('ki,kj->ij', fij, rij)
 
         J_vir_exact = _mpi_allreduce_sum(J_vir_exact)
@@ -465,6 +475,11 @@ class ThermalConductivityCalculator:
                 timestep    = timestep,
                 n_steps     = equil_steps,
                 temperature = T,
+                # Bug-fix note: without seed= the equilibration drew its
+                # velocities from NVTSimulation's default seed (42), so
+                # every `seed` gave the same trajectory -- five
+                # "independent" runs were one run five times.
+                seed        = seed,
                 traj_every  = max(equil_steps, 1),   # suppress trajectory
                 thermo_every= max(equil_steps // 10, 1),
                 output_dir  = os.path.join(output_dir, "nvt_equil"),
@@ -498,7 +513,8 @@ class ThermalConductivityCalculator:
         GPa = EV_ANG3_TO_GPA
         hdr = (f"{'Step':>8}  {'T(K)':>9}  {'E_pot(eV)':>14}  "
                f"{'E_tot(eV)':>14}  {'P(GPa)':>9}")
-        e_kin_ref = 0.5 * np.sum(masses * np.sum(vel**2, axis=1))
+        e_kin_ref = (0.5 * np.sum(masses * np.sum(vel**2, axis=1))
+                     / EV_ANG_TO_AMU_ANG_FS2)
         e_tot_ref = float(E_pot) + e_kin_ref
         t0 = _time.perf_counter()
 
@@ -537,10 +553,15 @@ class ThermalConductivityCalculator:
 
                 # Thermo
                 if step % thermo_every == 0:
-                    e_kin = 0.5 * np.sum(masses * np.sum(vel**2, axis=1))
+                    # Bug-fix note: e_kin was amu A^2/fs^2 read as eV (the
+                    # log showed 0.48 K for a 50 K run), and P carried the
+                    # tensile-positive sign; the engine's stress is
+                    # compressive-positive (ADR-0001), so P = +tr(sigma)/3.
+                    e_kin = (0.5 * np.sum(masses * np.sum(vel**2, axis=1))
+                             / EV_ANG_TO_AMU_ANG_FS2)
                     T_inst= e_kin * 2.0 / (3.0 * N * K_B)
                     e_tot = float(E_pot) + e_kin
-                    P_gpa = -np.trace(stress) / 3.0 * GPa
+                    P_gpa = np.trace(stress) / 3.0 * GPa
                     row = (f"{step:8d}  {T_inst:9.2f}  {float(E_pot):14.6f}  "
                            f"{e_tot:14.6f}  {P_gpa:9.4f}")
                     t_fh.write(row + "\n")

@@ -21,12 +21,21 @@ from ..utils.timing import TimingCollector
 
 __all__ = ["PhononCalculator"]
 
+# cm^-1 -> THz and cm^-1 -> rad/s (c = 2.99792458e10 cm/s)
+_THZ_TO_CM  = 1e12 / 2.99792458e10
+_CM_TO_RAD_S = 2.0 * np.pi * 2.99792458e10
 
-def _build_D_raw_numpy(IFC, masses, sc_to_prim, R_sc, origin, q_cart, N):
+
+def _build_D_raw_numpy(IFC, masses, sc_to_prim, img_R, img_n, origin,
+                       q_cart, N):
     """
     Build the raw (pre-D-ASR) dynamical matrix at q_cart.
 
-    D_{ia,ib}(q) = sum_j  Phi(ia_0 -> j) / sqrt(M_a M_b) . exp(i q . R_j)
+    D_{ia,ib}(q) = sum_j  Phi(ia_0 -> j) / sqrt(M_a M_b) . <exp(i q . R)>_j
+
+    where <.>_j averages over the lattice translations R that bring atom j
+    to its minimum-image position relative to ia_0 (img_R[ia, j, :img_n]);
+    several when j sits exactly on the supercell's Wigner-Seitz boundary.
 
     Written as explicit loops (rather than vectorised NumPy slicing) so it
     can be JIT-compiled with numba: this is called once per q-point, and
@@ -41,9 +50,14 @@ def _build_D_raw_numpy(IFC, masses, sc_to_prim, R_sc, origin, q_cart, N):
         for j in range(N_sc):
             ib = sc_to_prim[j]
             mj = masses[ib]
-            dot = (q_cart[0] * R_sc[j, 0] + q_cart[1] * R_sc[j, 1] +
-                   q_cart[2] * R_sc[j, 2])
-            ph = complex(np.cos(dot), np.sin(dot))
+            n_im = img_n[ia_loc, j]
+            ph = complex(0.0, 0.0)
+            for k in range(n_im):
+                dot = (q_cart[0] * img_R[ia_loc, j, k, 0]
+                       + q_cart[1] * img_R[ia_loc, j, k, 1]
+                       + q_cart[2] * img_R[ia_loc, j, k, 2])
+                ph += complex(np.cos(dot), np.sin(dot))
+            ph /= n_im
             inv_sqrt_m = 1.0 / np.sqrt(mi * mj)
             for di in range(3):
                 for dj in range(3):
@@ -77,7 +91,7 @@ def _dos_projection_numpy(freqs_q, evecs_q, freq_axis, half_inv_sig2, norm,
             s = 0.0
             for c in range(3):
                 v = evecs_q[ia * 3 + c, m]
-                s += v * v
+                s += v.real * v.real + v.imag * v.imag
             weights[ia] = s
         for k in range(n_dos):
             g = np.exp(-half_inv_sig2 * (freq_axis[k] - nu) ** 2) * norm
@@ -167,6 +181,7 @@ class PhononCalculator:
         # structure / DOS mesh entails).
         self._R_sc = np.array([c.astype(float) @ self.lattice_prim
                                for c in self._sc_cell])
+        self._img_R, self._img_n = self._minimum_image_translations()
 
         # r_cut from force_fn attribute (for supercell adequacy check)
         self._r_cut = float(getattr(force_fn, 'r_cut', 10.0))
@@ -230,6 +245,42 @@ class PhononCalculator:
                 types_sc,
                 sc_to_prim,
                 sc_cell)
+
+    def _minimum_image_translations(self, tol: float = 1e-5):
+        """
+        For every (origin-cell atom a, supercell atom j) pair, the lattice
+        translations R_j + T (T a supercell vector) that place j at its
+        minimum-image distance from a.
+
+        Bug-fix note: D(q) used the raw cell offset R_j of each supercell
+        atom, n in [0, S) along each axis, as the Fourier phase.  That is
+        exact only for q commensurate with the supercell (q = m/S); at any
+        other q it interpolates with the wrong images.  Checked against
+        phonopy on Tersoff Si (4x4x4): Gamma, X and L agreed to 3e-4 THz,
+        while q = (0.13, 0.13, 0.13) was off by 10 THz.  Ties (j exactly on
+        the Wigner-Seitz boundary of the supercell) are averaged, as in
+        phonopy.  Returns img_R (N_basis, N_sc, n_max, 3) and img_n.
+        """
+        shifts = np.array([[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1)
+                           for k in (-1, 0, 1)], dtype=float) @ self.lattice_sc
+        origin = self._origin_indices()
+        N, N_sc = self.N_basis, self.N_sc
+        cand = []
+        n_img = np.zeros((N, N_sc), dtype=np.int64)
+        for a, ia in enumerate(origin):
+            row = []
+            d0 = self._pos_sc - self._pos_sc[ia]              # (N_sc, 3)
+            for j in range(N_sc):
+                dist = np.linalg.norm(d0[j] + shifts, axis=1)
+                keep = dist < dist.min() + tol
+                row.append(self._R_sc[j] + shifts[keep])
+                n_img[a, j] = int(keep.sum())
+            cand.append(row)
+        img_R = np.zeros((N, N_sc, int(n_img.max()), 3))
+        for a in range(N):
+            for j in range(N_sc):
+                img_R[a, j, :n_img[a, j]] = cand[a][j]
+        return img_R, n_img
 
     def _check_supercell_size(self) -> None:
         """Warn if any supercell direction is smaller than 2 * r_cut."""
@@ -409,8 +460,14 @@ class PhononCalculator:
         D0_asr = D0_raw.copy()
         N = self.N_basis
         # A-2: reshape to (N,3,N,3) and sum over atom/Cartesian axes
+        # Bug-fix note: D is mass-weighted, so the acoustic sum rule reads
+        # sum_b sqrt(M_b) D_ab(0) = 0, not sum_b D_ab(0) = 0.  The plain
+        # row sum agreed only for equal masses (Si); for AlN it moved the
+        # Gamma optical modes by up to 1.8 THz even though the IFC already
+        # satisfied the sum rule to 5e-15.
         D_4d     = D0_asr.reshape(N, 3, N, 3)
-        row_sum  = D_4d.sum(axis=2)          # (N, 3, 3)
+        sqm      = np.sqrt(np.asarray(self.masses, dtype=float))
+        row_sum  = np.einsum("aibj,b->aij", D_4d, sqm) / sqm[:, None, None]
         for ia in range(N):
             D_4d[ia, :, ia, :] -= row_sum[ia]
         D0_asr = D_4d.reshape(N * 3, N * 3)
@@ -436,8 +493,9 @@ class PhononCalculator:
         """
         origin = np.asarray(self._origin_indices(), dtype=np.int64)
         sc_to_prim = np.asarray(self._sc_to_prim, dtype=np.int64)
-        D = _build_D_raw_jit(self.IFC, self.masses, sc_to_prim, self._R_sc,
-                             origin, np.asarray(q_cart, dtype=np.float64),
+        D = _build_D_raw_jit(self.IFC, self.masses, sc_to_prim, self._img_R,
+                             self._img_n, origin,
+                             np.asarray(q_cart, dtype=np.float64),
                              self.N_basis)
         return 0.5 * (D + D.conj().T)
 
@@ -530,8 +588,12 @@ class PhononCalculator:
         # Reciprocal lattice vectors (primitive)
         rec_lat = 2.0 * np.pi * np.linalg.inv(self.lattice_prim).T  # (3,3)
 
+        # Bug-fix note: the rows of rec_lat are the reciprocal vectors, so
+        # q_cart = q_frac @ rec_lat.  rec_lat @ q_frac used the columns,
+        # which coincides only for a symmetric lattice matrix (the FCC
+        # primitive cell) and sent hexagonal paths to the wrong q.
         def to_cartesian(q_frac):
-            return rec_lat @ np.asarray(q_frac)
+            return np.asarray(q_frac) @ rec_lat
 
         # Build list of q-points and segment metadata
         q_cart_list : List[np.ndarray] = []
@@ -592,7 +654,10 @@ class PhononCalculator:
 
         for i, q in enumerate(q_cart_arr):
             D    = self.build_dynamical_matrix(q)
-            eigs = np.sort(np.linalg.eigvalsh(D.real))
+            # Bug-fix note: D(q) is complex Hermitian away from
+            # time-reversal-invariant q; eigvalsh(D.real) dropped its
+            # imaginary part (1.2-4 THz errors on Si at q = (1/4, 0, 0)).
+            eigs = np.sort(np.linalg.eigvalsh(D))
             freq_arr[i] = self._eig_to_freq(eigs)
 
         result = {
@@ -664,7 +729,7 @@ class PhononCalculator:
                         (i1 + 0.5) / q_mesh[1] - 0.5,
                         (i2 + 0.5) / q_mesh[2] - 0.5,
                     ])
-                    q_points.append(rec_lat @ q_frac)
+                    q_points.append(q_frac @ rec_lat)
 
         N_q_total = len(q_points)
         n_modes   = 3 * self.N_basis
@@ -678,7 +743,7 @@ class PhononCalculator:
         all_freqs = np.zeros((N_q_total, n_modes))
         for i, q in enumerate(q_points):
             D    = self.build_dynamical_matrix(q)
-            eigs = np.linalg.eigvalsh(D.real)
+            eigs = np.linalg.eigvalsh(D)
             all_freqs[i] = self._eig_to_freq(np.sort(eigs))
 
         # Frequency axis
@@ -699,7 +764,7 @@ class PhononCalculator:
 
         for i, q in enumerate(q_points):
             D    = self.build_dynamical_matrix(q)
-            eigs, evecs = np.linalg.eigh(D.real)
+            eigs, evecs = np.linalg.eigh(D)
             idx         = np.argsort(eigs)
             freqs_q     = self._eig_to_freq(eigs[idx])
             evecs_q     = np.ascontiguousarray(evecs[:, idx])  # (3N, n_modes)
@@ -784,22 +849,31 @@ class PhononCalculator:
             freqs_along = []
             for qmag in q_mags:
                 D = self.build_dynamical_matrix(direction * qmag)
-                eigs = np.linalg.eigvalsh(D.real)
+                eigs = np.linalg.eigvalsh(D)
                 freqs_along.append(self._eig_to_freq(np.sort(eigs))[:3])
 
             freqs_along = np.array(freqs_along)
             q_m = q_mags * 1e10                     # A^-1 -> m^-1
+            v_dir = []
             for branch in range(3):
-                v = np.polyfit(q_m, freqs_along[:, branch] * 1e12 * 2 * np.pi, 1)[0]
-                if v > 1.0:
-                    sound_velocities.append(abs(v))
+                # Bug-fix note: freqs_along is in cm^-1 (_eig_to_freq), not
+                # THz; treating it as THz made v and theta_D 33.4x too large.
+                omega = freqs_along[:, branch] * _CM_TO_RAD_S
+                v_dir.append(abs(np.polyfit(q_m, omega, 1)[0]))
+            if min(v_dir) > 1.0:
+                sound_velocities.append(sorted(v_dir))
 
         if not sound_velocities:
             raise RuntimeError("No valid acoustic branches found.")
 
-        sv   = np.array(sorted(sound_velocities))
-        v_L  = sv[-1]
-        v_T  = float(np.mean(sv[:-1][-2:])) if len(sv) >= 2 else sv[0]
+        # Bug-fix note: the three slopes of ALL directions used to be pooled
+        # and sorted, with v_T taken as the mean of the 2nd and 3rd largest
+        # -- which are the longitudinal slopes of the other directions, so
+        # v_T came out equal to v_L (Tersoff Si: 9011 m/s for both).  Within
+        # each direction the largest slope is L and the other two are T.
+        sv   = np.array(sound_velocities)          # (n_dir, 3), ascending
+        v_L  = float(np.mean(sv[:, 2]))
+        v_T  = float(np.mean(sv[:, :2]))
         v_D  = (1.0 / v_L**3 + 2.0 / v_T**3) ** (-1.0 / 3.0)
 
         V0_m3   = abs(np.linalg.det(self.lattice_prim)) * ang_to_m**3
@@ -873,9 +947,14 @@ class PhononCalculator:
                     "phonon_free_energy: call compute_ifc() first.")
             self.compute_dos(q_mesh=[n_q, n_q, n_q], verbose=False)
 
-        freqs_THz = self._dos_result["frequencies"]
+        # Bug-fix note: the DOS axis is in cm^-1 (see compute_dos), and was
+        # read here as THz, putting every omega 33.4x too high (Tersoff Si:
+        # F_vib(300 K) = 2.35 eV/atom against phonopy's 0.046).  g * df is a
+        # mode count and needs no conversion.
+        freqs_cm  = self._dos_result["frequencies"]
         dos       = self._dos_result["dos"]
-        df        = float(freqs_THz[1] - freqs_THz[0])
+        df        = float(freqs_cm[1] - freqs_cm[0])
+        freqs_THz = freqs_cm / _THZ_TO_CM
 
         hbar_J  = 6.62607015e-34 / (2.0 * np.pi)
         kB_J    = 1.380649e-23

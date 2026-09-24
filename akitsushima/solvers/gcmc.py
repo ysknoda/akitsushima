@@ -718,8 +718,16 @@ class GCMCMDSimulation(_BaseMDSimulation):
                     continue
                 dU = self._delta_U_deletion(idx)
 
+                # Bug-fix note: dU = U(N-1) - U(N) here, and Frenkel & Smit
+                # eq. 5.6.9 is acc(N->N-1) = min(1, lambda^3 N / V
+                # exp(-beta (mu + dU))).  This read beta (-mu + dU), which
+                # favoured deleting the most strongly bound atoms: LJ Ar
+                # vapour at T* = 0.90 (NIST TMMC, rho* = 0.0818, N = 41.9 in
+                # 512 sigma^3) settled at N = 18.8, below even the ideal gas
+                # at the same activity (22.5).  An ideal gas (dU = 0) could
+                # not see it, which is how the earlier check passed.
                 ln_acc = (np.log(Lam3 * self.N / V)
-                          + beta * (-mu + dU)
+                          + beta * (-mu - dU)
                           + getattr(self, '_last_del_bias_log', 0.0))
 
                 if ln_acc >= 0.0 or np.log(self.rng.random()) < ln_acc:

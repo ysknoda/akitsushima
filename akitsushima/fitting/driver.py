@@ -756,7 +756,13 @@ def print_fit_result(result: dict, potential: str) -> None:
         print(f"  {'Pair':<15}  {'A (eV)':>14}  {'rho (A)':>10}  {'C (eV.A^6)':>12}")
         print("  " + "-" * 58)
         for pair, p in buck.items():
-            s1, s2 = sorted(pair)
+            # Bug-fix note: a like-species pair is frozenset({'O'}), one
+            # element, so `s1, s2 = sorted(pair)` raised ValueError -- after
+            # the optimisation, before save_fit_result_generic, losing the
+            # fit.  Any Buckingham fit with an O-O term (i.e. every oxide)
+            # crashed here.
+            names  = sorted(pair)
+            s1, s2 = names[0], names[-1]
             print(f"  {s1+'-'+s2:<15}  {p['A']:14.4f}  "
                   f"{p['rho']:10.6f}  {p['C']:12.4f}")
         if charges:

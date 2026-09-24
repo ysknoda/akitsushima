@@ -877,6 +877,20 @@ def test_print_fit_result_handles_flat_sw_and_tersoff_params(capsys):
     assert "lambda" in out and "1830.8" in out
 
 
+def test_print_fit_result_handles_like_species_buckingham_pairs(capsys):
+    """ADR-0003 T8: a like-species Buckingham pair is keyed frozenset({'O'}),
+    and `s1, s2 = sorted(pair)` raised ValueError on it -- after the
+    optimisation, before the result was saved, for every oxide fit."""
+    from akitsushima.fitting.driver import print_fit_result
+    buck = {frozenset({"Zn", "O"}): {"A": 529.7, "rho": 0.3581, "C": 0.0},
+            frozenset({"O"}): {"A": 9547.96, "rho": 0.21916, "C": 32.0}}
+    print_fit_result({"params": {"buck": buck, "charges": {"Zn": 2.0,
+                                                          "O": -2.0}},
+                      "loss": 0.0}, "buckingham")
+    out = capsys.readouterr().out
+    assert "O-O" in out and "O-Zn" in out
+
+
 def test_cmd_fit_sw_end_to_end_saves_a_reloadable_potential(tmp_path):
     """The whole `fit --potential sw` path: fit, print, save, reload.
 

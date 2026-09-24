@@ -6,6 +6,7 @@ build/
 dist/
 *.so
 example/
+references/
 
 .venv/
 venv/

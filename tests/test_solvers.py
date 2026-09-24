@@ -2253,3 +2253,156 @@ def test_npt_drift_is_measured_over_production_not_equilibration(tmp_path):
             f"H_NPT drift with {label}: {rate:.3f} meV/atom/ns, past the "
             f"1 meV/atom/ns bar this module sets for a conserved quantity "
             f"(all rates: { {k: round(v, 4) for k, v in drifts.items()} })")
+
+
+def test_gcmc_deletion_uses_the_energy_change_with_the_right_sign(tmp_path):
+    """
+    ADR-0003 T7 regression.  Deletion acceptance is Frenkel & Smit eq. 5.6.9,
+    min(1, lambda^3 N / V exp(-beta (mu + dU))) with dU = U(N-1) - U(N); it
+    read exp(beta (-mu + dU)).  An ideal gas cannot see the sign (dU = 0),
+    so this uses the next simplest exact case: an ideal gas in a uniform
+    external potential u0 per particle, U = N u0, for which
+
+        <N> = V exp(beta (mu - u0)) / lambda^3
+
+    exactly.  With u0 = -kT ln 3 the answer is three times the free-gas
+    value; the wrong sign cancelled u0 between insertion and deletion and
+    returned the free-gas value (found on LJ Ar vapour against NIST TMMC,
+    where N settled at 18.8 instead of 41.9).
+    """
+    T = 200.0
+    kT = K_B * T
+    L = 22.0
+    V = L ** 3
+    lattice = np.eye(3) * L
+    h_J, kB_J = 6.62607015e-34, 1.380649e-23
+    mass = 39.948
+    lam = (h_J / np.sqrt(2.0 * np.pi * mass * 1.66053906660e-27 * kB_J * T)
+           ) * 1e10
+    u0 = -kT * np.log(3.0)
+
+    def field_force_fn(lat, positions, atom_types, neigh_list=None):
+        return u0 * len(positions), np.zeros_like(positions), np.zeros((3, 3))
+
+    field_force_fn.kind = None
+    field_force_fn.r_cut = 6.0
+
+    n_free = 20
+    mu = kT * np.log(n_free * lam ** 3 / V)
+    pos = np.random.default_rng(0).random((n_free, 3)) * L
+    gc = GCMCMDSimulation(
+        lattice, pos, ["Ar"] * n_free, field_force_fn,
+        temperature=T, mu=mu, species="Ar", mass=mass,
+        cavity_bias=False, energy_bias_del=False,
+        n_cycles=300, md_steps_per_cycle=0, gcmc_attempts_per_cycle=40,
+        timestep=5.0, output_dir=str(tmp_path), verbose=False, seed=3)
+    hist = np.asarray(gc.run()["N_history"], dtype=float)
+    n_mean = float(hist[len(hist) // 3:].mean())
+    assert n_mean == pytest.approx(3.0 * n_free, rel=0.10), (
+        f"<N> = {n_mean:.1f}; exact answer {3 * n_free}, "
+        f"free gas {n_free}")
+
+
+def test_heat_flux_convective_term_is_in_ev():
+    """
+    ADR-0003 T9 regression.  The kinetic part of E_i in J = (1/V) sum_i E_i
+    v_i was 0.5 m v^2 with m in amu and v in A/fs, i.e. amu A^2/fs^2, and
+    was used as eV -- 103.6x too small.  One free atom with no potential
+    energy and no pair terms isolates it: J must be (1/2) m v^2 v / V in
+    eV/(A^2 fs), with m v^2 converted to eV.
+    """
+    from akitsushima.constants import EV_ANG_TO_AMU_ANG_FS2
+    from akitsushima.solvers.thermal_conductivity import (
+        ThermalConductivityCalculator)
+
+    L = 20.0
+    lat = np.eye(3) * L
+
+    def no_force(lat_, pos, types, neigh_list=None):
+        return 0.0, np.zeros_like(pos), np.zeros((3, 3))
+
+    tc = ThermalConductivityCalculator(lat, np.zeros((1, 3)), ["Ar"],
+                                       no_force, masses=np.array([39.948]))
+    v = np.array([[0.004, 0.0, 0.0]])                 # A/fs
+    J = tc._compute_heat_flux(np.zeros((1, 3)), v, np.zeros((1, 3)),
+                              np.zeros((3, 3)), np.zeros(1), [])
+    e_kin = 0.5 * 39.948 * 0.004 ** 2 / EV_ANG_TO_AMU_ANG_FS2   # eV
+    np.testing.assert_allclose(J, [e_kin * 0.004 / L ** 3, 0.0, 0.0],
+                               rtol=1e-12)
+
+
+def _lj_cluster_tc():
+    """13 LJ argon atoms, slightly rattled, in the middle of a 40 A box:
+    no pair ever crosses a periodic boundary, so sum_i r_i E_i is well
+    defined and J V must be its time derivative."""
+    from akitsushima.constants import EV_ANG_TO_AMU_ANG_FS2
+    from akitsushima.solvers.config_bridge import _build_force_fn_from_yaml
+    from akitsushima.solvers.thermal_conductivity import (
+        ThermalConductivityCalculator)
+    fn = _build_force_fn_from_yaml({
+        "type": "LJ", "species": ["Ar"],
+        "params": {"epsilon": 0.010423, "sigma": 3.40},
+        "r_cut": 8.5, "shift": False})[0]
+    L = 40.0
+    lat = np.eye(3) * L
+    rng = np.random.default_rng(0)
+    base = np.array([[0, 0, 0], [.5, .5, 0], [.5, 0, .5], [0, .5, .5]])
+    pts = np.array([b + [i, j, k] for b in base for i in (0, 1)
+                    for j in (0, 1) for k in (0, 1)]) * 5.3
+    pts = np.unique(np.round(pts, 6), axis=0)[:13]
+    pos = pts - pts.mean(0) + L / 2 + rng.normal(scale=0.05, size=pts.shape)
+    m = np.full(len(pos), 39.948)
+    vel = rng.normal(scale=np.sqrt(8.617e-5 * 50 * EV_ANG_TO_AMU_ANG_FS2
+                                   / 39.948), size=pos.shape)
+    vel -= vel.mean(0)
+    tc = ThermalConductivityCalculator(lat, pos, ["Ar"] * len(pos), fn,
+                                       masses=m)
+    return tc, fn, lat, pos, vel, m, EV_ANG_TO_AMU_ANG_FS2
+
+
+def test_heat_flux_is_the_time_derivative_of_the_energy_moment():
+    """
+    ADR-0003 T9 regression.  compute_pairs() returns r_ij = r_j - r_i with
+    f_ij the force on i, and the virial term used it as r_i - r_j: the whole
+    virial contribution had the wrong sign.  J V = d/dt sum_i r_i E_i,
+    evaluated by central differences over one velocity-Verlet step each way,
+    is the oracle; the old sign disagreed by 230%.
+    """
+    tc, fn, lat, pos, vel, m, C = _lj_cluster_tc()
+    types = ["Ar"] * len(pos)
+    V = abs(np.linalg.det(lat))
+
+    def moment(p, v):
+        e, f, s = fn(lat, p, types)
+        pd = tc._gather_pair_data(p)
+        E = (0.5 * m * np.sum(v ** 2, axis=1) / C
+             + tc._per_atom_energy(p, f, float(e), pd))
+        return (E[:, None] * p).sum(axis=0)
+
+    def verlet(p, v, dt):
+        v = v + 0.5 * dt * fn(lat, p, types)[1] * C / m[:, None]
+        p = p + dt * v
+        v = v + 0.5 * dt * fn(lat, p, types)[1] * C / m[:, None]
+        return p, v
+
+    e, f, s = fn(lat, pos, types)
+    pd = tc._gather_pair_data(pos)
+    J = tc._compute_heat_flux(pos, vel, f, s,
+                              tc._per_atom_energy(pos, f, float(e), pd), pd)
+    dt = 1e-3
+    J_fd = (moment(*verlet(pos, vel, dt)) - moment(*verlet(pos, vel, -dt))
+            ) / (2 * dt) / V
+    np.testing.assert_allclose(J, J_fd, rtol=0, atol=1e-6 * np.abs(J_fd).max())
+
+
+def test_kappa_seed_changes_the_trajectory(tmp_path):
+    """ADR-0003 T9 regression: the NVT equilibration ignored `seed`, so
+    every seed produced the same heat-flux series."""
+    tc, fn, lat, pos, vel, m, C = _lj_cluster_tc()
+    J = []
+    for seed in (1, 2):
+        out = tc.run_md(n_steps=20, timestep=2.0, equil_steps=10,
+                        heat_flux_every=5, seed=seed,
+                        output_dir=str(tmp_path / f"s{seed}"), verbose=False)
+        J.append(np.asarray(out["J_series"]))
+    assert not np.allclose(J[0], J[1])

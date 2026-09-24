@@ -80,7 +80,7 @@ def cmd_esm(args) -> int:
             verbose=verbose)
         res_go = go.run()
         lattice, positions = res_go["lattice"], res_go["positions"]
-        esm.update_geometry(lattice, positions)
+        esm.update_geometry(lattice, positions, atom_types)
         t_sections.append(("ESM geometry relax", _time.perf_counter()-t0))
 
     t0 = _time.perf_counter()
