@@ -1041,3 +1041,396 @@ def test_make_force_fn_engine_backend_honours_charges(small_cell_ok):
         f"test premise: the Coulomb term must be a large part of this "
         f"energy, but with and without charges differ by only "
         f"{abs(e_eng - e_neutral):.3e} eV")
+
+
+# ---------------------------------------------------------------------------
+# Log-space parameter bounds (SW / Tersoff)
+# ---------------------------------------------------------------------------
+
+_SW_SI_INITIAL = {"epsilon": 2.1683, "sigma": 2.0951, "A": 7.049556277,
+                  "B": 0.6022245584, "p": 4.0, "q": 0.0, "a": 1.80,
+                  "gamma": 1.20, "lambda": 21.0, "costheta0": -1.0 / 3.0}
+# Tersoff T3 Si, Phys. Rev. B 38, 9902 (1988).
+_T3_SI_INITIAL = {"A": 1830.8, "B": 471.18, "lambda1": 2.4799,
+                  "lambda2": 1.7322, "lambda3": 0.0, "beta": 1.1e-6,
+                  "n": 0.78734, "c": 100390.0, "d": 16.217, "h": -0.59825,
+                  "R": 2.85, "D": 0.15}
+
+
+def _param_set(kind):
+    from akitsushima.fitting.parameter_sets import (
+        StillingerWeberParameterSet, TersoffParameterSet)
+    if kind == "sw":
+        return StillingerWeberParameterSet(initial_sw=dict(_SW_SI_INITIAL),
+                                           species=["Si"]), "sw"
+    return TersoffParameterSet(initial_t=dict(_T3_SI_INITIAL),
+                               species=["Si"]), "tersoff"
+
+
+@pytest.mark.parametrize("kind", ["sw", "tersoff"])
+def test_published_parameters_lie_inside_their_own_search_box(kind):
+    """The textbook parameter set must be a point the optimiser can reach.
+
+    Log-space keys used to be inferred as ``lo < -10`` on the bound, which
+    no bound in either table satisfies except Tersoff's beta.  The
+    log-valued bounds were therefore applied to RAW values: SW Si's
+    A = 7.05 and lambda = 21.0 fell outside -2.30..4.61 and -4.61..6.22,
+    T3 Si's A = 1830.8 and c = 100390 outside 0..11.5 and 0..16.1.
+    """
+    ps, key = _param_set(kind)
+    for k, x, (lo, hi) in zip(ps.fit_keys, ps.x0, ps.bounds):
+        assert lo <= x <= hi, f"{kind}: {k} x0={x} outside ({lo}, {hi})"
+    decoded = ps.decode(ps.x0)[key]
+    initial = _SW_SI_INITIAL if kind == "sw" else _T3_SI_INITIAL
+    for k in ps.fit_keys:
+        assert decoded[k] == pytest.approx(initial[k], rel=1e-12), k
+
+
+@pytest.mark.parametrize("kind", ["sw", "tersoff"])
+def test_log_space_parameters_stay_positive_anywhere_in_the_box(kind):
+    """Every log-space key decodes to a positive number at BOTH ends of
+    its box -- the point of optimising log(value).  With log bounds
+    applied to raw values, the lower corner of the box decoded to
+    negative epsilon, sigma, A, B, lambda and gamma."""
+    ps, key = _param_set(kind)
+    lo = np.array([b[0] for b in ps.bounds])
+    hi = np.array([b[1] for b in ps.bounds])
+    for corner in (lo, hi):
+        p = ps.decode(corner)[key]
+        for k in ps.fit_keys:
+            if k in ps._LOG_KEYS:
+                assert p[k] > 0.0, f"{kind}: {k} = {p[k]} at a box corner"
+
+
+@pytest.mark.parametrize("kind,old_keys", [("sw", frozenset()),
+                                           ("tersoff", frozenset({"beta"}))])
+def test_log_space_bound_check_detects_the_old_inference(kind, old_keys):
+    """Discriminating power, by run-time injection rather than a source
+    edit: restricting _LOG_KEYS to what ``lo < -10`` used to select
+    reproduces the defect, and the published parameters fall outside the
+    box again."""
+    from unittest import mock
+    ps_cls = type(_param_set(kind)[0])
+    with mock.patch.object(ps_cls, "_LOG_KEYS", old_keys):
+        ps, _ = _param_set(kind)
+        outside = [k for k, x, (lo, hi) in zip(ps.fit_keys, ps.x0, ps.bounds)
+                   if not lo <= x <= hi]
+    assert outside, f"{kind}: injection did not reproduce the defect"
+
+
+# ---------------------------------------------------------------------------
+# Multi-species Stillinger-Weber parameter set
+# ---------------------------------------------------------------------------
+
+def _gesn_records():
+    """Tomita et al., Jpn. J. Appl. Phys. 57, 04FB04 (2018), Table I --
+    the Ge / Sn / GeSn rows, as example/GeSn uses them."""
+    def rec(i, j, k, sigma, a, lam, gamma, A=0.0, B=0.0, p=0.0, q=0.0):
+        return dict(i=i, j=j, k=k, epsilon=1.0, sigma=sigma, a=a,
+                    **{"lambda": lam}, gamma=gamma, A=A, B=B, p=p, q=q,
+                    costheta0=-1.0 / 3.0)
+    return [
+        rec("Ge", "Ge", "Ge", 2.181, 1.8110, 32.101, 1.1718, 10.093, 0.6862, 4.6973, 0.6588),
+        rec("Sn", "Sn", "Sn", 2.503, 1.7825, 28.747, 1.1610, 9.4315, 0.7012, 4.9827, 0.6252),
+        rec("Ge", "Ge", "Sn", 2.337, 1.7988, 29.858, 1.8136),
+        rec("Ge", "Sn", "Ge", 2.337, 1.7988, 29.858, 0.7232),
+        rec("Ge", "Sn", "Sn", 2.337, 1.7988, 24.460, 1.1484, 9.8864, 0.7021, 4.8537, 0.6482),
+        rec("Sn", "Ge", "Ge", 2.337, 1.7988, 24.460, 1.1484, 9.8864, 0.7021, 4.8537, 0.6482),
+        rec("Sn", "Ge", "Sn", 2.337, 1.7988, 26.074, 1.3564),
+        rec("Sn", "Sn", "Ge", 2.337, 1.7988, 26.074, 1.0924),
+    ]
+
+
+def _gesn_cell(seed=3, rattle=0.08, n_sn=8, scale=1.0):
+    """64-atom GeSn diamond cell (n_sn random Sn sites), rattled so the
+    three-body term is active and the cell has no symmetry to hide behind."""
+    basis = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0],
+                      [.25, .25, .25], [.25, .75, .75], [.75, .25, .75],
+                      [.75, .75, .25]], float)
+    frac = np.concatenate([(basis + [i, j, k]) / 2
+                           for i in range(2) for j in range(2) for k in range(2)])
+    lat = np.eye(3) * (5.7624 * 2 * scale)
+    rng = np.random.default_rng(seed)
+    pos = frac @ lat + rng.normal(0.0, rattle, (64, 3))
+    types = ["Ge"] * 64
+    for idx in rng.choice(64, n_sn, replace=False):
+        types[idx] = "Sn"
+    return lat, pos, types
+
+
+def _sw_efs(nested, lat, pos, types):
+    from akitsushima.engine import StillingerWeberPotential
+    eng = PotentialEngine().add(StillingerWeberPotential(nested, species=["Ge", "Sn"]))
+    return eng.compute(lat, pos, types)
+
+
+def test_multi_species_sw_round_trips_and_ties_the_two_pair_records():
+    from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
+    recs = _gesn_records()
+    ps = MS(recs, species=["Ge", "Sn"])
+    # 3 pairs x (sigma, A, B) + 8 rows x (lambda, gamma) + 4 off-diagonal
+    # rows x sigma, with epsilon/p/q/a/costheta0 fixed by default.
+    assert len(ps.variables) == 9 + 16 + 4
+
+    decoded = ps.decode(ps.x0)["sw"]
+    for t, p in MS._to_nested(recs).items():
+        for k, v in p.items():
+            assert decoded[t][k] == pytest.approx(v, rel=1e-12), (t, k)
+
+    # Moving the Ge-Sn two-body A must move BOTH records that carry it.
+    idx = ps.variable_names.index("Ge-Sn:A")
+    x = ps.x0.copy()
+    x[idx] += np.log(1.1)
+    moved = ps.decode(x)["sw"]
+    assert moved[("Ge", "Sn", "Sn")]["A"] == pytest.approx(9.8864 * 1.1)
+    assert moved[("Sn", "Ge", "Ge")]["A"] == pytest.approx(9.8864 * 1.1)
+
+
+def test_multi_species_sw_rejects_pair_records_that_disagree():
+    """(i,j,j) and (j,i,i) both describe the i-j pair, and the engine reads
+    whichever belongs to the lower-indexed atom.  If they disagree, the
+    energy depends on atom ORDER: permuting the atoms of one fixed 64-atom
+    GeSn structure moves it by several eV.  Such a starting point must be
+    refused rather than fitted."""
+    from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
+
+    recs = _gesn_records()
+    recs[4]["A"] *= 1.2                     # (Ge,Sn,Sn) only
+    nested = MS._to_nested(recs)
+
+    lat, pos, types = _gesn_cell()
+    perm = np.random.default_rng(0).permutation(64)
+    # StillingerWeberPotential now refuses such a set too, so switch its
+    # check off at run time to exhibit what it prevents.
+    from unittest import mock
+    from akitsushima.engine import stillinger_weber as sw_mod
+    with mock.patch.object(sw_mod, "_check_two_body_symmetry", lambda p: None):
+        e_a = _sw_efs(nested, lat, pos, types)[0]
+        e_b = _sw_efs(nested, lat, pos[perm], [types[i] for i in perm])[0]
+    # Measured 0.84 eV on this 8-Sn cell (7.98 eV on the 16-Sn 128-atom
+    # example/GeSn cell), against 1e-9 for consistent records below.
+    assert abs(e_a - e_b) > 0.1, "premise: inconsistent records are order-dependent"
+
+    with pytest.raises(ValueError, match="disagree on 'A'"):
+        MS(recs, species=["Ge", "Sn"])
+
+
+def test_multi_species_sw_consistent_records_are_permutation_invariant():
+    """Control for the test above: with consistent records, relabelling the
+    atom order changes nothing."""
+    from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
+    nested = MS._to_nested(_gesn_records())
+    lat, pos, types = _gesn_cell()
+    perm = np.random.default_rng(0).permutation(64)
+    e_a, f_a, _ = _sw_efs(nested, lat, pos, types)
+    e_b, f_b, _ = _sw_efs(nested, lat, pos[perm], [types[i] for i in perm])
+    f_back = np.empty_like(f_b)
+    f_back[perm] = f_b
+    assert e_a == pytest.approx(e_b, abs=1e-9)
+    assert np.allclose(f_a, f_back, atol=1e-9)
+
+
+def test_multi_species_sw_rows_ijk_and_ikj_are_exchangeable():
+    """The identifiability caveat in the class docstring, pinned: swapping
+    the COMPLETE parameter sets of (i,j,k) and (i,k,j) leaves E, F and S
+    unchanged, even with gamma 1.8136 vs 0.7232.  A fit that lands on the
+    swapped solution has found the same potential."""
+    from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
+    nested = MS._to_nested(_gesn_records())
+    swapped = {t: dict(p) for t, p in nested.items()}
+    for a, b in ((("Ge", "Ge", "Sn"), ("Ge", "Sn", "Ge")),
+                 (("Sn", "Ge", "Sn"), ("Sn", "Sn", "Ge"))):
+        swapped[a], swapped[b] = dict(nested[b]), dict(nested[a])
+    assert swapped[("Ge", "Ge", "Sn")]["gamma"] != nested[("Ge", "Ge", "Sn")]["gamma"]
+
+    lat, pos, types = _gesn_cell()
+    e0, f0, s0 = _sw_efs(nested, lat, pos, types)
+    e1, f1, s1 = _sw_efs(swapped, lat, pos, types)
+    assert e1 == pytest.approx(e0, abs=1e-9)
+    assert np.allclose(f1, f0, atol=1e-8)       # 3-body forces are FD-based
+    assert np.allclose(s1, s0, atol=1e-10)
+
+
+def test_registry_refuses_a_flat_sw_set_for_multi_species_data():
+    """A flat initial_sw applies ONE parameter set to every pair and triple
+    whatever the labels (measured: identical energy with real Ge/Sn
+    labels, all-Ge, or all-X).  Fitting it to GeSn data would silently fit
+    a species-blind potential."""
+    from akitsushima.fitting import registry
+    cfg = {"initial_sw": {"epsilon": 2.1683, "sigma": 2.0951, "A": 7.05,
+                          "B": 0.60, "p": 4.0, "q": 0.0, "a": 1.80,
+                          "gamma": 1.20, "lambda": 21.0, "costheta0": -1 / 3}}
+    with pytest.raises(ValueError, match="list of i/j/k records"):
+        registry.get("sw").build_param_set(cfg, ["Ge", "Sn"], [], 4.5)
+    # ...but the record list is accepted.
+    cfg["initial_sw"] = _gesn_records()
+    ps = registry.get("sw").build_param_set(cfg, ["Ge", "Sn"], [], 4.5)
+    assert type(ps).__name__ == "MultiSpeciesStillingerWeberParameterSet"
+
+
+def test_multi_species_sw_fit_recovers_perturbed_parameters():
+    """Parameter recovery end to end through fit_potential, restricted to
+    parameters the data can actually identify: the two-body A and B of
+    all three pairs (the Ge-Sn ones tied across two records).
+
+    Why not lambda/gamma as well: an earlier version of this test also
+    started (Ge;Ge,Sn).lambda and (Sn;Ge,Sn).gamma 10% off and failed --
+    correctly.  The loss fell to 3.5e-6 while those two stayed 10% and 9%
+    off, because each is summed with its exchangeable partner row
+    (224 occurrences of each ordering here, always together) and the
+    partner absorbed the difference.  See the class docstring.
+
+    Why Sn-rich cells over a range of volumes: with 8 Sn in 64 the Sn-Sn
+    pair is barely sampled and the worst A/B error was 1.5e-3; with 32 it
+    was 1.7e-4.  Scaling the loss by 1e6 changed neither, so this is data
+    coverage, not the optimiser's stopping rule.
+    """
+    from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
+    recs = _gesn_records()
+    truth = MS._to_nested(recs)
+    structs = []
+    for seed, scale in enumerate((0.96, 0.98, 1.0, 1.02, 1.04)):
+        lat, pos, types = _gesn_cell(seed=seed + 10, n_sn=32, scale=scale)
+        E, F, S = _sw_efs(truth, lat, pos, types)
+        structs.append(dict(name=str(seed), lattice=lat, positions=pos,
+                            atom_types=types, natoms=64,
+                            volume=float(abs(np.linalg.det(lat))),
+                            fix_atoms=None, ref_energy=E / 64, ref_forces=F,
+                            ref_stress=S))
+
+    start = [dict(r) for r in recs]
+    start[4]["A"] *= 1.1; start[5]["A"] *= 1.1            # keep the pair tied
+    start[4]["B"] *= 0.9; start[5]["B"] *= 0.9
+    start[0]["A"] *= 0.92
+    ps = MS(start, species=["Ge", "Sn"], fit_keys=["A", "B"])
+    assert len(ps.variables) == 6
+    res = fit_potential(ps, structs, r_cut=4.5, ewald_alpha=None,
+                        weights={"energy": 1.0, "forces": 1.0, "stress": 1.0,
+                                 "r0": 0.1, "eps0": 0.01},
+                        use_de=False, val_fraction=0.0,
+                        output_dir="/tmp/akitsushima_test_msw_fit",
+                        verbose=False)
+    got = res["params"]["sw"]
+    for triple, key, true in ((("Ge", "Sn", "Sn"), "A", 9.8864),
+                              (("Sn", "Ge", "Ge"), "A", 9.8864),
+                              (("Ge", "Sn", "Sn"), "B", 0.7021),
+                              (("Sn", "Ge", "Ge"), "B", 0.7021),
+                              (("Ge", "Ge", "Ge"), "A", 10.093),
+                              (("Sn", "Sn", "Sn"), "A", 9.4315)):
+        # Measured worst relative error: 1.7e-4.
+        assert got[triple][key] == pytest.approx(true, rel=1e-3), (triple, key)
+
+
+def test_scorecard_energy_uses_the_per_atom_reference_as_given():
+    """ref_energy is eV/atom everywhere (CSV, loss, fit_potential docs).
+    ScoreCard used to divide it by N a second time, so a perfect
+    prediction scored an energy MAE equal to |E/atom| of the data --
+    2.19 eV/atom on a GeSn fit whose true error was 0.155 meV/atom."""
+    from akitsushima.fitting.driver import ScoreCard
+    e_total = -139.0                               # 64 atoms, -2.171875 eV/atom
+    s = {"natoms": 64, "ref_energy": e_total / 64,
+         "ref_forces": None, "ref_stress": None}
+    sc = ScoreCard("t")
+    sc.add(s, e_total, None, None)
+    sc.finalize()
+    mae = sc._final["energy"]["MAE"] if isinstance(sc._final["energy"], dict) \
+        else sc._final["energy"][0]
+    assert mae == pytest.approx(0.0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# local_method: which scipy optimisers fit accepts, and with what options
+# ---------------------------------------------------------------------------
+
+_SEVEN = ["L-BFGS-B", "TNC", "SLSQP", "Nelder-Mead", "COBYLA", "COBYQA"]
+
+
+@pytest.mark.parametrize("name", _SEVEN + ["l-bfgs-b", "nelder-mead", " cobyqa "])
+def test_resolve_local_method_accepts_bounded_gradient_free_capable_methods(name):
+    from akitsushima.fitting.driver import LOCAL_METHOD_OPTIONS, resolve_local_method
+    canon, opts = resolve_local_method(name)
+    assert canon in LOCAL_METHOD_OPTIONS
+    assert canon.lower() == name.strip().lower()
+    assert opts == LOCAL_METHOD_OPTIONS[canon]
+
+
+@pytest.mark.parametrize("name,why", [
+    ("BFGS", "bounds"), ("CG", "bounds"), ("Newton-CG", "gradient"),
+    ("dogleg", "gradient"), ("trust-ncg", "gradient"),
+    ("trust-exact", "gradient"), ("trust-krylov", "gradient"),
+    ("trust-constr", "not supported"), ("Powell", "worse than ones it had"),
+    ("SGD", "not a recognised"),
+])
+def test_resolve_local_method_refuses_the_rest_with_a_reason(name, why):
+    from akitsushima.fitting.driver import resolve_local_method
+    with pytest.raises(ValueError, match=why) as exc:
+        resolve_local_method(name)
+    assert "L-BFGS-B" in str(exc.value)          # says what IS allowed
+
+
+@pytest.mark.parametrize("method", _SEVEN)
+def test_each_local_method_gets_options_it_understands_and_stays_in_bounds(method):
+    """Each accepted method, called exactly as fit_potential calls it, on a
+    bounded problem whose unconstrained minimum lies OUTSIDE the box.
+
+    Discriminating power: the former single option dict
+    {maxiter, ftol, gtol, maxfun} made scipy warn "Unknown solver options"
+    for every method except L-BFGS-B (Nelder-Mead ignored all three
+    tolerances); any such warning now fails this test.
+    """
+    import warnings
+
+    from scipy.optimize import OptimizeWarning, minimize
+
+    from akitsushima.fitting.driver import resolve_local_method
+
+    f = lambda x: (x[0] - 3.0) ** 2 + 10 * (x[1] + 1.0) ** 2 + 0.1 * (x[0] * x[1]) ** 2
+    bounds = [(-2.0, 2.0), (-0.5, 2.0)]
+    canon, opts = resolve_local_method(method)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", OptimizeWarning)
+        warnings.simplefilter("error", RuntimeWarning)
+        r = minimize(f, [0.5, 0.5], method=canon, bounds=bounds, options=opts)
+    ref = minimize(f, [0.5, 0.5], method="L-BFGS-B", bounds=bounds,
+                   options=resolve_local_method("L-BFGS-B")[1]).x
+    for xi, (lo, hi) in zip(r.x, bounds):
+        assert lo - 1e-9 <= xi <= hi + 1e-9
+    assert np.abs(r.x - ref).max() < 1e-4
+
+
+def test_fit_potential_rejects_a_bad_local_method_before_any_loss_evaluation():
+    """The check must run first: a misspelt method used to surface only
+    after the optional DE stage, which on the Si example took 25 minutes."""
+    from unittest import mock
+
+    from akitsushima.fitting import driver
+    with mock.patch.object(driver, "generic_loss_function",
+                           side_effect=AssertionError("loss evaluated")) as spy:
+        with pytest.raises(ValueError, match="does not support bounds"):
+            driver.fit_potential(param_set=None, structures=[], r_cut=5.0,
+                                 method="BFGS", use_de=True, verbose=False)
+    assert spy.call_count == 0
+
+
+@pytest.mark.parametrize("method", ["TNC", "SLSQP", "Nelder-Mead", "COBYQA"])
+def test_fit_potential_runs_with_non_default_local_methods(tmp_path, method, small_cell_ok):
+    """Non-default methods through the real fit loop on the LJ problem
+    used above: each must drive the loss down by three orders.  (Powell,
+    run the same way, stopped at 2.6e-2 from a start of 1.7, returning a
+    worse point than it had itself evaluated -- why it is refused.)"""
+    from akitsushima.engine import LennardJonesPotential
+    al = fcc_al_dict()
+    structs_raw = _perturbed_set(al)
+    pair = frozenset({"Al"})
+    engine_true = PotentialEngine().add(LennardJonesPotential(
+        {pair: {"epsilon": 0.40, "sigma": 2.5}}, r_cut=6.0, shift=True,
+        allow_minimum_image_violation=True))
+    structs = _make_training_structures(engine_true, structs_raw, r_cut=6.0)
+    ps = LJParameterSet([pair], ["Al"], {pair: {"epsilon": 0.30, "sigma": 2.6}},
+                        r_cut=6.0, shift=True)
+    weights = {"energy": 1.0, "forces": 1.0, "stress": 0.1}
+    initial = generic_loss_function(ps.x0, ps, structs, weights, r_cut=6.0,
+                                    ewald_alpha=None)
+    res = fit_potential(ps, structs, r_cut=6.0, weights=weights, method=method,
+                        val_fraction=0.0, verbose=False, output_dir=str(tmp_path))
+    assert res["loss"] < initial * 1e-3

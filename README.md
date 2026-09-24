@@ -3,13 +3,16 @@
 > **Alpha release.** This project is under active development.
 > Interfaces, behavior, and output formats may change without notice
 > between releases, and it has not yet been broadly tested. Do not
-> rely on it for production use. This release in particular changes
-> computed values relative to 0.1.0b2: Tersoff energies, forces and
-> stresses were being halved; Buckingham and Born-Mayer gained the
-> force-shifted truncation their sibling pair potentials already had;
-> and the Ewald and PPPM cutoffs are now chosen from the accuracy you
-> ask for rather than from a fixed index. Numbers from 0.1.0b2 are not
-> comparable.
+> rely on it for production use. Computed values are not comparable
+> across these pre-releases. 0.2.0a1 stopped halving Tersoff energies,
+> forces and stresses, gave Buckingham and Born-Mayer the force-shifted
+> truncation their sibling pair potentials already had, and chose the
+> Ewald and PPPM cutoffs from the accuracy you ask for. 0.2.0a2 makes the
+> single-species Stillinger-Weber format honour `gamma` (it was ignored;
+> the default is now SW's own 1.20), removes a spurious sign flip from
+> `VASP_KB_TO_EV_ANG3`, fixes variable-cell RFO, and now refuses
+> multi-species SW parameters and `fit` optimiser choices it used to
+> accept and get wrong.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -170,6 +173,43 @@ col 2  struct_idx     integer structure index
 ```
 
 Geometry for each `struct_idx` is read from `poscar_dir/<struct_idx>/POSCAR`.
+
+#### Optimisation
+
+Fitting runs in two stages, both driven from the config file:
+
+1. **Global search (optional)** -- `use_de: true` runs scipy's
+   Differential Evolution over the parameter bounds first
+   (`de_maxiter`, `de_popsize`; `--use-de` on the command line does the
+   same).  The `--write-config` templates switch it on for `sw` and
+   `tersoff` only.  Its cost is `de_popsize x n_params` loss evaluations
+   per generation, so it is practical for a handful of parameters, not
+   for tens.
+2. **Local refinement (always)** -- `local_method` picks a bounded
+   scipy optimiser (default `L-BFGS-B`, case-insensitive):
+
+| `local_method` | uses a gradient | notes |
+|---|---|---|
+| `L-BFGS-B`    | finite-difference | default; the usual choice |
+| `TNC`         | finite-difference | truncated Newton |
+| `SLSQP`       | finite-difference | |
+| `Nelder-Mead` | none | adaptive simplex; many evaluations |
+| `COBYLA`      | none | linear trust-region model |
+| `COBYQA`      | none | quadratic trust-region model |
+
+All six respect the parameter bounds and receive the same stopping
+intent in their own option names (at most 5000 iterations and 100 000
+loss evaluations, loss tolerance 1e-12 eV^2, gradient and step
+tolerances 1e-8).  Any other name is refused before any data is loaded:
+`BFGS` and `CG` ignore bounds, `Newton-CG`, `trust-*` and `dogleg` need
+an analytic gradient, which `fit` does not provide, and scipy's bounded
+`Powell` returned points worse than ones it had itself evaluated on
+real fit losses.
+
+If `L-BFGS-B` stops early from a poor starting point -- it stalled at a
+loss of 14 on an LJ test where the others reached 1e-14 -- rerun with
+`Nelder-Mead` or `COBYQA`, which do not rely on a finite-difference
+gradient.
 
 ## Project layout
 

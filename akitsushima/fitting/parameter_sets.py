@@ -34,6 +34,7 @@ __all__ = [
     "MieParameterSet",
     "YukawaParameterSet",
     "StillingerWeberParameterSet",
+    "MultiSpeciesStillingerWeberParameterSet",
     "TersoffParameterSet",
 ]
 
@@ -593,6 +594,16 @@ class StillingerWeberParameterSet(FittableParameterSet):
     _DEFAULT_FIX = {'p': 4, 'q': 0, 'a': 1.80, 'costheta0': -1.0/3.0}
     _DEFAULT_FIT = ['epsilon', 'sigma', 'A', 'B', 'lambda', 'gamma']
 
+    # Which keys are optimised as log(value).  This used to be inferred
+    # per key as `lo < -10` on the bound, which is true for no bound in
+    # this table whose lower limit is above exp(-10) = 4.5e-5 -- i.e. for
+    # every one of them here.  The log-valued bounds were therefore
+    # applied to RAW parameter values: canonical Stillinger-Weber Si's
+    # A = 7.05 and lambda = 21.0 sat outside their own search boxes
+    # (-2.30..4.61 and -4.61..6.22), and every parameter was allowed to
+    # go negative.  Stating the set explicitly removes the inference.
+    _LOG_KEYS = frozenset({'epsilon', 'sigma', 'A', 'B', 'lambda', 'gamma'})
+
     _LOG_BOUNDS = {
         'epsilon': (np.log(1e-3), np.log(50.)),
         'sigma':   (np.log(0.3),  np.log(10.)),
@@ -623,7 +634,7 @@ class StillingerWeberParameterSet(FittableParameterSet):
         for k in self.fit_keys:
             v = initial_sw[k]
             lo, hi = self._LOG_BOUNDS[k]
-            if lo < -10:          # log-space key
+            if k in self._LOG_KEYS:
                 _x0.append(np.log(max(v, 1e-12)))
             else:                 # direct key (a, costheta0)
                 _x0.append(float(v))
@@ -645,13 +656,229 @@ class StillingerWeberParameterSet(FittableParameterSet):
         """Return {'sw': full_params_dict}."""
         p = self.fixed.copy()
         for i, k in enumerate(self.fit_keys):
-            lo, hi = self._LOG_BOUNDS[k]
-            p[k] = np.exp(x[i]) if lo < -10 else float(x[i])
+            p[k] = np.exp(x[i]) if k in self._LOG_KEYS else float(x[i])
         return {'sw': p}
 
     def build_engine(self, params: dict) -> PotentialEngine:
         return (PotentialEngine()
                 .add(StillingerWeberPotential(params['sw'],
+                                              species=self.species)))
+
+
+class MultiSpeciesStillingerWeberParameterSet(FittableParameterSet):
+    """
+    Stillinger-Weber fitting for two or more species.
+
+    Works on the multi-species record format StillingerWeberPotential
+    already evaluates -- one parameter record per ORDERED triple
+    (i, j, k) -- so a fitted result drops straight into a relax/md YAML.
+    :class:`StillingerWeberParameterSet` holds a single flat parameter
+    set and cannot tell species apart at all: every pair and triple gets
+    the same numbers, whatever the atom labels (measured on a 128-atom
+    GeSn cell: identical energy to 10 digits with the real Ge/Sn labels,
+    all atoms relabelled Ge, or all relabelled X).
+
+    How the engine uses a record, and therefore which parameters are
+    tied together here
+    ------------------------------------------------------------------
+    * Two-body.  Each unordered pair is evaluated ONCE, from the
+      diagonal record ``(si, sj, sj)`` of whichever atom of the pair has
+      the lower index.  A Ge-Sn pair therefore reads ``(Ge,Sn,Sn)`` or
+      ``(Sn,Ge,Ge)`` depending on atom ORDER in the cell.  If those two
+      records disagree on any two-body input (sigma, a, epsilon, A, B,
+      p, q), the energy depends on how the atoms happen to be listed.
+      These keys are one shared variable per unordered pair here, and an
+      initial parameter set whose two records disagree is rejected.
+      (StillingerWeberPotential itself refuses the physically harmful
+      case -- differing EVALUATED two-body terms -- for every caller.
+      This class is stricter: it ties sigma/a/epsilon of the two
+      records even when both have A = 0, because it fits them as one
+      variable.)
+    * Three-body.  ``(i, j, k)`` supplies lambda, gamma and costheta0 for
+      the angle j-i-k, with its own sigma/a/epsilon used on both legs.
+      On a diagonal record those sigma/a/epsilon are the pair's (tied
+      above); on an off-diagonal record (j != k) they are that record's
+      own variables.  Every record's lambda and gamma are independent.
+
+    Identifiability (read before judging a fit by its parameters)
+    -------------------------------------------------------------
+    * epsilon enters only as epsilon*A and epsilon*lambda, so it is held
+      fixed by default; fitting it as well gives a one-parameter family
+      of exact solutions.
+    * The rows (i, j, k) and (i, k, j), j != k, are EXCHANGEABLE.  The
+      engine sums the angular term over both orderings of every
+      neighbour pair, and each record's term is symmetric in its two
+      legs, so the two records only ever enter as a sum: swapping their
+      complete parameter sets leaves every energy, force and stress
+      unchanged.  A fit can legitimately land on the swapped solution.
+      The degeneracy is not only discrete.  With equal sigma and a (as
+      in Tomita et al.) the pair contributes lambda1*exp(gamma1*u) +
+      lambda2*exp(gamma2*u) over a narrow range of u, which a shift in
+      one row can nearly compensate in the other: on three rattled GeSn
+      cells the loss fell from 28.9 to 3.5e-6 while (Ge;Ge,Sn).lambda,
+      started 10% low, ended 9.5% low, its partner row having moved
+      instead.  Judge such fits by their predictions, not by these
+      individual numbers.
+    * A parameter is only as determined as the environments that
+      exercise it.  (Sn;Ge,Sn) needs an Sn with both a Ge and an Sn
+      neighbour; a dilute-Sn training set has few (30 in three 8-Sn
+      cells) and leaves it, and Sn-Sn two-body terms, loosely fixed.
+
+    Parameters
+    ----------
+    initial_records : list of dicts with keys i, j, k plus the SW
+                      parameters (the YAML record-list format), or a dict
+                      {(i, j, k): {...}}.  Supplies the starting point AND
+                      the values of every fixed parameter.
+    species         : element symbols.
+    fix_params      : names of the parameters held at their initial
+                      values, in every record.  Default: epsilon, p, q,
+                      a, costheta0.  A dict is accepted for symmetry with
+                      the single-species class, but only its KEYS are
+                      used -- fixed values always come from the records.
+    fit_keys        : names to optimise.  Default: sigma, A, B, lambda,
+                      gamma (minus anything fixed).
+    """
+
+    _DEFAULT_FIX = ("epsilon", "p", "q", "a", "costheta0")
+    _DEFAULT_FIT = ("sigma", "A", "B", "lambda", "gamma")
+    _PAIR_KEYS = ("sigma", "a", "epsilon", "A", "B", "p", "q")
+    _TWO_BODY_ONLY = ("A", "B", "p", "q")
+    _LOG_KEYS = frozenset({"sigma", "A", "B", "lambda", "gamma", "epsilon"})
+    _BOUNDS = {                      # physical (not log) limits
+        "sigma":   (0.3, 10.0),
+        "A":       (0.1, 100.0),
+        "B":       (0.01, 20.0),
+        "lambda":  (0.01, 500.0),
+        "gamma":   (0.05, 20.0),
+        "epsilon": (1e-3, 50.0),
+        "a":       (1.2, 2.5),
+        "p":       (0.0, 12.0),
+        "q":       (0.0, 6.0),
+        "costheta0": (-1.0, 0.0),
+    }
+
+    def __init__(self,
+                 initial_records,
+                 species    : list,
+                 fix_params = None,
+                 fit_keys   : Optional[list] = None):
+        self.species = list(species)
+        self.records = self._to_nested(initial_records)
+
+        fixed = set(self._DEFAULT_FIX)
+        if fix_params:
+            fixed |= set(fix_params)
+        self.fixed_keys = frozenset(fixed)
+        keys = list(fit_keys) if fit_keys else list(self._DEFAULT_FIT)
+        self.fit_keys = [k for k in keys if k not in self.fixed_keys]
+        unknown = [k for k in self.fit_keys if k not in self._BOUNDS]
+        if unknown:
+            raise ValueError(f"MultiSpeciesStillingerWeberParameterSet: "
+                             f"unknown fit key(s) {unknown}")
+
+        self._check_pair_consistency()
+
+        # Each variable: (name, [(triple, key), ...]).  Every target of a
+        # variable receives the same value on decode.
+        self.variables = []
+        done_pairs = set()
+        for (i, j, k) in self.records:
+            if j == k:                                   # diagonal record
+                pair = frozenset((i, j))
+                if pair not in done_pairs:
+                    done_pairs.add(pair)
+                    targets = [(i, j, j)] + ([(j, i, i)] if i != j else [])
+                    for key in self.fit_keys:
+                        if key in self._PAIR_KEYS:
+                            self.variables.append(
+                                (f"{i}-{j}:{key}", [(t, key) for t in targets]))
+            for key in self.fit_keys:
+                if key in self._PAIR_KEYS:
+                    if j == k or key in self._TWO_BODY_ONLY:
+                        continue                         # pair-owned
+                self.variables.append((f"{i};{j},{k}:{key}", [((i, j, k), key)]))
+
+        x0, bounds = [], []
+        for name, targets in self.variables:
+            key = targets[0][1]
+            v = float(self.records[targets[0][0]][key])
+            lo, hi = self._BOUNDS[key]
+            if not lo <= v <= hi:
+                raise ValueError(
+                    f"MultiSpeciesStillingerWeberParameterSet: initial {name} = "
+                    f"{v} lies outside its search range [{lo}, {hi}].")
+            if key in self._LOG_KEYS:
+                x0.append(np.log(v)); bounds.append((np.log(lo), np.log(hi)))
+            else:
+                x0.append(v);         bounds.append((lo, hi))
+        self._x0 = np.array(x0)
+        self._bounds = bounds
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _to_nested(recs) -> dict:
+        if isinstance(recs, dict):
+            return {tuple(t): dict(v) for t, v in recs.items()}
+        nested = {}
+        for rec in recs:
+            rec = dict(rec)
+            nested[(rec.pop("i"), rec.pop("j"), rec.pop("k"))] = rec
+        return nested
+
+    @staticmethod
+    def to_records(nested: dict) -> list:
+        """{(i, j, k): {...}} -> the YAML record-list format."""
+        return [dict(i=t[0], j=t[1], k=t[2], **{k: float(v) for k, v in p.items()})
+                for t, p in nested.items()]
+
+    def _check_pair_consistency(self) -> None:
+        for (i, j, k), rec in self.records.items():
+            if j != k or i == j:
+                continue
+            twin = self.records.get((j, i, i))
+            if twin is None:
+                raise ValueError(
+                    f"SW record ({i},{j},{j}) has no partner ({j},{i},{i}).  "
+                    f"The {i}-{j} pair is evaluated from whichever of the two "
+                    f"belongs to the lower-indexed atom, so both are required.")
+            for key in self._PAIR_KEYS:
+                a, b = rec.get(key), twin.get(key)
+                if (a is None) != (b is None) or (
+                        a is not None and not np.isclose(float(a), float(b),
+                                                         rtol=1e-12, atol=0.0)):
+                    raise ValueError(
+                        f"SW records ({i},{j},{j}) and ({j},{i},{i}) disagree on "
+                        f"'{key}' ({a} vs {b}).  Both describe the same {i}-{j} "
+                        f"pair, and which one the engine reads depends on atom "
+                        f"order in the cell, so the energy would too.")
+
+    # ------------------------------------------------------------------
+    @property
+    def x0(self) -> np.ndarray:
+        return self._x0.copy()
+
+    @property
+    def bounds(self) -> list:
+        return self._bounds
+
+    @property
+    def variable_names(self) -> list:
+        return [name for name, _ in self.variables]
+
+    def decode(self, x: np.ndarray) -> dict:
+        """Return {'sw': {(i, j, k): full parameter dict}}."""
+        out = {t: dict(p) for t, p in self.records.items()}
+        for xi, (name, targets) in zip(x, self.variables):
+            key = targets[0][1]
+            v = float(np.exp(xi)) if key in self._LOG_KEYS else float(xi)
+            for triple, k in targets:
+                out[triple][k] = v
+        return {"sw": out}
+
+    def build_engine(self, params: dict) -> PotentialEngine:
+        return (PotentialEngine()
+                .add(StillingerWeberPotential(params["sw"],
                                               species=self.species)))
 
 
@@ -696,6 +923,17 @@ class TersoffParameterSet(FittableParameterSet):
     # lambda3=None means "copy lambda2 on decode"
     _DEFAULT_FIT = ['A', 'B', 'lambda1', 'lambda2', 'beta', 'n', 'c', 'd', 'h']
 
+    # Which keys are optimised as log(value).  This used to be inferred
+    # per key as `lo < -10` on the bound, which is true for no bound in
+    # this table whose lower limit is above exp(-10) = 4.5e-5 -- i.e. for
+    # every one of them here.  The log-valued bounds were therefore
+    # applied to RAW parameter values: Tersoff T3 Si's A = 1830.8 and
+    # c = 100390 sat outside their own search boxes (0..11.5 and
+    # 0..16.1); only beta, bounded below by log(1e-10) = -23, escaped, and every parameter was allowed to
+    # go negative.  Stating the set explicitly removes the inference.
+    _LOG_KEYS = frozenset({'A', 'B', 'lambda1', 'lambda2', 'beta',
+                           'n', 'c', 'd'})
+
     _LOG_BOUNDS = {
         'A':       (np.log(1.),    np.log(1e5)),
         'B':       (np.log(0.1),   np.log(1e4)),
@@ -728,7 +966,8 @@ class TersoffParameterSet(FittableParameterSet):
         for k in self.fit_keys:
             v = initial_t[k]
             lo, hi = self._LOG_BOUNDS[k]
-            _x0.append(np.log(max(v, 1e-15)) if lo < -10 else float(v))
+            _x0.append(np.log(max(v, 1e-15)) if k in self._LOG_KEYS
+                       else float(v))
             _lo.append(lo);  _hi.append(hi)
 
         self._x0     = np.array(_x0)
@@ -752,8 +991,7 @@ class TersoffParameterSet(FittableParameterSet):
                 p[k] = float(v)
         # Fitted params
         for i, k in enumerate(self.fit_keys):
-            lo, _ = self._LOG_BOUNDS[k]
-            p[k] = np.exp(x[i]) if lo < -10 else float(x[i])
+            p[k] = np.exp(x[i]) if k in self._LOG_KEYS else float(x[i])
         # lambda3: default to lambda2 if not fixed to a specific value
         if 'lambda3' in self.fixed and self.fixed['lambda3'] is not None:
             p['lambda3'] = float(self.fixed['lambda3'])

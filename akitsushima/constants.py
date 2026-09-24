@@ -51,24 +51,42 @@ FREQ_RAD_FS_TO_WAVENUMBER_CM = 1.0 / (2.0 * math.pi * SPEED_OF_LIGHT_CM_FS)
 EV_ANG3_TO_GPA  = 160.2176621           # eV/A^3 -> GPa
 EV_ANG3_TO_KBAR = EV_ANG3_TO_GPA * 10.0  # eV/A^3 -> kbar (VASP OUTCAR "kB")
 
-# Bug-fix note: VASP's OUTCAR reports its "Total"/"in kB" stress block
-# with the OPPOSITE sign from this codebase's tensile-positive
-# convention (VASP's own forum documentation labels that block "FORCE
-# on cell = -STRESS in cart. coord."; independently confirmed via
-# ASE's production ase.calculators.vasp.vasp::read_stress, which reads
-# the raw "in kB" line and computes
-# ``stress = -np.array([...]) * 1e-1 * ase.units.GPa`` -- i.e. ASE
-# explicitly negates the raw VASP value, in addition to the kB->GPa
-# unit conversion, before using it in its own tensile-positive stress
-# convention).  A caller converting real VASP OUTCAR stress into this
-# codebase's eV/A^3, tensile-positive convention must apply BOTH the
-# unit conversion AND this sign flip -- this ready-made constant does
-# both, so callers do not have to re-derive it (a previous version of
-# this codebase's own documentation stated the kB->eV/A^3 factor as
-# ``1/160.2176621``, which is off by exactly 10x -- that is the
-# eV/A^3->GPa factor, not eV/A^3->kbar -- and omitted the sign flip
-# entirely).
-VASP_KB_TO_EV_ANG3 = -1.0 / EV_ANG3_TO_KBAR
+# VASP OUTCAR "in kB" -> this codebase's stress, in eV/A^3.
+#
+# NO SIGN FLIP.  This codebase's stress is sigma_ab = -(1/V) dE/dT_ab,
+# which is POSITIVE for a compressed cell (docs/adr/0001, CONTEXT.md
+# "Compressive-positive").  VASP's raw "in kB" line has that same sign:
+# it is positive under compression.  ASE's convention is the opposite
+# one -- ase.calculators.vasp.vasp::read_stress negates the raw line
+# (``stress = -np.array([...]) * 1e-1 * ase.units.GPa``) to get it --
+# so the chain is
+#
+#     ASE stress           = -raw_kB / 1602.176621        (read_stress)
+#     akitsushima stress   = -ASE stress                  (measured)
+#     =>  akitsushima stress = +raw_kB / 1602.176621
+#
+# where "measured" is ASE's own LennardJones calculator against this
+# package's LennardJonesPotential on the same compressed and expanded
+# FCC cells: ratio -1.000000 in both, magnitudes equal to 7 digits
+# (tests/test_io.py pins the whole chain against ASE's production code).
+#
+# Bug-fix note: this constant was -1/1602.176621.  It was derived from
+# the premise that this codebase is "tensile-positive" in ASE's sense,
+# which is a misnomer for the convention it actually uses (see
+# CONTEXT.md) -- the same indirect-from-VASP reasoning that ADR-0001
+# records as having wrongly predicted a sign flip in the 'vasp' cell
+# update scheme.  Training data built with it carried stresses of the
+# opposite sign to what the engine predicts for the same structure, so
+# a stress-weighted fit was pulled toward the mirror-image answer.  The
+# regression test that accompanied it could not see this: it built its
+# "raw VASP" input as target / CONSTANT and checked that multiplying by
+# CONSTANT gave target back, which holds for either sign.
+#
+# Component ORDER is a separate trap: VASP writes xx yy zz xy yz zx,
+# whereas akitsushima's training CSV expects Voigt xx yy zz yz zx xy.
+# Reorder raw VASP values with [0, 1, 2, 4, 5, 3] (ASE's own
+# read_stress does exactly this).
+VASP_KB_TO_EV_ANG3 = +1.0 / EV_ANG3_TO_KBAR
 
 # Atomic masses [amu] for common elements
 ATOMIC_MASS = {

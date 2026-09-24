@@ -672,6 +672,134 @@ def test_sw_multi_species_path():
     assert_translationally_invariant(f_analytic)
 
 
+def _sw_si_flat(gamma):
+    """Canonical Stillinger-Weber Si (Phys. Rev. B 31, 5262 (1985),
+    Table I) in the legacy flat single-species parameter format, with
+    gamma left overridable.  SW's own Si value is gamma = 1.20."""
+    return {"epsilon": 2.1683, "sigma": 2.0951, "a": 1.80, "gamma": gamma,
+            "lambda": 21.0, "A": 7.049556277, "B": 0.6022245584,
+            "p": 4.0, "q": 0.0, "costheta0": -1.0 / 3.0}
+
+
+class _GammaBlindParams(dict):
+    """A parameter dict that never yields its 'gamma' entry.
+
+    Patched onto a potential instance this reproduces, at run time and
+    without editing any source, the exact pre-fix behaviour: the legacy
+    flat path's three-body exponent hard-coded ``1 / (x - a)``, so the
+    caller's 'gamma' was read by nothing at all.
+    """
+
+    def get(self, key, default=None):
+        if key == "gamma":
+            return 1.0
+        return super().get(key, default)
+
+
+@pytest.mark.parametrize("gamma", [1.0, 1.20])
+@pytest.mark.parametrize("use_numba", [False, True])
+def test_sw_flat_and_multi_species_formats_agree_for_one_species(gamma, use_numba):
+    """The two parameter formats are two spellings of one potential.
+
+    For a single species they must therefore agree exactly.  The
+    multi-species path has always carried an explicit per-triple gamma
+    in its exponent and is covered by its own finite-difference oracle
+    (test_sw_multi_species_path), which makes it a genuine independent
+    reference for the legacy flat path rather than a second copy of it.
+
+    Regression: the flat path used to hard-code gamma = 1, so this
+    agreement held at gamma = 1.0 and broke at every other gamma.
+    """
+    if use_numba and not _HAS_NUMBA:
+        pytest.skip("numba not installed")
+    from akitsushima.engine import StillingerWeberPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    flat = StillingerWeberPotential(_sw_si_flat(gamma), species=["Si"])
+    multi = StillingerWeberPotential({("Si", "Si", "Si"): _sw_si_flat(gamma)},
+                                     species=["Si"])
+
+    args = (struct["lattice"], struct["positions"], struct["atom_types"])
+    e_f, f_f, s_f = flat.compute(*args, use_numba=use_numba)
+    e_m, f_m, s_m = multi.compute(*args, use_numba=use_numba)
+    assert e_f == pytest.approx(e_m, abs=1e-8)
+    assert np.allclose(f_f, f_m, atol=1e-7)
+    assert np.allclose(s_f, s_m, atol=1e-8)
+
+
+def test_sw_flat_format_gamma_reaches_the_three_body_exponent():
+    """gamma must actually change the answer -- and only via V3.
+
+    Two things are pinned here.  First, why the defect stayed hidden:
+    in a PERFECT diamond lattice every bond angle is exactly the
+    tetrahedral angle, so ``(cos t - cos t0)^2`` is identically zero,
+    the whole three-body term vanishes, and gamma provably cannot
+    matter.  Any test built on an undistorted lattice would have passed
+    either way.  Second, on a DISTORTED lattice gamma must matter; the
+    gamma-blind injection below is what the code used to do, so this
+    assertion fails against the pre-fix implementation.
+    """
+    from akitsushima.engine import StillingerWeberPotential
+
+    perfect = diamond_si_dict()
+    distorted = randomly_perturbed(diamond_si_dict(), magnitude=0.15, seed=7)
+
+    def energy(struct, gamma, blind=False):
+        pot = StillingerWeberPotential(_sw_si_flat(gamma), species=["Si"])
+        if blind:
+            pot.p = _GammaBlindParams(pot.p)
+        e, _, _ = pot.compute(struct["lattice"], struct["positions"],
+                              struct["atom_types"])
+        return e
+
+    # V3 == 0 by symmetry: gamma cannot show up, whatever the code does.
+    assert energy(perfect, 1.0) == pytest.approx(energy(perfect, 1.20), abs=1e-10)
+
+    # V3 != 0: gamma must show up.
+    e_lo = energy(distorted, 1.0)
+    e_hi = energy(distorted, 1.20)
+    # Measured separation on this fixture is 0.6448 eV over 8 atoms
+    # (-32.1983 vs -32.8432); 0.1 eV sits well clear of it and nine
+    # orders of magnitude above the ~1e-10 eV agreement the perfect
+    # lattice above shows when gamma genuinely cannot matter.
+    assert abs(e_hi - e_lo) > 0.1, (
+        f"gamma made no difference on a distorted cell: {e_lo} vs {e_hi}")
+
+    # Discriminating power, by run-time injection rather than a source
+    # edit: a potential that cannot see 'gamma' collapses gamma = 1.20
+    # back onto the gamma = 1.0 answer -- precisely the old behaviour.
+    assert energy(distorted, 1.20, blind=True) == pytest.approx(e_lo, abs=1e-10)
+
+
+def test_sw_flat_format_forces_match_finite_difference_at_nonunit_gamma():
+    """Forces and stress must be derivatives of the SAME energy gamma
+    enters.  Threading a parameter into an energy expression but not
+    into the force path is the classic way to half-fix this class of
+    defect; the pre-existing SW oracle only ever ran at the implicit
+    gamma = 1 and could not have caught it."""
+    from akitsushima.engine import StillingerWeberPotential
+
+    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    pot = StillingerWeberPotential(_sw_si_flat(1.20), species=["Si"])
+
+    def e_of_pos(pos):
+        e, _, _ = pot.compute(struct["lattice"], pos, struct["atom_types"])
+        return e
+
+    def e_of_lat(lat, pos):
+        e, _, _ = pot.compute(lat, pos, struct["atom_types"])
+        return e
+
+    _, f, s = pot.compute(struct["lattice"], struct["positions"],
+                          struct["atom_types"])
+    assert_forces_match(f, finite_diff_forces(e_of_pos, struct["positions"]),
+                        label="SW flat gamma=1.20")
+    assert_stress_match(s, finite_diff_stress(e_of_lat, struct["lattice"],
+                                              struct["positions"]),
+                        label="SW flat gamma=1.20")
+    assert_translationally_invariant(f)
+
+
 @pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
 def test_sw_multi_species_numba_matches_numpy():
     """Phase 5: the multi-species (nested-triple) path gained its own JIT
@@ -681,10 +809,19 @@ def test_sw_multi_species_numba_matches_numpy():
     (Na/Cl rock-salt) structure -- not just a single species dressed up
     in the multi-species dict format, as the pre-existing
     test_sw_multi_species_path does -- with DELIBERATELY DIFFERENT
-    parameter values for the (Na,Cl,Cl) vs (Cl,Na,Na) entries, so that a
-    species-id indexing mistake in the JIT table lookup (e.g. a
-    transposed [i_sp, j_sp]) would show up as a mismatch here rather
-    than being masked by both directions happening to share one value."""
+    three-body values (lambda, gamma) for the (Na,Cl,Cl) vs (Cl,Na,Na)
+    entries, so that a species-id indexing mistake in the JIT table
+    lookup (e.g. a transposed [i_sp, j_sp, k_sp]) would show up as a
+    mismatch here rather than being masked by both directions happening
+    to share one value.
+
+    The two-body values used to differ as well.  They no longer may: both
+    records describe the single Na-Cl pair, which is evaluated from
+    whichever belongs to the lower-indexed atom, so differing two-body
+    values made the energy depend on atom order, and
+    StillingerWeberPotential now rejects them.  A transposed TWO-body
+    table lookup is correspondingly no longer observable -- nor
+    physically meaningful, since the table is symmetric by construction."""
     from akitsushima.engine import StillingerWeberPotential
 
     struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=2)
@@ -700,7 +837,12 @@ def test_sw_multi_species_numba_matches_numpy():
             "costheta0": -1.0 / 3.0,
         },
         ("Cl", "Na", "Na"): {
-            "epsilon": 1.5, "sigma": 2.0951, "A": 5.5, "B": 0.55,
+            # Two-body inputs identical to (Na,Cl,Cl): both records
+            # describe the one Na-Cl pair, and StillingerWeberPotential
+            # refuses them otherwise (the energy would depend on atom
+            # order).  lambda/gamma stay different, which is what keeps
+            # a transposed three-body table lookup detectable.
+            "epsilon": 2.0, "sigma": 2.0951, "A": 7.05, "B": 0.60,
             "p": 4, "q": 0, "a": 1.80, "lambda": 12.0, "gamma": 1.1,
             "costheta0": -1.0 / 3.0,
         },
@@ -1389,3 +1531,134 @@ def test_ionic_pair_potentials_shift_to_zero_at_the_cutoff(cls_name, params):
     vc, dvc = raw.pair_energy_force(np.array([r_cut]), "Na", "Cl")
     assert np.allclose(vs, vr - vc[0] - dvc[0] * (r - r_cut), atol=1e-12)
     assert np.allclose(dvs, dvr - dvc[0], atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Multi-species SW: two-body records must not depend on atom order
+# ---------------------------------------------------------------------------
+
+def _sw_binary_records(**ab_override):
+    """A two-species SW set (X, Y) with every two-body pair present.
+    ``ab_override`` edits the (X,Y,Y) record only."""
+    base = dict(epsilon=1.0, sigma=2.2, a=1.80, p=4.0, q=0.0,
+                costheta0=-1.0 / 3.0)
+    recs = {
+        ("X", "X", "X"): {**base, "A": 9.0, "B": 0.65, "lambda": 25.0, "gamma": 1.2},
+        ("Y", "Y", "Y"): {**base, "sigma": 2.4, "A": 8.5, "B": 0.70,
+                          "lambda": 22.0, "gamma": 1.15},
+        ("X", "Y", "Y"): {**base, "sigma": 2.3, "A": 9.5, "B": 0.68,
+                          "lambda": 20.0, "gamma": 1.1},
+        ("Y", "X", "X"): {**base, "sigma": 2.3, "A": 9.5, "B": 0.68,
+                          "lambda": 18.0, "gamma": 1.3},
+        ("X", "X", "Y"): {**base, "sigma": 2.3, "lambda": 21.0, "gamma": 1.25},
+        ("X", "Y", "X"): {**base, "sigma": 2.3, "lambda": 21.0, "gamma": 0.9},
+    }
+    recs[("X", "Y", "Y")].update(ab_override)
+    return recs
+
+
+def _xy_cell():
+    """64-atom diamond cell, half X half Y at random sites, rattled."""
+    basis = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0],
+                      [.25, .25, .25], [.25, .75, .75], [.75, .25, .75],
+                      [.75, .75, .25]], float)
+    frac = np.concatenate([(basis + [i, j, k]) / 2
+                           for i in range(2) for j in range(2) for k in range(2)])
+    lat = np.eye(3) * (5.9 * 2)
+    rng = np.random.default_rng(5)
+    pos = frac @ lat + rng.normal(0.0, 0.07, (64, 3))
+    types = ["X"] * 32 + ["Y"] * 32
+    rng.shuffle(types)
+    return lat, pos, types
+
+
+def test_sw_rejects_two_body_records_that_depend_on_atom_order():
+    """(i,j,j) and (j,i,i) both describe the i-j pair, and the pair is
+    evaluated from whichever belongs to the LOWER-INDEXED atom.
+
+    Discriminating power, by run-time injection: with the check switched
+    off, the same inconsistent set gives a structure an energy that
+    changes when its atoms are merely relisted -- which is the defect.
+    With the check on, construction refuses the set.
+    """
+    from unittest import mock
+
+    from akitsushima.engine import StillingerWeberPotential
+    from akitsushima.engine import stillinger_weber as sw_mod
+
+    bad = _sw_binary_records(A=9.5 * 1.2)
+    lat, pos, types = _xy_cell()
+    perm = np.random.default_rng(0).permutation(64)
+
+    with mock.patch.object(sw_mod, "_check_two_body_symmetry", lambda p: None):
+        pot = StillingerWeberPotential(bad, species=["X", "Y"])
+        e_a = pot.compute(lat, pos, types)[0]
+        e_b = pot.compute(lat, pos[perm], [types[i] for i in perm])[0]
+    assert abs(e_a - e_b) > 0.1, (e_a, e_b)
+
+    with pytest.raises(ValueError, match=r"disagree .*\['A'\]"):
+        StillingerWeberPotential(bad, species=["X", "Y"])
+
+
+def test_sw_consistent_two_body_records_are_order_independent_and_accepted():
+    from akitsushima.engine import StillingerWeberPotential
+    good = _sw_binary_records()
+    lat, pos, types = _xy_cell()
+    perm = np.random.default_rng(0).permutation(64)
+    pot = StillingerWeberPotential(good, species=["X", "Y"])
+    e_a, f_a, s_a = pot.compute(lat, pos, types)
+    e_b, f_b, s_b = pot.compute(lat, pos[perm], [types[i] for i in perm])
+    f_back = np.empty_like(f_b)
+    f_back[perm] = f_b
+    assert e_a == pytest.approx(e_b, abs=1e-9)
+    assert np.allclose(f_a, f_back, atol=1e-8)
+    assert np.allclose(s_a, s_b, atol=1e-10)
+
+
+@pytest.mark.parametrize("edit,accepted", [
+    # Different lambda/gamma: three-body only, never order-dependent.
+    ({"lambda": 5.0, "gamma": 2.0}, True),
+    # An omitted key equals its evaluation default (epsilon 1.0).
+    ({"epsilon": None}, True),
+    # Any evaluated two-body input differing: refused.
+    ({"sigma": 2.31}, False),
+    ({"B": 0.69}, False),
+    ({"p": 4.5}, False),
+    ({"epsilon": 1.1}, False),
+])
+def test_sw_two_body_check_compares_exactly_what_is_evaluated(edit, accepted):
+    from akitsushima.engine import StillingerWeberPotential
+    recs = _sw_binary_records()
+    for k, v in edit.items():
+        if v is None:
+            recs[("X", "Y", "Y")].pop(k)
+        else:
+            recs[("X", "Y", "Y")][k] = v
+    if accepted:
+        StillingerWeberPotential(recs, species=["X", "Y"])
+    else:
+        with pytest.raises(ValueError, match="disagree"):
+            StillingerWeberPotential(recs, species=["X", "Y"])
+
+
+def test_sw_two_body_check_handles_absent_and_zero_A_records():
+    """A record with A == 0, or no record at all, supplies no two-body
+    term.  Both absent: no X-Y pair interaction either way -- accepted,
+    and the two diagonal records' sigma may then differ (they only feed
+    their own three-body terms).  One supplying a term and the other
+    not: order-dependent -- refused."""
+    from akitsushima.engine import StillingerWeberPotential
+    recs = _sw_binary_records(A=0.0)
+    recs[("Y", "X", "X")]["A"] = 0.0
+    recs[("Y", "X", "X")]["sigma"] = 2.5
+    StillingerWeberPotential(recs, species=["X", "Y"])
+
+    one_sided = _sw_binary_records()
+    one_sided[("Y", "X", "X")]["A"] = 0.0
+    with pytest.raises(ValueError, match="does not"):
+        StillingerWeberPotential(one_sided, species=["X", "Y"])
+
+    missing = _sw_binary_records()
+    del missing[("Y", "X", "X")]
+    with pytest.raises(ValueError, match="does not"):
+        StillingerWeberPotential(missing, species=["X", "Y"])

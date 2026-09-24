@@ -50,7 +50,8 @@ def cell_force_from_stress(stress: np.ndarray, lattice: np.ndarray) -> np.ndarra
 
     Parameters
     ----------
-    stress  : (3, 3) stress tensor [eV/A^3], tensile-positive convention.
+    stress  : (3, 3) stress tensor [eV/A^3], this codebase's
+              compressive-positive convention (docs/adr/0001).
     lattice : (3, 3) lattice matrix [A], rows are lattice vectors.
 
     Returns

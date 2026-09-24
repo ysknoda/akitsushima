@@ -217,14 +217,22 @@ def test_nn_and_lightgbm_are_lazy_at_top_level(tmp_path):
     which is one of the very things this port fixed, so testing against
     it would defeat the point of this test rather than exercise it).
     """
+    # The second half -- that accessing NNModel DOES import torch -- can
+    # only hold where torch is installed.  It is an optional extra, and in
+    # a clean `pip install akitsushima[dev,yaml]` environment this test
+    # used to fail on exactly that line while the property it exists for
+    # (nothing imported eagerly) passed.
+    import importlib.util
+    has_torch = importlib.util.find_spec("torch") is not None
     script = (
         "import sys\n"
         "import akitsushima\n"
         "assert 'torch' not in sys.modules, 'torch imported too eagerly'\n"
         "assert 'lightgbm' not in sys.modules, 'lightgbm imported too eagerly'\n"
         "_ = akitsushima.NNModel\n"
-        "assert 'torch' in sys.modules, 'NNModel access did not import torch'\n"
-        "assert 'lightgbm' not in sys.modules, "
+        + ("assert 'torch' in sys.modules, 'NNModel access did not import torch'\n"
+           if has_torch else "")
+        + "assert 'lightgbm' not in sys.modules, "
         "'accessing NNModel must not import lightgbm'\n"
         "print('OK')\n"
     )

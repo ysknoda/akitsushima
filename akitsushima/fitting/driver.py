@@ -40,6 +40,8 @@ __all__ = [
     "print_scorecard_comparison",
     "parity_plot_all",
     "fit_potential",
+    "LOCAL_METHOD_OPTIONS",
+    "resolve_local_method",
     "print_fit_result",
     "evaluate_diagnostics_generic",
     "save_fit_result_generic",
@@ -187,7 +189,15 @@ class ScoreCard:
             s_pred  : Optional[np.ndarray]) -> None:
         """Accumulate one structure's predictions."""
         N = struct["natoms"]
-        self._e_ref.append(struct["ref_energy"] / N)
+        # ref_energy is ALREADY eV/atom -- the convention of the training
+        # CSV, of generic_loss_function (dE = e/N - ref_energy) and of
+        # fit_potential's own docstring.  It used to be divided by N again
+        # here, turning the reference into E/N^2 ~ 0, so the "Energy MAE"
+        # every fit printed was just |E/atom| of the data: 2.19 eV/atom
+        # for a GeSn fit whose held-out energy error, measured
+        # independently, was 0.155 meV/atom.  The energy parity plots
+        # were built from the same wrong numbers.
+        self._e_ref.append(float(struct["ref_energy"]))
         self._e_pred.append(e_pred / N)
 
         if struct.get("ref_forces") is not None and f_pred is not None:
@@ -421,6 +431,81 @@ def parity_plot_all(train_sc  : ScoreCard,
         print(f"  Parity plot saved : {path}")
 
 
+# ---------------------------------------------------------------------------
+#  Local optimisers accepted by fit_potential
+# ---------------------------------------------------------------------------
+
+# Every scipy.optimize.minimize method that honours BOUNDS and runs without
+# an analytic gradient -- fit_potential supplies neither a Jacobian nor a
+# Hessian -- each with the SAME stopping intent (at most 5000 iterations
+# and 100000 loss evaluations; loss tolerance 1e-12 eV^2; gradient
+# tolerance 1e-8; step tolerance 1e-8 in the optimisation variable, which
+# is log(value) for most parameters, i.e. ~1e-8 relative) expressed in
+# that method's own option names.
+#
+# Bug-fix note: local_method used to be passed to scipy unchecked, always
+# with the L-BFGS-B option dict {maxiter, ftol, gtol, maxfun}.  Measured on
+# a bounded problem with scipy 1.17.1: BFGS and CG accepted the bounds
+# with only a warning and ended OUTSIDE them, 0.76 from the answer;
+# trust-constr raised TypeError on the foreign option keys; Newton-CG and
+# the four trust-region Newton methods raised for want of a Jacobian; and
+# every other method silently ignored some of the keys (Nelder-Mead all
+# three tolerances), stopping on scipy's defaults instead.  With the
+# table below every listed method converges on that problem and on a
+# 12-D bounded quadratic, inside the bounds, with no warnings.
+#
+# Powell satisfies the same two conditions and is still left out, on
+# measurement against REAL fit losses (an LJ fit from three starting
+# points, and a 6-variable GeSn Stillinger-Weber fit): with bounds it
+# returned a point worse than one it had itself evaluated on all four --
+# loss 2-3e-2 where every other method reached 1e-13 or below on LJ, and
+# 0.58 on GeSn after evaluating 7.6e-3 -- and on one LJ start it returned
+# a point worse than its STARTING point (4.42 vs 3.58).  The same LJ
+# problem without bounds converges to 3.9e-27, so this is scipy's bounded
+# Powell, not the loss.  (Also measured there, and worth knowing: from
+# the worst LJ start, L-BFGS-B stalled at 14.2 while TNC, SLSQP,
+# Nelder-Mead, COBYLA and COBYQA all reached 1e-14 or below; and on the
+# GeSn problem adaptive Nelder-Mead was the most accurate, 5e-19.)
+LOCAL_METHOD_OPTIONS = {
+    "L-BFGS-B":    {"maxiter": 5000, "maxfun": 100_000, "ftol": 1e-12, "gtol": 1e-8},
+    "TNC":         {"maxfun": 100_000, "ftol": 1e-12, "gtol": 1e-8},
+    "SLSQP":       {"maxiter": 5000, "ftol": 1e-12},
+    # adaptive: dimension-dependent simplex coefficients (Gao & Han 2012);
+    # the fixed textbook ones degrade badly beyond a handful of variables.
+    "Nelder-Mead": {"maxiter": 5000, "maxfev": 100_000, "fatol": 1e-12,
+                    "xatol": 1e-8, "adaptive": True},
+    # COBYLA's maxiter counts loss evaluations, not iterations.
+    "COBYLA":      {"maxiter": 100_000, "tol": 1e-10},
+    "COBYQA":      {"maxiter": 5000, "maxfev": 100_000, "final_tr_radius": 1e-10},
+}
+
+_REJECTED_LOCAL_METHODS = {
+    "bfgs": "does not support bounds -- scipy warns and then steps outside them",
+    "cg": "does not support bounds -- scipy warns and then steps outside them",
+    "newton-cg": "requires an analytic gradient, which fit does not provide",
+    "dogleg": "requires an analytic gradient and Hessian, which fit does not provide",
+    "trust-ncg": "requires an analytic gradient and Hessian, which fit does not provide",
+    "trust-exact": "requires an analytic gradient and Hessian, which fit does not provide",
+    "trust-krylov": "requires an analytic gradient and Hessian, which fit does not provide",
+    "trust-constr": "is not supported by fit (its option set is incompatible)",
+    "powell": ("is not supported by fit: with bounds, scipy's Powell returned "
+               "points worse than ones it had itself evaluated on real fit losses"),
+}
+
+
+def resolve_local_method(name: str):
+    """Map a user-supplied local optimiser name (case-insensitive) to its
+    canonical scipy spelling and option dict, or raise ValueError saying
+    why it cannot be used and what can."""
+    key = str(name).strip().lower()
+    for canon, opts in LOCAL_METHOD_OPTIONS.items():
+        if canon.lower() == key:
+            return canon, dict(opts)
+    allowed = ", ".join(LOCAL_METHOD_OPTIONS)
+    reason = _REJECTED_LOCAL_METHODS.get(key, "is not a recognised method")
+    raise ValueError(f"local_method '{name}' {reason}.  Choose one of: {allowed}.")
+
+
 def fit_potential(param_set      : FittableParameterSet,
                   structures     : list,
                   r_cut          : float,
@@ -491,7 +576,10 @@ def fit_potential(param_set      : FittableParameterSet,
                      - E term:  w_E x (N_s x deltaE_per_atom)^2  [eV^2]
                      - F term:  w_F x r_0^2 x mean(deltaF^2)       [eV^2]
                      - S term:  w_S x (V_s epsilon_0)^2 x mean(deltasigma^2) [eV^2]
-    method         : scipy local optimiser (default 'L-BFGS-B').
+    method         : local optimiser, one of LOCAL_METHOD_OPTIONS
+                     (default 'L-BFGS-B'; case-insensitive).  Checked
+                     BEFORE any loss evaluation, so a bad name fails in
+                     seconds instead of after a long DE run.
     use_de         : run Differential Evolution before local refinement.
     de_maxiter     : max DE generations.
     de_popsize     : DE population size (x n_params).
@@ -528,6 +616,8 @@ def fit_potential(param_set      : FittableParameterSet,
     dict with keys: ``params``, ``engine``, ``x``, ``loss``,
     ``train_structs``, ``val_structs``, ``train_sc``, ``val_sc``.
     """
+    method, local_options = resolve_local_method(method)
+
     _tc_fit = TimingCollector(enabled=timing)
     _tc_fit.start("total")
     if weights is None:
@@ -584,9 +674,7 @@ def fit_potential(param_set      : FittableParameterSet,
     if verbose:
         print(f"\nLocal refinement with {method} ...")
     opt = minimize(objective, x0=best_x, method=method,
-                   bounds=param_set.bounds,
-                   options={"maxiter": 5000, "ftol": 1e-12,
-                             "gtol": 1e-8, "maxfun": 100_000})
+                   bounds=param_set.bounds, options=local_options)
     if opt.fun < best_loss:
         best_x, best_loss = opt.x, opt.fun
 
@@ -708,13 +796,38 @@ def print_fit_result(result: dict, potential: str) -> None:
                 print(f"  {sp:<12}  {q:>+12.4f}")
 
     elif potential in ("sw", "tersoff"):
-        # Print each parameter sub-dict
+        # Two shapes reach here.  The single-species parameter sets decode
+        # to a FLAT {name: value} dict; the multi-species SW set decodes
+        # to {(i, j, k): {name: value}}.
+        #
+        # Bug-fix note: this branch used to assume the nested shape only,
+        # so on every flat result it iterated ('epsilon', 2.1683) as if
+        # it were (triple, sub-dict) and raised "AttributeError: 'float'
+        # object has no attribute 'items'".  print_fit_result runs AFTER
+        # the optimisation and BEFORE save_fit_result_generic, so
+        # `akitsushima fit --potential sw` and `--potential tersoff`
+        # completed the whole fit and then lost it without writing the
+        # result.  No test ran either potential through cmd_fit.
+        #
+        # Triples are printed as "i;j,k" in their stored ORDER.  They
+        # used to be joined after sort(), which folds (Ge,Ge,Sn) and
+        # (Ge,Sn,Ge) -- two distinct rows with distinct gamma in the
+        # multi-species format -- onto the same label.
         key = "sw" if potential == "sw" else "tersoff"
-        for trio, p in params.get(key, {}).items():
-            sp = "-".join(sorted(trio)) if not isinstance(trio, str) else trio
-            print(f"\n  [{sp}]")
-            for k, v in p.items():
-                print(f"    {k:<20s} = {v:>15.8g}")
+        sub = params.get(key, {})
+        if sub and all(not isinstance(v, dict) for v in sub.values()):
+            print()
+            for k, v in sub.items():
+                print(f"    {k:<20s} = {float(v):>15.8g}")
+        else:
+            for trio, p in sub.items():
+                if isinstance(trio, tuple) and len(trio) == 3:
+                    label = f"{trio[0]};{trio[1]},{trio[2]}"
+                else:
+                    label = str(trio)
+                print(f"\n  [{label}]")
+                for k, v in p.items():
+                    print(f"    {k:<20s} = {float(v):>15.8g}")
 
     else:
         # Generic fallback: dump the params dict, recursively converting

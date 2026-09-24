@@ -213,6 +213,135 @@ def test_variable_cell_relax_converges_from_sheared_cell():
     assert np.max(np.abs(stress_final)) * GPa < 1.0
 
 
+_SW_SI = {"epsilon": 2.1683, "sigma": 2.0951, "a": 1.80, "gamma": 1.20,
+          "lambda": 21.0, "A": 7.049556277, "B": 0.6022245584,
+          "p": 4.0, "q": 0.0, "costheta0": -1.0 / 3.0}
+_SW_SI_RCUT = 1.80 * 2.0951
+_A_EQ_SI = 5.430950            # SW's own equilibrium, |P| < 4e-12 GPa here
+
+
+def _perturbed_si_supercell(v_ratio, n=2, sigma=0.05, seed=1):
+    """n x n x n conventional diamond Si, scaled to v_ratio * V_eq and
+    randomly displaced.  A perfect diamond lattice has every bond angle
+    at exactly the tetrahedral angle, so SW's (cos t - cos t0)^2 term --
+    and, by site symmetry, the force on every atom -- vanishes at ANY
+    isotropic strain; the displacement is what gives the ionic degrees
+    of freedom a non-zero gradient."""
+    basis = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0],
+                      [.25, .25, .25], [.25, .75, .75], [.75, .25, .75],
+                      [.75, .75, .25]], float)
+    a0 = _A_EQ_SI * v_ratio ** (1.0 / 3.0)
+    frac = np.concatenate([(basis + [i, j, k]) / n
+                           for i in range(n) for j in range(n)
+                           for k in range(n)])
+    lattice = np.eye(3) * (a0 * n)
+    pos = frac @ lattice
+    d = np.random.default_rng(seed).normal(0.0, sigma, pos.shape)
+    return lattice, pos + (d - d.mean(axis=0)), ["Si"] * len(pos)
+
+
+def _sw_si_force_fn():
+    from akitsushima.engine import StillingerWeberPotential
+    return make_force_fn(PotentialEngine().add(
+        StillingerWeberPotential({("Si", "Si", "Si"): _SW_SI}, species=["Si"])))
+
+
+def test_set_x_round_trips_only_when_the_cell_does_not_move():
+    """The property _run_rfo's fix rests on.
+
+    Under relax_cell, _set_x reads self.lattice to turn the incoming
+    Cartesian block into fractional coordinates before re-expanding it
+    in the NEW cell -- so the atoms are carried along with the cell and
+    _get_x() afterwards is NOT the vector that was passed in.  Any
+    optimiser that keeps its own `x` instead of re-reading the state
+    therefore drifts out of step with the geometry, by an amount
+    proportional to the cell step.
+    """
+    lattice, positions, types = _perturbed_si_supercell(1.0)
+    go = GeometryOptimiser(lattice, positions, types,
+                           force_fn=_sw_si_force_fn(), r_cut=_SW_SI_RCUT,
+                           relax_cell=True, max_steps=0, method="fire",
+                           verbose=False,
+                           output_dir="/tmp/akitsushima_test_setx")
+    go.run()
+    x = go._get_x()
+    n_ion = go.N * 3
+    rng = np.random.default_rng(0)
+    ionic = rng.normal(0.0, 1e-3, n_ion)
+
+    gaps = []
+    for cell_step in (0.0, 1e-4, 1e-3, 1e-2):
+        dx = np.concatenate([ionic, np.eye(3).ravel() * cell_step])
+        state = go._save_state()
+        go._set_x(x + dx)
+        gaps.append(float(np.linalg.norm(go._get_x() - (x + dx))))
+        go._restore_state(state)
+
+    # Cell frozen: _set_x is the identity, so the round trip is exact.
+    assert gaps[0] < 1e-12
+    # Cell moving: the gap grows in proportion to the cell step and is
+    # far larger than the step itself (7.2x here, for this cell).
+    for cell_step, gap in zip((1e-4, 1e-3, 1e-2), gaps[1:]):
+        assert gap > cell_step, (cell_step, gap)
+    assert gaps[3] / gaps[1] == pytest.approx(100.0, rel=0.02)
+
+
+def test_rfo_variable_cell_rereads_its_state_vector_instead_of_carrying_it():
+    """_run_rfo used to set ``x = x_new`` on an accepted step.
+
+    Because of the property pinned just above, that made `x` drift from
+    the real geometry every time the cell moved.  ``x + dx`` then stopped
+    describing a neighbourhood of the current structure: shrinking |dx|
+    by a factor 690 left the trial energy change stuck at +2.2915 eV
+    instead of approaching zero, so every trial was rejected and the run
+    froze at its step-2 geometry.  _run_lbfgs, _run_diis, _run_rmmdiis
+    and _run_sd all re-read with _get_x(); _run_rfo was the only one
+    that did not.
+
+    Discriminating power is shown by RE-INJECTING the defect at run
+    time -- no source is edited.  _get_x is made to hand back the last
+    vector passed to _set_x, which is exactly what carrying x_new
+    forward did, and is armed only after _fd_hessian has finished so the
+    Hessian probes (which legitimately use both calls) are untouched.
+    """
+    def run_rfo(inject_defect):
+        lattice, positions, types = _perturbed_si_supercell(0.95)
+        go = GeometryOptimiser(lattice, positions, types,
+                               force_fn=_sw_si_force_fn(), r_cut=_SW_SI_RCUT,
+                               relax_cell=True, check_forces=True,
+                               check_stress=True, fmax=0.01, pmax=0.1,
+                               max_steps=12, method="rfo", verbose=False,
+                               output_dir="/tmp/akitsushima_test_rfo_x")
+        if inject_defect:
+            armed, last = [False], [None]
+            fd, set_x, get_x = go._fd_hessian, go._set_x, go._get_x
+
+            def _fd(n):
+                H = fd(n)
+                armed[0] = True
+                return H
+
+            def _set(v):
+                if armed[0]:
+                    last[0] = np.array(v, copy=True)
+                return set_x(v)
+
+            def _get():
+                return last[0] if (armed[0] and last[0] is not None) else get_x()
+
+            go._fd_hessian, go._set_x, go._get_x = _fd, _set, _get
+        return go.run()["energy"]
+
+    e_fixed = run_rfo(False)
+    e_defect = run_rfo(True)
+
+    # Measured on this fixture: -277.3956 eV fixed vs -276.6014 eV with
+    # the defect re-injected, i.e. the defective run gives up 0.79 eV of
+    # the 5.5 eV it had to recover and then stops moving at all.
+    assert e_fixed < e_defect - 0.5, (e_fixed, e_defect)
+    assert e_fixed < -277.0
+
+
 def test_vasp_cell_scheme_drives_volume_in_correct_physical_direction():
     """Bug C' regression: cell_update_scheme='vasp' (the "computation
     method that doesn't use the inverse matrix h^-1", f_cell = stress @

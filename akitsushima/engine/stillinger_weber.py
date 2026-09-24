@@ -53,7 +53,7 @@ def _sw_2body_numpy(idx_i, idx_j, rij_arr, r_arr, forces, stress,
 
 
 def _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
-                   sig, a_sw, lam, eps, costh0):
+                   sig, a_sw, gam, lam, eps, costh0):
     """
     Scalar SW three-body energy term h(theta_jik) for one (j, k) pair
     of neighbours of central atom i, given the two relative-displacement
@@ -65,6 +65,20 @@ def _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
     why this replaces a previous hand-derived analytic formula that
     was found to be incorrect (verified via finite-difference
     comparison against the total energy).
+
+    Bug-fix note (gamma): the exponent used to read ``1.0 / (x - a_sw)``,
+    i.e. gamma hard-coded to 1, even though the class docstring documents
+    the term as ``exp(gamma.sigma/(r - a.sigma))`` and lists 'gamma' as an
+    accepted key of the legacy flat parameter format.  A flat dict's
+    'gamma' was therefore read by nothing and discarded in silence.  The
+    defect is invisible in a perfect diamond lattice -- every bond angle
+    is exactly tetrahedral there, so ``(cos t - cos t0)^2`` vanishes and
+    the whole three-body term with it -- and only shows up once the
+    angles are distorted: on a 0.15 A randomly displaced 8-atom Si cell,
+    gamma = 1.00 and gamma = 1.20 both gave exactly -28.92004161 eV
+    before the fix, against -30.39236397 eV for the (already correct)
+    multi-species path at gamma = 1.20.  Canonical Stillinger-Weber Si
+    has gamma = 1.20, so the legacy path was not running SW Si.
     """
     r_ij = math.sqrt(rijx * rijx + rijy * rijy + rijz * rijz)
     r_ik = math.sqrt(rikx * rikx + riky * riky + rikz * rikz)
@@ -72,8 +86,8 @@ def _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
     xik = r_ik / sig
     if xij >= a_sw or xik >= a_sw:
         return 0.0
-    exp_ij = _nb_exp(1.0 / (xij - a_sw))
-    exp_ik = _nb_exp(1.0 / (xik - a_sw))
+    exp_ij = _nb_exp(gam / (xij - a_sw))
+    exp_ik = _nb_exp(gam / (xik - a_sw))
     cos_th = (rijx * rikx + rijy * riky + rijz * rikz) / (r_ij * r_ik)
     dcos = cos_th - costh0
     return lam * eps * exp_ij * exp_ik * dcos * dcos
@@ -82,7 +96,7 @@ def _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
 def _sw_3body_numpy(n_start, n_end,
                      nb_start, nb_idx, nb_rij, nb_r,
                      forces, stress,
-                     eps, sig, a_sw, lam, costh0):
+                     eps, sig, a_sw, gam, lam, costh0):
     """
     SW 3-body energy and forces.  Returns energy; modifies forces/stress
     in-place.  Iterates over central atoms in [n_start, n_end).
@@ -145,21 +159,21 @@ def _sw_3body_numpy(n_start, n_end,
                 rikz = nb_rij[pk, 2]
 
                 h3 = _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
-                                    sig, a_sw, lam, eps, costh0)
+                                    sig, a_sw, gam, lam, eps, costh0)
                 energy += h3
 
-                dzj0 = (_sw_h3_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzj1 = (_sw_h3_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzj2 = (_sw_h3_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzk0 = (_sw_h3_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzk1 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzk2 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, sig, a_sw, lam, eps, costh0)) / (2 * hh)
+                dzj0 = (_sw_h3_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzj1 = (_sw_h3_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzj2 = (_sw_h3_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzk0 = (_sw_h3_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzk1 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzk2 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
 
                 fj0 = -dzj0
                 fj1 = -dzj1
@@ -241,7 +255,7 @@ def _sw_2body_numpy_par(idx_i, idx_j, rij_arr, r_arr, forces, stress,
 def _sw_3body_numpy_par(n_start, n_end,
                          nb_start, nb_idx, nb_rij, nb_r,
                          forces, stress,
-                         eps, sig, a_sw, lam, costh0):
+                         eps, sig, a_sw, gam, lam, costh0):
     """
     Parallel version of _sw_3body_numpy, parallelizing over the central
     atom index i, using per-thread force/stress accumulator buffers
@@ -285,21 +299,21 @@ def _sw_3body_numpy_par(n_start, n_end,
                 rikz = nb_rij[pk, 2]
 
                 h3 = _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
-                                    sig, a_sw, lam, eps, costh0)
+                                    sig, a_sw, gam, lam, eps, costh0)
                 energy += h3
 
-                dzj0 = (_sw_h3_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzj1 = (_sw_h3_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzj2 = (_sw_h3_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzk0 = (_sw_h3_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzk1 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, sig, a_sw, lam, eps, costh0)) / (2 * hh)
-                dzk2 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, sig, a_sw, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, sig, a_sw, lam, eps, costh0)) / (2 * hh)
+                dzj0 = (_sw_h3_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzj1 = (_sw_h3_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzj2 = (_sw_h3_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzk0 = (_sw_h3_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzk1 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
+                dzk2 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, sig, a_sw, gam, lam, eps, costh0)
+                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
 
                 fj0 = -dzj0
                 fj1 = -dzj1
@@ -397,13 +411,12 @@ def _sw_multi_2body_numpy(idx_i, idx_j, rij_arr, r_arr, type_ids, forces, stress
 
 def _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz,
                         sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t):
-    """Table-driven analogue of _sw_h3_scalar: unlike the legacy
-    single-species term (which hard-codes an implicit gamma=1), the
-    multi-species format's own three-body term (see
-    StillingerWeberPotential._compute_multi_species's _h3_term) includes
-    an explicit per-triple gamma prefactor in the exponent, so this
-    scalar must reproduce that exact formula (gam_t / (x - a_t), not
-    1 / (x - a_t)) to give identical results to the existing NumPy path."""
+    """Table-driven analogue of _sw_h3_scalar, differing only in where
+    gamma comes from: here it is looked up per (i, j, k) triple from
+    tri_gam, whereas _sw_h3_scalar takes the single flat-format scalar.
+    (This function's explicit ``gam_t / (x - a_t)`` is what made the
+    legacy path's hard-coded ``1 / (x - a_sw)`` detectable as a defect;
+    see _sw_h3_scalar's bug-fix note.)"""
     r_ij = math.sqrt(rijx * rijx + rijy * rijy + rijz * rijz)
     r_ik = math.sqrt(rikx * rikx + riky * riky + rikz * rikz)
     xij = r_ij / sigma_t
@@ -532,6 +545,69 @@ else:
     _sw_multi_3body_jit = _sw_multi_3body_numpy
 
 
+def _effective_two_body(rec):
+    """The two-body inputs a record actually supplies, exactly as both
+    evaluation paths read them -- or None when it supplies no two-body
+    term (record absent, or A == 0: both paths skip the pair then)."""
+    if rec is None or float(rec.get('A', 0.0)) == 0.0:
+        return None
+    return {'epsilon': float(rec.get('epsilon', 1.0)),
+            'sigma': float(rec['sigma']), 'a': float(rec['a']),
+            'A': float(rec['A']), 'B': float(rec.get('B', 0.0)),
+            'p': float(rec.get('p', 4)), 'q': float(rec.get('q', 0))}
+
+
+def _check_two_body_symmetry(params: dict) -> None:
+    """Refuse multi-species SW parameters whose two-body term depends on
+    the order the atoms are listed in.
+
+    Each unordered pair is evaluated ONCE, from the diagonal record
+    (s_i, s_j, s_j) of whichever atom of the pair has the LOWER index.
+    A Ge-Sn pair therefore reads (Ge,Sn,Sn) when the Ge comes first and
+    (Sn,Ge,Ge) when the Sn does.  If those two records supply different
+    two-body terms, the energy of one fixed structure changes when its
+    atoms are merely relabelled: 7.98 eV on the 128-atom example/GeSn
+    cell with (Ge,Sn,Sn).A scaled by 1.2.  That is not a physical
+    potential, so it is rejected here rather than evaluated.
+
+    Only what is actually EVALUATED has to agree: a pair where neither
+    record has A != 0 has no two-body term, and the records' sigma/a
+    then serve their own three-body terms only, which may differ.
+    """
+    species = sorted({e for t in params for e in t})
+    for x, si in enumerate(species):
+        for sj in species[x + 1:]:
+            r1 = _effective_two_body(params.get((si, sj, sj)))
+            r2 = _effective_two_body(params.get((sj, si, si)))
+            if r1 is None and r2 is None:
+                continue
+            if (r1 is not None and r2 is not None
+                    and all(math.isclose(r1[k], r2[k], rel_tol=1e-12, abs_tol=0.0)
+                            for k in r1)):
+                continue
+            if r1 is None or r2 is None:
+                have, miss = (((si, sj, sj), (sj, si, si)) if r2 is None
+                              else ((sj, si, si), (si, sj, sj)))
+                raise ValueError(
+                    f"StillingerWeberPotential: {have} supplies a two-body "
+                    f"{si}-{sj} term but {miss} does not (absent, or A = 0). "
+                    f"The pair is evaluated from whichever of the two belongs "
+                    f"to the lower-indexed atom, so the energy would depend "
+                    f"on atom order.  Give {miss} the same two-body "
+                    f"parameters (epsilon, sigma, a, A, B, p, q).")
+            diff = [k for k in r1
+                    if not math.isclose(r1[k], r2[k], rel_tol=1e-12, abs_tol=0.0)]
+            raise ValueError(
+                f"StillingerWeberPotential: ({si},{sj},{sj}) and "
+                f"({sj},{si},{si}) disagree on the {si}-{sj} two-body "
+                f"parameter(s) {diff}: "
+                + ", ".join(f"{k} {r1[k]} vs {r2[k]}" for k in diff)
+                + ".  The pair is evaluated from whichever record belongs "
+                f"to the lower-indexed atom, so the energy would depend on "
+                f"atom order.  Their lambda/gamma/costheta0 may differ; "
+                f"these may not.")
+
+
 class StillingerWeberPotential:
     """
     Stillinger-Weber (SW) potential for covalently bonded systems
@@ -557,7 +633,11 @@ class StillingerWeberPotential:
     A flat scalar dict (keys 'epsilon','sigma','A','B','p','q','a',
     'lambda','gamma','costheta0' at the top level, as used for Si) is
     accepted directly: it is automatically expanded so the single
-    species in `species` maps to this one parameter set.
+    species in `species` maps to this one parameter set.  Every key
+    falls back to Stillinger & Weber's own Si value when omitted, so an
+    empty dict is SW Si -- including 'gamma', whose fallback is 1.20
+    (it used to be hard-coded to 1 inside the three-body exponent and
+    read from the dict by nothing at all; see _sw_h3_scalar).
 
     Multi-species format (LAMMPS .sw-file-like convention)
     ----------------------------------------------------------
@@ -630,6 +710,7 @@ class StillingerWeberPotential:
                     "parameter format.")
             self._multi = True
             self.p = params
+            _check_two_body_symmetry(params)
             rc_max = 0.0
             for (i, j, k), v in params.items():
                 if j == k:
@@ -687,6 +768,11 @@ class StillingerWeberPotential:
         qq = float(self.p.get('q', 0))
         a_sw = self.p.get('a', 1.80)
         lam = self.p.get('lambda', 21.0)
+        # Defaults to Stillinger & Weber's own Si value, like every
+        # other fallback in this block.  Until this was read, the
+        # three-body exponent hard-coded gamma = 1 and silently
+        # discarded whatever the caller supplied (see _sw_h3_scalar).
+        gam = self.p.get('gamma', 1.20)
         costh0 = self.p.get('costheta0', -1.0 / 3.0)
         rc = a_sw * sig
 
@@ -769,7 +855,7 @@ class StillingerWeberPotential:
                 n_start, n_end,
                 nb_start, nb_idx, nb_rij, nb_r,
                 forces, stress,
-                eps, sig, a_sw, lam, costh0)
+                eps, sig, a_sw, gam, lam, costh0)
             energy += e3
         else:
             # NumPy path (MPI pair-split for 2-body)
@@ -805,8 +891,8 @@ class StillingerWeberPotential:
                 xik_ = r_ik_ / sig
                 if xij_ >= a_sw or xik_ >= a_sw:
                     return 0.0
-                e_ij = math.exp(1.0 / (xij_ - a_sw))
-                e_ik = math.exp(1.0 / (xik_ - a_sw))
+                e_ij = math.exp(gam / (xij_ - a_sw))
+                e_ik = math.exp(gam / (xik_ - a_sw))
                 cos_ = float(np.dot(rij_v, rik_v)) / (r_ij_ * r_ik_)
                 return lam * eps * e_ij * e_ik * (cos_ - costh0)**2
 

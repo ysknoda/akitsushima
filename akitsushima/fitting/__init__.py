@@ -36,6 +36,7 @@ from .parameter_sets import (
     MieParameterSet,
     MorseParameterSet,
     StillingerWeberParameterSet,
+    MultiSpeciesStillingerWeberParameterSet,
     TersoffParameterSet,
     YukawaParameterSet,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "MieParameterSet",
     "YukawaParameterSet",
     "StillingerWeberParameterSet",
+    "MultiSpeciesStillingerWeberParameterSet",
     "TersoffParameterSet",
     "generic_loss_function",
     "split_train_val",

@@ -1,6 +1,8 @@
 """Round-trip tests for akitsushima.io (POSCAR / XDATCAR / EFS)."""
 import numpy as np
 
+import pytest
+
 from akitsushima.constants import VASP_KB_TO_EV_ANG3
 from akitsushima.io import parse_poscar, read_efs_file, write_efs_file, write_poscar
 from akitsushima.io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
@@ -158,50 +160,93 @@ def test_efs_roundtrip():
         os.remove(path)
 
 
-def test_efs_read_applies_vasp_kb_conversion_with_correct_unit_and_sign():
-    """Bug A/B regression: read_efs_file(..., stress_to_eV_Ang3=...) must
-    apply BOTH the correct kB->eV/A^3 unit factor (1/1602.176621, not the
-    eV/A^3->GPa factor 1/160.2176621 that a previous version of this
-    codebase's own documentation mistakenly recommended -- a 10x error)
-    AND the sign flip VASP's raw OUTCAR stress needs to match this
-    codebase's tensile-positive convention. Exercises the exact
-    ``constants.VASP_KB_TO_EV_ANG3`` preset this docstring fix points
-    users at, since test_efs_roundtrip only ever exercises the default
-    stress_to_eV_Ang3=1.0 path and never touches this factor at all."""
+def test_efs_read_applies_the_vasp_kb_unit_factor():
+    """read_efs_file(..., stress_to_eV_Ang3=VASP_KB_TO_EV_ANG3) must use
+    the kbar factor 1/1602.176621 -- not 1/160.2176621, the eV/A^3->GPa
+    factor an earlier version of this codebase recommended (10x off).
+
+    This test is about MAGNITUDE only.  Its predecessor also claimed to
+    pin the sign, but it built its "raw VASP" input as
+    ``target / VASP_KB_TO_EV_ANG3`` and checked that multiplying by
+    ``VASP_KB_TO_EV_ANG3`` gave ``target`` back -- true for either sign,
+    so it passed with the wrong one.  The sign needs an independent
+    oracle; see test_vasp_kb_sign_matches_ases_production_reader below.
+    """
     import os
     import tempfile
 
     rng = np.random.default_rng(1)
     n_atoms = 3
-    energy = -12.5
-    forces = rng.uniform(-1, 1, size=(n_atoms, 3))
-
-    # A known target stress, already in this codebase's eV/A^3
-    # tensile-positive convention.
-    target_stress_eV_ang3 = rng.uniform(-0.05, 0.05, size=(3, 3))
-    target_stress_eV_ang3 = 0.5 * (target_stress_eV_ang3 + target_stress_eV_ang3.T)
-
-    # What a real VASP OUTCAR "in kB" line would contain to represent
-    # that same physical stress: invert the conversion the fixed
-    # docstrings now document (raw_kB * VASP_KB_TO_EV_ANG3 == target).
-    raw_vasp_kb_stress = target_stress_eV_ang3 / VASP_KB_TO_EV_ANG3
+    raw_kb = rng.uniform(-50.0, 50.0, size=(3, 3))
+    raw_kb = 0.5 * (raw_kb + raw_kb.T)
 
     fd, path = tempfile.mkstemp(suffix=".efs")
     os.close(fd)
     try:
-        write_efs_file(path, energy, forces, raw_vasp_kb_stress, n_atoms=n_atoms)
+        write_efs_file(path, -12.5, rng.uniform(-1, 1, (n_atoms, 3)), raw_kb,
+                       n_atoms=n_atoms)
         _, _, s_read = read_efs_file(path, n_atoms=n_atoms,
                                      stress_to_eV_Ang3=VASP_KB_TO_EV_ANG3)
-        assert np.allclose(s_read, target_stress_eV_ang3, atol=1e-8), (
-            "VASP_KB_TO_EV_ANG3 did not recover the correct tensile-positive "
-            "eV/A^3 stress from a simulated raw VASP-kB input.")
-
-        # The old, wrong factor (1/160.2176621, no sign flip) must NOT
-        # match -- otherwise this test would not actually discriminate
-        # the bug from the fix.
-        old_wrong_factor = 1.0 / 160.2176621
-        _, _, s_read_wrong = read_efs_file(path, n_atoms=n_atoms,
-                                           stress_to_eV_Ang3=old_wrong_factor)
-        assert not np.allclose(s_read_wrong, target_stress_eV_ang3, atol=1e-8)
+        assert np.allclose(np.abs(s_read), np.abs(raw_kb) / 1602.176621,
+                           rtol=1e-9)
+        assert not np.allclose(np.abs(s_read), np.abs(raw_kb) / 160.2176621,
+                               rtol=1e-3)
     finally:
         os.remove(path)
+
+
+def test_vasp_kb_sign_matches_ases_production_reader():
+    """VASP_KB_TO_EV_ANG3 must turn a raw OUTCAR "in kB" line into THIS
+    engine's stress convention -- checked end to end against ASE, which
+    is independent of this package and whose VASP reader is production
+    code used far more widely than anything here.
+
+    The chain, each link measured rather than argued:
+
+      1. ASE's own ``Vasp.read_stress`` converts a raw "in kB" line to
+         ASE's stress convention.
+      2. ASE's own LennardJones calculator and this package's
+         LennardJonesPotential, on the same compressed FCC cell, give
+         stresses of opposite sign and equal magnitude.  So ASE's
+         convention is the negative of the engine's.
+      3. Therefore the raw line, converted to the ENGINE's convention,
+         must equal minus ASE's reading of it.
+
+    Discriminating power: the previous value of the constant,
+    -1/1602.176621, fails link 3 -- asserted explicitly below.  That
+    value came from reading this codebase's former label for its own
+    convention, "tensile-positive", in ASE's sense; the label was wrong
+    (CONTEXT.md, "Compressive-positive").
+    """
+    ase = pytest.importorskip("ase")
+    from ase.build import bulk
+    from ase.calculators.lj import LennardJones
+    from ase.calculators.vasp import Vasp
+
+    from akitsushima.constants import EV_ANG3_TO_KBAR
+    from akitsushima.engine import LennardJonesPotential, PotentialEngine
+    from akitsushima.fitting import make_force_fn
+
+    # -- link 2: the engine's convention is the negative of ASE's --------
+    eps, sig, rc = 0.0104, 3.40, 8.5
+    fn = make_force_fn(PotentialEngine().add(LennardJonesPotential(
+        {frozenset({"Ar"}): {"epsilon": eps, "sigma": sig}},
+        r_cut=rc, shift=False)))
+    atoms = bulk("Ar", "fcc", a=5.26 * 0.95, cubic=True).repeat((4, 4, 4))
+    atoms.calc = LennardJones(epsilon=eps, sigma=sig, rc=rc, smooth=False)
+    s_ase = atoms.get_stress(voigt=False)
+    _, _, s_eng = fn(np.array(atoms.cell), atoms.get_positions(),
+                     ["Ar"] * len(atoms))
+    assert s_eng[0, 0] > 0.0, "a compressed cell must be positive here"
+    assert np.allclose(s_eng, -s_ase, rtol=1e-6, atol=1e-12)
+
+    # -- link 1 + 3: raw "in kB" line through ASE's own reader -----------
+    raw = np.array([10.0, 20.0, 30.0, 1.0, 2.0, 3.0])   # VASP: xx yy zz xy yz zx
+    line = "  in kB  " + "".join(f"{v:12.5f}" for v in raw) + "\n"
+    ase_voigt = Vasp().read_stress(lines=[line])        # ASE: xx yy zz yz xz xy
+    ours = raw[[0, 1, 2, 4, 5, 3]] * VASP_KB_TO_EV_ANG3  # same order as ASE's
+    assert np.allclose(ours, -ase_voigt, rtol=1e-9)
+
+    # The former constant fails the same check.
+    old = raw[[0, 1, 2, 4, 5, 3]] * (-1.0 / EV_ANG3_TO_KBAR)
+    assert not np.allclose(old, -ase_voigt, rtol=1e-3)

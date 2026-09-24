@@ -89,25 +89,24 @@ def read_efs_file(path: str,
                         Source unit                     Factor
                         ==============================  ====================
                         eV/A^3 (no conversion)           1.0
-                        VASP kB (raw OUTCAR "in kB")     -1 / 1602.176621
-                        QE Ry/bohr^3                     14.7103
+                        VASP kB (raw OUTCAR "in kB")     +1 / 1602.176621
+                        QE Ry/bohr^3                     +91.8157677
                         ==============================  ====================
 
-                        Bug-fix note: an earlier version of this table listed
-                        the VASP factor as ``1 / 160.2176621`` -- that is the
-                        eV/A^3->GPa factor, not eV/A^3->kbar (1 GPa = 10 kbar
-                        exactly, so 1 eV/A^3 = 1602.176621 kbar), and it
-                        omitted a required sign flip: VASP's OUTCAR reports
-                        its "Total"/"in kB" stress block with the OPPOSITE
-                        sign from this codebase's tensile-positive
-                        convention (VASP's own forum documentation labels
-                        that block "FORCE on cell = -STRESS"; independently
-                        confirmed via ASE's production
-                        ``ase.calculators.vasp.vasp::read_stress``, which
-                        negates the raw value in addition to the kB->GPa
-                        unit conversion).  Pass
-                        ``akitsushima.constants.VASP_KB_TO_EV_ANG3`` directly
-                        rather than re-deriving this factor by hand.
+                        No sign flip for either: VASP's and QE's raw stress
+                        are both positive under compression, which is this
+                        codebase's convention too (see
+                        ``akitsushima.constants.VASP_KB_TO_EV_ANG3`` for the
+                        derivation, checked against ASE's production
+                        readers).  Pass that constant rather than
+                        re-deriving the VASP factor by hand.
+
+                        Bug-fix notes: the VASP entry was first
+                        ``1/160.2176621`` (the eV/A^3->GPa factor, 10x off),
+                        then ``-1/1602.176621`` (right magnitude, wrong
+                        sign).  The QE entry read ``14.7103``; 1 Ry/bohr^3
+                        is 91.8157677 eV/A^3 (ase.units.Ry/ase.units.Bohr**3),
+                        so that was 6.24x too small.
 
     Returns
     -------

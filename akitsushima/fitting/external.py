@@ -76,21 +76,16 @@ class ExternalFileEngine:
                        Common values:
                        - 1.0                              -- already eV/A^3
                        - constants.VASP_KB_TO_EV_ANG3      -- VASP kB (raw
-                         OUTCAR "in kB") -> eV/A^3, i.e. -1/1602.176621.
-                         Bug-fix note: an earlier version of this docstring
-                         said ``1/160.218``, which is the eV/A^3->GPa factor
-                         (not eV/A^3->kbar -- 1 GPa = 10 kbar exactly) and
-                         also omitted a required sign flip: VASP's OUTCAR
-                         reports its "Total"/"in kB" stress with the
-                         OPPOSITE sign from this codebase's tensile-positive
-                         convention (confirmed via VASP's own forum
-                         documentation -- "FORCE on cell = -STRESS" -- and
-                         via ASE's production
-                         ``ase.calculators.vasp.vasp::read_stress``, which
-                         negates the raw value). Use the ready-made
-                         ``VASP_KB_TO_EV_ANG3`` constant rather than
-                         re-deriving this factor by hand.
-                       - 14.7103                          -- QE Ry/bohr^3 -> eV/A^3
+                         OUTCAR "in kB") -> eV/A^3, i.e. +1/1602.176621.
+                         No sign flip: VASP's raw value is positive under
+                         compression, and so is this codebase's stress
+                         (derivation in ``constants.VASP_KB_TO_EV_ANG3``).
+                         Bug-fix notes: this was first ``1/160.218`` (the
+                         eV/A^3->GPa factor, 10x off) and then
+                         ``-1/1602.176621`` (wrong sign).
+                       - 91.8157677                       -- QE Ry/bohr^3 -> eV/A^3
+                         (was listed as 14.7103, 6.24x too small; no sign
+                         flip, for the same reason as VASP)
     env              : optional dict of extra environment variables to pass to
                        the subprocess (merged with the current environment).
     cache            : if True (default), skip re-computation when the

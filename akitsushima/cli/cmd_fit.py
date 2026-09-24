@@ -24,6 +24,7 @@ from ..fitting.driver import (
     evaluate_diagnostics_generic,
     fit_potential,
     print_fit_result,
+    resolve_local_method,
     save_fit_result_generic,
 )
 from ..fitting.models.csv_io import load_mlip_csv
@@ -158,17 +159,23 @@ def _structures_from_csv(targets    : np.ndarray,
 
     * 1 E row  -- total energy [eV/atom]; multiplied by N internally
     * 3N F rows -- force components, row-major (atom 1 x/y/z, atom 2 ...) [eV/A]
-    * 6 S rows  -- Voigt stress: xx yy zz yz zx xy [eV/A^3], tensile-positive
+    * 6 S rows  -- Voigt stress: xx yy zz yz zx xy [eV/A^3],
+      compressive-positive (a compressed cell has positive diagonal
+      stress -- the engine's own convention, docs/adr/0001)
 
-    If S rows are derived from a real VASP OUTCAR, both a unit conversion
-    AND a sign flip are required before writing the CSV: VASP's raw
-    "in kB" stress uses the OPPOSITE sign from the tensile-positive
-    convention above (confirmed via VASP's own forum documentation --
-    "FORCE on cell = -STRESS" -- and via ASE's production
-    ``ase.calculators.vasp.vasp::read_stress``, which negates the raw
-    value in addition to the kB->GPa unit conversion). Multiply raw
-    VASP kB values by ``akitsushima.constants.VASP_KB_TO_EV_ANG3``
-    (= -1/1602.176621) rather than deriving this factor by hand.
+    If S rows are derived from a real VASP OUTCAR "in kB" line, apply a
+    unit conversion and a REORDERING, but NO sign flip.  VASP's raw value
+    is positive under compression, exactly like the engine's.  Multiply
+    by ``akitsushima.constants.VASP_KB_TO_EV_ANG3`` (= +1/1602.176621)
+    and reorder VASP's xx yy zz xy yz zx into xx yy zz yz zx xy.  (This
+    docstring used to require a sign flip and point at a constant of
+    -1/1602.176621; see that constant's bug-fix note.)
+
+    Note that the CSV has FOUR columns, with a header row:
+    ``target, label, weight, struct_idx``.  The ``weight`` column is
+    read by :func:`load_mlip_csv` but not used by ``fit``: classical-
+    potential residuals are normalised by the config's
+    ``weights: {energy, forces, stress, r0, eps0}`` instead.
 
     Parameters
     ----------
@@ -312,6 +319,14 @@ def cmd_fit(args: argparse.Namespace) -> int:
     # Merge potential from CLI (takes precedence over config file)
     cfg["potential"] = potential
     verbose = not args.quiet
+
+    # Checked before any data is read: fit_potential validates too, but
+    # only after the CSV and every POSCAR have been loaded.
+    try:
+        resolve_local_method(cfg.get("local_method", "L-BFGS-B"))
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
 
     # -- Load training data --------------------------------
     csv_path = cfg.get("training_csv", "")

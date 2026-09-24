@@ -2,6 +2,7 @@
 import argparse
 
 from ..fitting import registry
+from ..fitting.driver import LOCAL_METHOD_OPTIONS
 from .cmd_esm import cmd_esm
 from .cmd_fit import cmd_fit
 from .cmd_gcmc import cmd_gcmc
@@ -98,7 +99,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_fit = sub.add_parser(
         "fit", help="Fit a classical potential "
-                    "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)")
+                    "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        # Listed from the table fit_potential itself enforces, so the help
+        # cannot drift from what is accepted.
+        epilog=("optimisation (config file keys):\n"
+                "  use_de: true|false         global Differential Evolution first\n"
+                "                             (de_maxiter, de_popsize); --write-config\n"
+                "                             templates set true for sw/tersoff\n"
+                "  local_method: NAME         bounded local refinement, always run:\n"
+                "                             " + ", ".join(LOCAL_METHOD_OPTIONS) + "\n"
+                "                             (default L-BFGS-B; case-insensitive)\n"
+                "  BFGS, CG, Newton-CG, trust-*, dogleg and Powell are refused: they\n"
+                "  ignore bounds, need an analytic gradient (fit supplies none), or\n"
+                "  (Powell, with bounds) returned worse points than they had found."))
     # Bug-fix note (F3): the original restricted --potential to
     # choices=["buckingham"] at the argparse level, rejecting
     # lj/morse/bornmayer/sw/tersoff before cmd_fit ever ran, even though
@@ -117,7 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--r-cut",        type=float, metavar="A")
     p_fit.add_argument("--r0",           type=float, metavar="A")
     p_fit.add_argument("--eps0",         type=float, metavar="STRAIN")
-    p_fit.add_argument("--use-de",       action="store_true")
+    p_fit.add_argument("--use-de",       action="store_true",
+                        help="run Differential Evolution before the local "
+                             "refinement (same as use_de: true)")
     p_fit.add_argument("--no-forces",    action="store_true")
     p_fit.add_argument("--no-stress",    action="store_true")
     p_fit.add_argument("--quiet", "-q",  action="store_true")

@@ -38,9 +38,11 @@ def load_mlip_csv(csv_path: str,
         * ``E`` rows : total energy          [eV/atom]
         * ``F`` rows : force component        [eV/A]
         * ``S`` rows : stress component       [eV/A^3]  (Voigt: xx yy zz yz zx xy,
-          tensile-positive).  If derived from a real VASP OUTCAR, both a
-          unit conversion and a sign flip are required first -- see
-          ``akitsushima.constants.VASP_KB_TO_EV_ANG3``.
+          compressive-positive -- a compressed cell has positive
+          diagonal stress).  From a real VASP OUTCAR "in kB" line:
+          multiply by ``akitsushima.constants.VASP_KB_TO_EV_ANG3``
+          (= +1/1602.176621, no sign flip) AND reorder, since VASP writes
+          xx yy zz xy yz zx.
 
     **col 1 --- label**
         ``"E"``, ``"F"``, or ``"S"`` (case-insensitive).

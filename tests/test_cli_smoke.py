@@ -821,3 +821,166 @@ def test_relax_template_keys_are_all_read_by_cmd_relax():
               and f'rel_cfg["{k}"]' not in src]
     assert not unread, (
         f"relax template keys never read by cmd_relax: {unread}")
+
+
+# ---------------------------------------------------------------------------
+# fit --potential sw, end to end
+# ---------------------------------------------------------------------------
+
+_SW_SI_TRUE = {"epsilon": 2.1683, "sigma": 2.0951, "a": 1.80, "gamma": 1.20,
+               "lambda": 21.0, "A": 7.049556277, "B": 0.6022245584,
+               "p": 4.0, "q": 0.0, "costheta0": -1.0 / 3.0}
+
+
+def _write_sw_si_training_set(root):
+    """Three 64-atom Si cells labelled with Stillinger-Weber Si itself.
+    Rattled, because in a perfect diamond lattice the three-body term
+    vanishes and lambda/gamma leave no trace in the data."""
+    from akitsushima.engine import PotentialEngine, StillingerWeberPotential
+
+    eng = PotentialEngine().add(
+        StillingerWeberPotential({("Si", "Si", "Si"): _SW_SI_TRUE},
+                                 species=["Si"]))
+    basis = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0],
+                      [.25, .25, .25], [.25, .75, .75], [.75, .25, .75],
+                      [.75, .75, .25]], float)
+    frac = np.concatenate([(basis + [i, j, k]) / 2
+                           for i in range(2) for j in range(2) for k in range(2)])
+    rng = np.random.default_rng(7)
+    rows = ["target,label,weight,struct_idx"]
+    for sid, (scale, rattle) in enumerate([(1.0, 0.06), (0.98, 0.08),
+                                           (1.02, 0.08)]):
+        lat = np.eye(3) * (5.430950 * scale * 2)
+        pos = frac @ lat + rng.normal(0.0, rattle, (64, 3))
+        d = root / str(sid)
+        os.makedirs(d, exist_ok=True)
+        write_poscar(str(d / "POSCAR"), lat, pos, ["Si"] * 64)
+        E, F, S = eng.compute(lat, pos, ["Si"] * 64)
+        rows.append(f"{E / 64},E,1.0,{sid}")
+        rows += [f"{f},F,1.0,{sid}" for f in F.ravel()]
+        rows += [f"{v},S,1.0,{sid}" for v in (S[0, 0], S[1, 1], S[2, 2],
+                                              S[1, 2], S[0, 2], S[0, 1])]
+    (root / "structures.csv").write_text("\n".join(rows) + "\n")
+    return root / "structures.csv"
+
+
+def test_print_fit_result_handles_flat_sw_and_tersoff_params(capsys):
+    """Single-species SW and Tersoff sets decode to a FLAT {name: value}
+    dict.  print_fit_result used to treat every entry as (triple,
+    sub-dict) and raised AttributeError on the first float -- after the
+    optimisation had finished and before anything was saved."""
+    from akitsushima.fitting.driver import print_fit_result
+    print_fit_result({"params": {"sw": dict(_SW_SI_TRUE)}, "loss": 0.0}, "sw")
+    print_fit_result({"params": {"tersoff": {"A": 1830.8, "B": 471.18}},
+                      "loss": 0.0}, "tersoff")
+    out = capsys.readouterr().out
+    assert "lambda" in out and "1830.8" in out
+
+
+def test_cmd_fit_sw_end_to_end_saves_a_reloadable_potential(tmp_path):
+    """The whole `fit --potential sw` path: fit, print, save, reload.
+
+    Before the print_fit_result fix this returned only by raising, and
+    no fitted_potential.json was ever written.  Starting from the true
+    parameters, L-BFGS-B must stay there, and the reloaded potential
+    must reproduce the training energy it was fitted to.
+    """
+    from akitsushima.fitting.io_utils import load_potential
+    from akitsushima.io import parse_poscar
+
+    csv_path = _write_sw_si_training_set(tmp_path / "training_set")
+    cfg = {"training_csv": str(csv_path),
+           "output_dir": str(tmp_path / "out"), "r_cut": 3.77118,
+           "weights": {"energy": 1.0, "forces": 1.0, "stress": 1.0,
+                       "r0": 0.1, "eps0": 0.01},
+           "use_de": False, "val_fraction": 0.0,
+           "species": ["Si"], "initial_sw": dict(_SW_SI_TRUE),
+           "fix_params": {"epsilon": 2.1683}, "fit_keys": None}
+    cfg_path = tmp_path / "fit_sw.yaml"
+    _write_yaml(cfg_path, cfg)
+    args = argparse.Namespace(
+        potential="sw", config=str(cfg_path), write_config=None,
+        training_csv=None, output_dir=None, r_cut=None, r0=None, eps0=None,
+        use_de=False, no_forces=False, no_stress=False, quiet=True)
+    assert cmd_fit(args) == 0
+
+    out_json = tmp_path / "out" / "fitted_potential.json"
+    assert out_json.is_file()
+    engine, meta = load_potential(str(out_json))
+    s0 = parse_poscar(str(tmp_path / "training_set" / "0" / "POSCAR"))
+    e_fit, _, _ = engine.compute(s0["lattice"], s0["positions"],
+                                 s0["atom_types"])
+    ref = float(csv_path.read_text().splitlines()[1].split(",")[0])
+    assert e_fit / 64 == pytest.approx(ref, abs=1e-6)
+
+
+def test_cmd_fit_multi_species_sw_round_trips_through_the_record_format(tmp_path):
+    """`fit --potential sw` with initial_sw given as i/j/k records: the
+    fitted potential must be written back in that same record-list form
+    (tuple keys are not JSON -- they used to be stringified into keys no
+    loader could read) and must reload to the energy it was fitted to."""
+    import json
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_fitting import _gesn_cell, _gesn_records, _sw_efs
+
+    from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
+    from akitsushima.fitting.io_utils import load_potential
+
+    truth = MS._to_nested(_gesn_records())
+    root = tmp_path / "training_set"
+    rows = ["target,label,weight,struct_idx"]
+    for sid, scale in enumerate((0.98, 1.0, 1.02)):
+        lat, pos, types = _gesn_cell(seed=sid + 20, n_sn=32, scale=scale)
+        order = np.argsort([t != "Ge" for t in types], kind="stable")
+        lat, pos, types = lat, pos[order], [types[i] for i in order]
+        os.makedirs(root / str(sid), exist_ok=True)
+        write_poscar(str(root / str(sid) / "POSCAR"), lat, pos, types)
+        E, F, S = _sw_efs(truth, lat, pos, types)
+        rows.append(f"{E / 64},E,1.0,{sid}")
+        rows += [f"{f},F,1.0,{sid}" for f in F.ravel()]
+        rows += [f"{v},S,1.0,{sid}" for v in (S[0, 0], S[1, 1], S[2, 2],
+                                              S[1, 2], S[0, 2], S[0, 1])]
+    (root / "structures.csv").write_text("\n".join(rows) + "\n")
+
+    cfg = {"training_csv": str(root / "structures.csv"),
+           "output_dir": str(tmp_path / "out"), "r_cut": 4.5,
+           "weights": {"energy": 1.0, "forces": 1.0, "stress": 1.0,
+                       "r0": 0.1, "eps0": 0.01},
+           "use_de": False, "val_fraction": 0.0, "species": ["Ge", "Sn"],
+           "initial_sw": _gesn_records(), "fix_params": None,
+           "fit_keys": ["A", "B"]}
+    _write_yaml(tmp_path / "fit.yaml", cfg)
+    args = argparse.Namespace(
+        potential="sw", config=str(tmp_path / "fit.yaml"), write_config=None,
+        training_csv=None, output_dir=None, r_cut=None, r0=None, eps0=None,
+        use_de=False, no_forces=False, no_stress=False, quiet=True)
+    assert cmd_fit(args) == 0
+
+    out = tmp_path / "out" / "fitted_potential.json"
+    saved = json.loads(out.read_text())["params"]
+    assert isinstance(saved, list) and len(saved) == 8
+    assert {(r["i"], r["j"], r["k"]) for r in saved} == set(truth)
+
+    engine, _ = load_potential(str(out))
+    s0 = parse_poscar(str(root / "1" / "POSCAR"))
+    e_fit, _, _ = engine.compute(s0["lattice"], s0["positions"], s0["atom_types"])
+    e_ref = _sw_efs(truth, s0["lattice"], s0["positions"], s0["atom_types"])[0]
+    assert e_fit == pytest.approx(e_ref, abs=1e-6)
+
+
+@pytest.mark.parametrize("method", ["BFGS", "Powell", "nonsense"])
+def test_cmd_fit_refuses_a_bad_local_method_before_reading_any_data(tmp_path, capsys, method):
+    """The training CSV named here does not exist.  If the method check ran
+    after data loading, the error would be about the CSV instead."""
+    cfg = {"training_csv": str(tmp_path / "missing.csv"),
+           "output_dir": str(tmp_path / "out"), "r_cut": 6.0,
+           "local_method": method}
+    _write_yaml(tmp_path / "fit.yaml", cfg)
+    args = argparse.Namespace(
+        potential="lj", config=str(tmp_path / "fit.yaml"), write_config=None,
+        training_csv=None, output_dir=None, r_cut=None, r0=None, eps0=None,
+        use_de=False, no_forces=False, no_stress=False, quiet=True)
+    assert cmd_fit(args) == 1
+    out = capsys.readouterr().out
+    assert "local_method" in out and "Training CSV not found" not in out

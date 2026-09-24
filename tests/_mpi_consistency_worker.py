@@ -115,7 +115,12 @@ def main():
                 "costheta0": -1.0 / 3.0,
             },
             ("Cl", "Na", "Na"): {
-                "epsilon": 1.5, "sigma": 2.0951, "A": 5.5, "B": 0.55,
+                # Two-body inputs identical to (Na,Cl,Cl): both records
+                # describe the one Na-Cl pair, and StillingerWeberPotential
+                # refuses them otherwise (the energy would depend on atom
+                # order).  lambda/gamma stay different, which is what keeps
+                # a transposed three-body table lookup detectable.
+                "epsilon": 2.0, "sigma": 2.0951, "A": 7.05, "B": 0.60,
                 "p": 4, "q": 0, "a": 1.80, "lambda": 12.0, "gamma": 1.1,
                 "costheta0": -1.0 / 3.0,
             },

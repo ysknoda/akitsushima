@@ -362,7 +362,7 @@ class _BaseMDSimulation:
 
         Bug-fix note (NPT barostat sign): this used to compute
         ``Pv = -np.trace(stress) / 3.0``. In THIS codebase's own
-        already-verified stress convention (tensile-positive, confirmed
+        already-verified stress convention (compressive-positive, confirmed
         via finite-difference cross-checks throughout
         ``test_engine_forces.py`` and independently re-derived during
         the Bug C investigation: sigma_ab = -(1/V) dE/dT_ab under

@@ -132,7 +132,19 @@ def save_potential(result        : dict,
                     _serialise(v) for k, v in p.items()}
         return p
 
-    serialised_params = _serialise(params_raw)
+    # Multi-species SW decodes to {(i, j, k): {...}}.  Tuple keys are not
+    # JSON; stringifying them (as _serialise would) produced
+    # "('Ge', 'Ge', 'Sn')" keys that nothing could read back.  Write the
+    # i/j/k record list instead -- the same format as potential.params in
+    # a relax/md YAML, so a fitted result can be pasted straight in.
+    if (pot_type in ('sw', 'stillinger_weber', 'stillingerweber')
+            and isinstance(params_raw, dict) and params_raw
+            and all(isinstance(t, tuple) for t in params_raw)):
+        serialised_params = [
+            dict(i=t[0], j=t[1], k=t[2], **{k: float(v) for k, v in p.items()})
+            for t, p in params_raw.items()]
+    else:
+        serialised_params = _serialise(params_raw)
     out: dict = {
         _POT_TYPE_KEY  : pot_type,
         _POT_PARAMS_KEY: serialised_params,
@@ -252,7 +264,19 @@ def load_potential(path    : str,
         engine.add(BuckinghamPotential(params, r_cut=rc, shift=shift))
 
     elif pot_type in ('sw', 'stillinger_weber', 'stillingerweber'):
-        engine.add(StillingerWeberPotential(params, r_cut=None,
+        sw_params = params.get('sw', params) if isinstance(params, dict) else params
+        if isinstance(sw_params, list):          # multi-species records
+            nested = {}
+            for rec in sw_params:
+                rec = dict(rec)
+                nested[(rec.pop('i'), rec.pop('j'), rec.pop('k'))] = rec
+            sw_params = nested
+            # The multi-species format requires `species`, and
+            # save_fit_result_generic does not persist it.  The records
+            # name every element themselves, so read them from there.
+            if not sp:
+                sp = list(dict.fromkeys(e for t in nested for e in t))
+        engine.add(StillingerWeberPotential(sw_params, r_cut=None,
                                              species=sp or None))
 
     elif pot_type == 'tersoff':

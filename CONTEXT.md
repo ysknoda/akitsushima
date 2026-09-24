@@ -59,13 +59,18 @@ _Avoid_: neighbour pair, pair, neighbour
 
 ### Forces, stress and the cell
 
-**Tensile-positive**:
+**Compressive-positive**:
 This project's stress sign convention, in which a cell compressed below
 its equilibrium volume has a positive diagonal stress. The opposite of
-the engineering-mechanics convention, and the source of several
-sign errors; recorded in
+the engineering-mechanics convention and of ASE's; the SAME sign as
+VASP's and Quantum ESPRESSO's raw printed stress, so converting their
+output needs a unit factor and no sign flip. The source of several sign
+errors; recorded in
 docs/adr/0001-stress-sign-and-multiplication-order-conventions.md.
-_Avoid_: standard convention, physical sign, normal sign
+_Avoid_: tensile-positive (this entry's own former name -- tensile-
+positive means the OPPOSITE convention, and reading the old name at face
+value is exactly how `VASP_KB_TO_EV_ANG3` acquired a spurious sign flip),
+standard convention, physical sign, normal sign
 
 **Cell gradient**:
 The derivative of the energy with respect to the lattice matrix, taken

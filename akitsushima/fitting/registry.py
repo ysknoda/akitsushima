@@ -53,6 +53,7 @@ from .parameter_sets import (
     LJParameterSet,
     MieParameterSet,
     MorseParameterSet,
+    MultiSpeciesStillingerWeberParameterSet,
     StillingerWeberParameterSet,
     TersoffParameterSet,
     YukawaParameterSet,
@@ -534,8 +535,28 @@ def _build_param_set_sw(cfg, all_species, pairs, r_cut):
     # dict of scalar parameter names ("epsilon", "sigma", ...), not
     # keyed by species pairs/triples like LJ/Morse/BornMayer/Buckingham
     # -- passed through unmodified, NOT through _parse_pairs.
+    #
+    # Two formats for initial_sw, the same two the relax/md YAML accepts:
+    # a flat dict (one parameter set for everything -- single species) or
+    # a list of i/j/k records (one per ordered triple -- any number of
+    # species).  The flat form cannot distinguish species at all, so a
+    # multi-species training set needs the record list.
+    init = cfg["initial_sw"]
+    if isinstance(init, list):
+        return MultiSpeciesStillingerWeberParameterSet(
+            init,
+            species=cfg.get("species", all_species),
+            fix_params=cfg.get("fix_params"),
+            fit_keys=cfg.get("fit_keys"))
+    if len(set(all_species)) > 1:
+        raise ValueError(
+            f"the training data contain {sorted(set(all_species))}, but "
+            f"initial_sw is a single flat parameter set, which applies the "
+            f"same numbers to every pair and triple regardless of species.  "
+            f"Give initial_sw as a list of i/j/k records instead (the "
+            f"format used by potential.params in a relax/md YAML).")
     return StillingerWeberParameterSet(
-        initial_sw=dict(cfg["initial_sw"]),
+        initial_sw=dict(init),
         species=cfg.get("species", all_species),
         fix_params=cfg.get("fix_params"),
         fit_keys=cfg.get("fit_keys"))

@@ -1507,7 +1507,32 @@ class GeometryOptimiser:
 
                 # Accept step
                 if actual_de <= 0.0 or self.uphill:
-                    x, e, forces, stress, g = x_new, e_new, f_new, st_new, g_new
+                    # x must be RE-READ, not taken as x_new.  _set_x is
+                    # not a pure function of its argument under
+                    # relax_cell (see _save_state): it reads
+                    # self.lattice to turn the incoming Cartesian block
+                    # into fractional coordinates before re-expanding it
+                    # in the new cell, so _get_x() after _set_x(v)
+                    # differs from v by the amount the atoms were
+                    # carried along with the cell -- measured at 7.2x
+                    # the cell step on a 64-atom Si cell, and exactly
+                    # 2.8e-15 when the cell does not move.  Carrying
+                    # x_new forward let that gap accumulate over every
+                    # accepted step, after which `x + dx` no longer
+                    # described a neighbourhood of the current geometry:
+                    # shrinking |dx| by a factor 690 left actual_de
+                    # pinned at +2.2915 eV instead of approaching zero,
+                    # so every trial was rejected, the trust radius
+                    # oscillated between its 1e-3 floor and 5e-4, and
+                    # variable-cell RFO sat at its step-2 geometry
+                    # forever (1000-atom Si: stuck at -4293.24 eV with
+                    # Fmax 3.02 eV/A against the correct -4336.60 eV).
+                    # _run_lbfgs, _run_diis, _run_rmmdiis and _run_sd
+                    # all re-read; _run_rfo was the only one that did
+                    # not.  Fixed-cell RFO was never affected, because
+                    # with relax_cell off _set_x IS the identity.
+                    x, e, forces, stress, g = (self._get_x(), e_new,
+                                               f_new, st_new, g_new)
                 else:
                     # Exact restore.  This used to call self._set_x(x),
                     # which is not an undo: self.lattice is the rejected
