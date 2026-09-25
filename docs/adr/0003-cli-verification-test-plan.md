@@ -389,6 +389,7 @@ passed.
   (so 1/sigma^4 on its square). With realistic label scales S outweighs E by
   ~1e17 on the squared residual; the LSQR does not converge (flag 7) and E is
   fitted to 200x its noise. A formula change alters every ELM fit.
+  -> Decided in ADR-0004 (chain-rule training and one weighting rule).
 - **E1-E3** esm: E1 the Gaussian self-energy is divided by the cell area
   (dimensionally wrong; ~8 eV per unit charge left in); E2 the external field
   enters 14.40x too strongly (e^2/4 pi eps0); E3 after correcting E1 the pair
