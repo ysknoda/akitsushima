@@ -19,6 +19,7 @@ never touch, so importing ``akitsushima.fitting`` (or ``.models``) no
 longer drags them in unless a caller actually asks for
 ``NNModel``/``LightGBMModel`` by name.
 """
+from .atomic import AtomicELMModel, AtomicQELMModel
 from .csv_io import load_mlip_csv, load_weights_csv
 from .elm import ELMModel
 from .linear import LinearModel
@@ -30,6 +31,9 @@ __all__ = [
     "LinearModel",
     "NNModel",
     "LightGBMModel",
+    "AtomicELMModel",
+    "AtomicQELMModel",
+    "AtomicNNModel",
     "load_mlip_csv",
     "load_weights_csv",
 ]
@@ -37,6 +41,7 @@ __all__ = [
 _LAZY = {
     "NNModel": ".nn",
     "LightGBMModel": ".lightgbm_model",
+    "AtomicNNModel": ".atomic_nn",
 }
 
 

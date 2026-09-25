@@ -29,6 +29,8 @@ Force fields
     QuantizedELMModel -- ELM with quantised hidden-layer weights
     LinearModel      -- linear E/F/S model (OLS, ridge, LASSO, PLS, Bayesian, ...)
     NNModel          -- PyTorch feedforward network (lazy import)
+    AtomicELMModel, AtomicQELMModel, AtomicNNModel
+                     -- atom-centred (Behler-Parrinello) models (ADR-0005)
     LightGBMModel    -- Gradient-boosted trees + Optuna search (lazy import)
 
 Simulation capabilities
@@ -112,6 +114,8 @@ from .engine import (
     ewald_sum,
 )
 from .fitting import (
+    AtomicELMModel,
+    AtomicQELMModel,
     BornMayerParameterSet,
     BuckinghamParameterSet,
     ELMModel,
@@ -174,6 +178,7 @@ __all__ = [
     "StillingerWeberParameterSet", "TersoffParameterSet",
     "ExternalFileEngine", "ScaledForceEngine",
     "ELMModel", "QuantizedELMModel", "LinearModel", "NNModel", "LightGBMModel",
+    "AtomicELMModel", "AtomicQELMModel", "AtomicNNModel",
     # solvers
     "GeometryOptimiser", "NVTSimulation", "NVESimulation", "NPTSimulation",
     "GCMCMDSimulation", "OSMMCSimulation", "SpeciesParams",
@@ -194,7 +199,8 @@ __all__ = [
 # for every caller who never touches those two model types, including
 # everyone who just does `import akitsushima` for the classical/engine
 # functionality above).
-_LAZY = {"NNModel": "fitting", "LightGBMModel": "fitting"}
+_LAZY = {"NNModel": "fitting", "LightGBMModel": "fitting",
+         "AtomicNNModel": "fitting"}
 
 
 def __getattr__(name):

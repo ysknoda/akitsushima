@@ -583,6 +583,23 @@ mlip:
   # write_table: false       # also write the descriptor table CSV
 
 # ----------------------------------------------------------------------
+# Example: form: atom_centred  (Behler-Parrinello, ADR-0005)
+# ----------------------------------------------------------------------
+# E = sum_i eps_s(i)(G_i), one function per species of the atom's own
+# ACSF vector G_i, so the model is local and transfers to other cell
+# sizes.  Needs (b): mlip.descriptor and a `fit`-layout structure list.
+# Models: elm | qelm (closed-form solve) | nn (torch).  Model file:
+# ./mlip_output/atomic_<model>_model.npz (.pt for nn), usable as
+#     potential: {type: MLIP, model: ./mlip_output/atomic_elm_model.npz}
+# mlip:
+#   form:           atom_centred
+#   model:          elm       # elm | qelm | nn
+#   n_hidden:       400       # elm / qelm, per species
+#   hidden_layers:  [64, 64]  # nn, per species
+#   reg_search:     [1.0e2, 1.0e4, 1.0e6, 1.0e8]   # elm / qelm
+#   descriptor: {type: acsf, r_cut: 3.771, g2: ..., g5: ...}
+
+# ----------------------------------------------------------------------
 # Example: model: linear  (E/N = w . d + b; methods ADR-0004 decision 9)
 # ----------------------------------------------------------------------
 # mlip:

@@ -248,6 +248,39 @@ class QuantizedELMModel(ELMModel):
         return self._act(Z)
 
     # ------------------------------------------------------------------
+    def _init_hidden(self, D: int) -> None:
+        """Draw the raw random W (and b), then quantise W.  Called by
+        ELMModel.fit, and by the per-species units of AtomicQELMModel."""
+        rng = np.random.default_rng(self.seed)
+        if self.activation == 'rff':
+            N_omega = max(1, self.n_hidden // 2)
+            gamma   = (self.rff_gamma or float(np.sqrt(D / 2.0)))
+            W_raw   = rng.standard_normal((D, N_omega)) / gamma
+            self._b = None
+        else:
+            sc      = (float(self.w_init_scale) if self.w_init_scale
+                       else float(np.sqrt(2.0 / (D + self.n_hidden))))
+            W_raw   = rng.standard_normal((D, self.n_hidden)) * sc
+            self._b = rng.standard_normal(self.n_hidden) * sc
+
+        # Bug-fix note (F8): the original never stored W_raw anywhere, so
+        # quantization_error() -- whose entire purpose is to compare
+        # quantised vs full-precision predictions -- could never find a
+        # full-precision reference and silently fell back to comparing
+        # the quantised model against itself (always reporting exactly
+        # zero error).  Store it before quantising so that
+        # quantization_error() has something real to compare against.
+        self._W_fp = W_raw.copy()
+
+        t_q0    = _time.perf_counter()
+        self._W = self._quantize_W(W_raw)
+        t_q     = _time.perf_counter() - t_q0
+        if self.verbose:
+            qs = self._quant_stats
+            print(f'  Quantization ({t_q*1000:.0f} ms):  '
+                  f'levels={qs["levels"]}  sparsity={qs["sparsity_W"]:.3f}')
+
+    # ------------------------------------------------------------------
     def fit(self,
             targets      : np.ndarray,
             labels       : np.ndarray,
@@ -283,51 +316,13 @@ class QuantizedELMModel(ELMModel):
         -------
         self
         """
-        _, D = X.shape
-        # Initialise raw random W before quantisation
-        rng = np.random.default_rng(self.seed)
-        if self.activation == 'rff':
-            N_omega = max(1, self.n_hidden // 2)
-            gamma   = (self.rff_gamma or float(np.sqrt(D / 2.0)))
-            W_raw   = rng.standard_normal((D, N_omega)) / gamma
-            self._b = None
-        else:
-            sc      = (float(self.w_init_scale) if self.w_init_scale
-                       else float(np.sqrt(2.0 / (D + self.n_hidden))))
-            W_raw   = rng.standard_normal((D, self.n_hidden)) * sc
-            self._b = rng.standard_normal(self.n_hidden) * sc
-
-        # Bug-fix note (F8): the original never stored W_raw anywhere, so
-        # quantization_error() -- whose entire purpose is to compare
-        # quantised vs full-precision predictions -- could never find a
-        # full-precision reference and silently fell back to comparing
-        # the quantised model against itself (always reporting exactly
-        # zero error).  Store it before quantising so that
-        # quantization_error() has something real to compare against.
-        self._W_fp = W_raw.copy()
-
-        # Quantise W; ELMModel.fit will use self._W as-is
-        t_q0    = _time.perf_counter()
-        self._W = self._quantize_W(W_raw)
-        t_q     = _time.perf_counter() - t_q0
-        if self.verbose:
-            qs = self._quant_stats
-            print(f'  Quantization ({t_q*1000:.0f} ms):  '
-                  f'levels={qs["levels"]}  sparsity={qs["sparsity_W"]:.3f}')
-        # Delegate training to ELMModel.fit (weights, LSQR, scoring)
-        _orig_seed = self.seed
-        self.seed  = None   # skip W/b re-init inside ELMModel.fit
-        try:
-            super().fit(targets, labels, X,
-                        weights      = weights,
-                        weight_csv   = weight_csv,
-                        val_fraction = val_fraction,
-                        val_seed     = val_seed,
-                        struct_ids   = struct_ids,
-                        n_atoms      = n_atoms)
-        finally:
-            self.seed = _orig_seed
-        return self
+        return super().fit(targets, labels, X,
+                           weights      = weights,
+                           weight_csv   = weight_csv,
+                           val_fraction = val_fraction,
+                           val_seed     = val_seed,
+                           struct_ids   = struct_ids,
+                           n_atoms      = n_atoms)
 
     def print_quantization_report(self) -> None:
         """

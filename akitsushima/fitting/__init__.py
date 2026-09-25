@@ -23,6 +23,8 @@ from .io_utils import (
 )
 from .loss import generic_loss_function
 from .models import (
+    AtomicELMModel,
+    AtomicQELMModel,
     ELMModel,
     LinearModel,
     QuantizedELMModel,
@@ -80,6 +82,9 @@ __all__ = [
     "LinearModel",
     "NNModel",
     "LightGBMModel",
+    "AtomicELMModel",
+    "AtomicQELMModel",
+    "AtomicNNModel",
     "load_mlip_csv",
     "load_weights_csv",
 ]
@@ -88,7 +93,8 @@ __all__ = [
 # for why (avoids an eager torch / lightgbm+optuna import, and the OpenMP
 # runtime conflict with numba that motivated it, for every caller who never
 # touches those two model types).
-_LAZY = {"NNModel": "models", "LightGBMModel": "models"}
+_LAZY = {"NNModel": "models", "LightGBMModel": "models",
+         "AtomicNNModel": "models"}
 
 
 def __getattr__(name):

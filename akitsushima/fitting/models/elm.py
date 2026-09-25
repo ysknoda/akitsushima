@@ -16,7 +16,7 @@ References
   ELM : Huang et al., Neurocomputing 70, 489 (2006)
   LSQR: Paige & Saunders, ACM TOMS 8, 43 (1982)
 """
-from typing import Callable, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -430,6 +430,23 @@ class ELMModel:
             Z = X_norm @ self._W + self._b
         return self._act(Z)
 
+    def _init_hidden(self, D: int) -> None:
+        """Draw the fixed random hidden layer (W, b) for input width D."""
+        rng = np.random.default_rng(self.seed)
+        if self.activation == 'rff':
+            N_omega = max(1, self.n_hidden // 2)
+            gamma   = (self.rff_gamma if self.rff_gamma is not None
+                       else float(np.sqrt(D / 2.0)))
+            self._W    = rng.standard_normal((D, N_omega)) / gamma
+            self._b    = None
+        else:
+            if self.w_init_scale is not None:
+                scale = float(self.w_init_scale)
+            else:
+                scale = float(np.sqrt(2.0 / (D + self.n_hidden)))
+            self._W    = rng.standard_normal((D, self.n_hidden)) * scale
+            self._b    = rng.standard_normal(self.n_hidden) * scale
+
     def _normalise(self, X: np.ndarray) -> np.ndarray:
         """Z-score normalise using statistics from fit()."""
         return (X - self._X_mean) / self._X_std
@@ -810,23 +827,7 @@ class ELMModel:
         self._D = D
 
         # Initialise random hidden layer (fixed)
-        # When seed is None, W and b have been pre-initialised by the
-        # calling class (e.g. QuantizedELMModel), so skip re-init.
-        if self.seed is not None:
-            rng = np.random.default_rng(self.seed)
-            if self.activation == 'rff':
-                N_omega = max(1, self.n_hidden // 2)
-                gamma   = (self.rff_gamma if self.rff_gamma is not None
-                           else float(np.sqrt(D / 2.0)))
-                self._W    = rng.standard_normal((D, N_omega)) / gamma
-                self._b    = None
-            else:
-                if self.w_init_scale is not None:
-                    scale = float(self.w_init_scale)
-                else:
-                    scale = float(np.sqrt(2.0 / (D + self.n_hidden)))
-                self._W    = rng.standard_normal((D, self.n_hidden)) * scale
-                self._b    = rng.standard_normal(self.n_hidden) * scale
+        self._init_hidden(D)
 
         mult_tr = np.sqrt(w_row[idx_train])
         t_vec   = mult_tr * targets[idx_train]
@@ -1156,214 +1157,6 @@ class ELMModel:
             # (None for a model assembled by hand without fit(): no term)
             y = y + X_n @ self._gamma
         return y
-
-    def compute(self,
-                lattice          : np.ndarray,
-                positions        : np.ndarray,
-                atom_types       : list,
-                descriptor_fn    : Optional[Callable] = None,
-                descriptor_jac_fn: Optional[Callable] = None,
-                neigh_list       = None,
-                delta            : float = 1e-4,
-                ) -> Tuple[float, np.ndarray, np.ndarray]:
-        """
-        PotentialEngine-compatible interface for FIRE / MD.
-
-        Evaluates the total energy E = sum_i (sum of per-atom predictions).
-
-        Forces and stress can be computed either analytically (preferred)
-        or by central-difference numerical differentiation.
-
-        Analytical mode  (fast, O(1) descriptor evaluations for forces)
-        ---------------------------------------------------------------
-        Requires ``descriptor_jac_fn`` to be supplied.
-
-        ``descriptor_jac_fn(lattice, positions, atom_types)``
-            Must return a tuple ``(X, dX_dr, dX_dh)`` where
-
-            X      : (N, D) descriptor matrix  [same as descriptor_fn]
-            dX_dr  : (N, D, N, 3) Jacobian dX[i,d] / dr[j,alpha]
-            dX_dh  : (N, D, 3, 3) Jacobian dX[i,d] / dh[alpha,beta]
-                     (h is the lattice matrix, rows = lattice vectors)
-
-        With these, the force on atom j and the stress are
-
-            F[j,alpha] = -sum_{i,d} (dy_i/dX[i,d]) x dX_dr[i,d,j,alpha]
-            sigma[alpha,beta] = -(1/V) sum_{i,d} (dy_i/dX[i,d]) x dX_dh[i,d,alpha,beta]
-
-        where dy_i/dX[i,d] = dE/dX is the output-layer weight
-        times the activation derivative (one backpropagation pass
-        through the single hidden layer).
-
-        Numerical mode  (fallback when descriptor_jac_fn is None)
-        ----------------------------------------------------------
-        Uses central differences: cost = (6N + 18) x descriptor_fn calls.
-
-        Parameters
-        ----------
-        lattice            : (3,3) lattice vectors [A].
-        positions          : (N,3) Cartesian positions [A].
-        atom_types         : list of element symbols, length N.
-        descriptor_fn      : callable(lattice, positions, atom_types) -> (N, D).
-                             Required in numerical mode.  In analytical mode
-                             may be None if descriptor_jac_fn returns X too.
-        descriptor_jac_fn  : callable -> (X, dX_dr, dX_dh) as described above.
-                             If provided, analytical forces are used.
-        neigh_list         : ignored (kept for interface compatibility).
-        delta              : finite-difference displacement [A].
-                             Scaled automatically by lattice_mean / sqrt(N)
-                             unless set explicitly below 1e-3.
-
-        Returns
-        -------
-        energy : float        [eV]
-        forces : (N,3) array  [eV/A]
-        stress : (3,3) array  [eV/A^3]
-        """
-        if not self._fitted:
-            raise RuntimeError("ELMModel.compute: model has not been fitted.")
-        if descriptor_fn is None and descriptor_jac_fn is None:
-            raise ValueError(
-                "ELMModel.compute: supply descriptor_fn (numerical mode) or "
-                "descriptor_jac_fn (analytical mode).")
-
-        N = len(positions)
-
-        # -- Analytical mode -----------------------------------
-        if descriptor_jac_fn is not None:
-            X, dX_dr, dX_dh = descriptor_jac_fn(lattice, positions, atom_types)
-            # X: (N, D)  dX_dr: (N, D, N, 3)  dX_dh: (N, D, 3, 3)
-
-            X_norm = self._normalise(X)         # (N, D)
-            H      = self._hidden(X_norm)       # (N, n_hidden or 2*n_rff)
-            # _beta: (n_hidden,) -- output weights
-            beta   = self._beta                 # (n_hidden,)
-            E0     = float(np.dot(H.sum(axis=0), beta))
-
-            # dH / dZ: activation derivative depends on activation type.
-            b_term = self._b if self._b is not None else 0.0
-            if self.activation == 'rff':
-                # RFF: H[i,k] = [cos(Z[i,k]), sin(Z[i,k])] / sqrt(N_omega)
-                # where Z = X_norm @ _W  (no bias in RFF mode)
-                # dH_cos / dZ = -sin(Z) / sqrt(N_omega)
-                # dH_sin / dZ =  cos(Z) / sqrt(N_omega)
-                N_omega    = self._W.shape[1]
-                scale      = 1.0 / np.sqrt(float(N_omega))
-                Z_rff      = X_norm @ self._W        # (N, N_omega)
-                # beta is (2*N_omega,) = [beta_cos | beta_sin]
-                beta_cos   = beta[:N_omega]
-                beta_sin   = beta[N_omega:]
-                # dE/dZ[i,k] = beta_cos[k]*(-sin) + beta_sin[k]*(cos)
-                dE_dZ      = scale * (
-                    -np.sin(Z_rff) * beta_cos[None, :]
-                    + np.cos(Z_rff) * beta_sin[None, :])   # (N, N_omega)
-                # dE/dX_norm[i,d] = sum_k dE_dZ[i,k] * _W[d,k]
-                dE_dXnorm  = dE_dZ @ self._W.T        # (N, D)
-            else:
-                # Standard activations: H = sigma(Z),  Z = X_norm @ _W + b
-                # dE / dH[i,k] = beta[k]  (output layer is linear)
-                dE_dH  = np.tile(beta, (N, 1))      # (N, n_hidden)
-                Z          = X_norm @ self._W + b_term    # (N, n_hidden)
-                if self.activation == 'tanh':
-                    act_d  = 1.0 - np.tanh(Z) ** 2
-                elif self.activation == 'relu':
-                    act_d  = (Z > 0).astype(Z.dtype)
-                elif self.activation in ('sigmoid', 'logistic'):
-                    sig    = 1.0 / (1.0 + np.exp(-Z))
-                    act_d  = sig * (1.0 - sig)
-                elif self.activation == 'snake':
-                    a      = getattr(self, 'snake_a', 1.0)
-                    act_d  = 1.0 + 2.0 * a * np.sin(a * Z) * np.cos(a * Z)
-                elif self.activation == 'elu':
-                    act_d  = np.where(Z >= 0, 1.0, np.exp(Z))
-                else:
-                    act_d  = 1.0 - np.tanh(Z) ** 2   # fallback: tanh
-                # dE/dX_norm[i,d] = sum_k (dE_dH[i,k] * act_d[i,k]) * _W[d,k]
-                dE_dXnorm  = (dE_dH * act_d) @ self._W.T  # (N, D)
-
-            # Through normalisation: dX_norm/dX = 1/_X_std
-            X_std     = getattr(self, '_X_std', np.ones(X.shape[1]))
-            X_std     = np.where(X_std > 1e-12, X_std, 1.0)
-            dE_dX     = dE_dXnorm / X_std[None, :]   # (N, D)
-
-            # Forces: F[j,alpha] = -sum_{i,d} dE/dX[i,d] * dX_dr[i,d,j,alpha]
-            forces    = -np.einsum('id,idjk->jk', dE_dX, dX_dr)  # (N, 3)
-
-            # Stress: sigma[alpha,beta] = -(1/V) sum_{i,d} dE/dX[i,d] * dX_dh[i,d,alpha,beta]
-            vol    = float(abs(np.linalg.det(lattice)))
-            stress = (-1.0 / vol) * np.einsum('id,idab->ab', dE_dX, dX_dh)
-
-            return E0, forces, stress
-
-        # -- Numerical mode ------------------------------------
-        # D-1: auto-scale delta by lattice parameter and system size
-        if delta >= 1e-3:
-            lat_mean = float(np.mean(np.linalg.norm(lattice, axis=1)))
-            delta_eff = max(1e-4, delta * lat_mean / max(np.sqrt(N), 1.0))
-        else:
-            delta_eff = float(delta)
-
-        X0 = descriptor_fn(lattice, positions, atom_types)
-        E0 = float(self.predict(X0).sum())
-
-        forces = np.zeros((N, 3))
-        for i in range(N):
-            for alpha in range(3):
-                p_p = positions.copy(); p_p[i, alpha] += delta_eff
-                p_m = positions.copy(); p_m[i, alpha] -= delta_eff
-                Ep = float(self.predict(
-                    descriptor_fn(lattice, p_p, atom_types)).sum())
-                Em = float(self.predict(
-                    descriptor_fn(lattice, p_m, atom_types)).sum())
-                forces[i, alpha] = -(Ep - Em) / (2.0 * delta_eff)
-
-        vol    = float(abs(np.linalg.det(lattice)))
-        stress = np.zeros((3, 3))
-        frac   = np.linalg.solve(lattice.T, positions.T).T
-        for a in range(3):
-            for b in range(3):
-                # Bug-fix note (F9b): the original perturbed by
-                # +/- delta_eff/2 here (half the step size used by the force
-                # loop above) but kept the *same* `2.0 * delta_eff`
-                # denominator below, silently halving every stress
-                # component regardless of the position-reconstruction fix
-                # (F9, see below): central difference with a +/-h probe
-                # needs a `2h` denominator, and h=delta_eff/2 needs `delta_eff`,
-                # not `2*delta_eff`.  Using a full +/- delta_eff probe here
-                # instead (matching the force loop's convention exactly)
-                # keeps the existing `2.0 * delta_eff` denominator correct.
-                sp = np.eye(3); sp[a, b] += delta_eff
-                sm = np.eye(3); sm[a, b] -= delta_eff
-                # Bug-fix note (F9): the original computed
-                # `lat_p = sp @ lattice; pos_p = frac @ lat_p.T` (deformation
-                # matrix on the LEFT of lattice, then an extra transpose on
-                # the way back to Cartesian positions).  Every other
-                # finite-difference stress check in this codebase (see
-                # test_engine_forces.py's `finite_diff_stress`, itself
-                # cross-validated against Ewald's independently-derived
-                # real-space stress to 8 significant figures) uses the
-                # affine convention `lattice' = lattice @ T`,
-                # `positions' = frac @ lattice'` (deformation matrix on the
-                # RIGHT, fixed fractional coordinates, no transpose) -- and
-                # that is also this codebase's general row-vectors
-                # convention (positions = frac @ lattice, e.g. parse_poscar,
-                # NeighbourList).  The original combination of
-                # left-multiplication plus a transpose reconstructed a
-                # displaced structure that agreed with the correct one only
-                # for a diagonal (orthogonal-cell, axis-aligned strain)
-                # `sp`/`sm`; for a general (off-diagonal / sheared)
-                # perturbation both the multiplication order and the
-                # transpose needed to change for the finite-difference
-                # stress to come out right.
-                lat_p = lattice @ sp; pos_p = frac @ lat_p
-                lat_m = lattice @ sm; pos_m = frac @ lat_m
-                Ep = float(self.predict(
-                    descriptor_fn(lat_p, pos_p, atom_types)).sum())
-                Em = float(self.predict(
-                    descriptor_fn(lat_m, pos_m, atom_types)).sum())
-                stress[a, b] = -(Ep - Em) / (2.0 * delta_eff * vol)
-
-        return E0, forces, stress
 
     # ------------------------------------------------------------------
     #  Scoring

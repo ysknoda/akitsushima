@@ -53,7 +53,6 @@ from akitsushima.fitting.external import ScaledForceEngine
 from akitsushima.fitting.models import ELMModel, QuantizedELMModel
 
 from conftest import diamond_si_dict, fcc_al_dict, randomly_perturbed, rocksalt_nacl_dict
-from test_engine_forces import finite_diff_stress
 
 
 def _make_training_structures(engine, raw_structures, r_cut, charges=None,
@@ -613,50 +612,6 @@ def test_elm_score_csv_does_not_raise_nameerror(tmp_path):
     _tiny_elm_csv(csv_path2, seed=1)
     sc = model.score_csv(str(csv_path2))
     assert "all" in sc and sc["all"] is not None
-
-
-# ===========================================================================
-# F9: ELMModel.compute() numerical-mode stress must use frac @ lat (no .T)
-# ===========================================================================
-
-def test_elm_compute_stress_matches_finite_difference_under_shear():
-    model = ELMModel(n_hidden=6, verbose=False)
-    D = 3
-    rng = np.random.default_rng(0)
-    model._W = rng.normal(size=(D, 6)) * 0.3
-    model._b = rng.normal(size=6) * 0.1
-    model._beta = rng.normal(size=6)
-    model._X_mean = np.zeros(D)
-    model._X_std = np.ones(D)
-    model._D = D
-    model._fitted = True
-
-    def descriptor_fn(lattice, positions, atom_types):
-        return positions.copy()
-
-    # Sheared (non-orthogonal), perturbed structure -- a diagonal lattice
-    # cannot expose a transpose bug since diag(...).T == diag(...).
-    lattice = np.array([[5.0, 0.0, 0.0],
-                        [0.8, 4.5, 0.0],
-                        [0.3, 0.6, 6.0]])
-    positions = np.array([[0.3, 0.2, 0.1], [2.6, 2.1, 3.0]])
-
-    _, _, stress = model.compute(lattice, positions, ["Ar", "Ar"],
-                                  descriptor_fn=descriptor_fn, delta=1e-4)
-
-    def energy_fn(lat, pos):
-        X = descriptor_fn(lat, pos, ["Ar", "Ar"])
-        return float(model.predict(X).sum())
-
-    stress_ref = finite_diff_stress(energy_fn, lattice, positions, h=1e-4)
-
-    assert np.allclose(stress, stress_ref, atol=1e-6, rtol=1e-4), (
-        "F9 regression: ELMModel.compute()'s numerical-mode stress must "
-        "reconstruct displaced Cartesian positions as `frac @ lattice` "
-        "(this codebase's row-vector convention), not `frac @ lattice.T`; "
-        "the two only coincide for a diagonal (orthogonal, axis-aligned) "
-        "lattice, which is why a sheared cell is required to catch this.\n"
-        f"stress (compute)=\n{stress}\nstress (finite-diff oracle)=\n{stress_ref}")
 
 
 # ===========================================================================

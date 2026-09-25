@@ -16,6 +16,10 @@ E/N = f(d)::
     E     = N f(d)
     F_j   = N X_F[j] . grad f(d)
     sigma = N X_S . grad f(d)          (compressive-positive, ADR-0001)
+
+An atom-centred model (ADR-0005; the file records ``atom_centred``) is
+evaluated as E = sum_i eps_s(i)(G_i) from the per-atom ACSF vectors, with
+forces and stress contracted from their Jacobians.
 """
 
 import os
@@ -32,12 +36,24 @@ def load_mlip_model(path: str):
     if not os.path.isfile(path):
         raise FileNotFoundError(f"MLIP model file not found: '{path}'")
     if path.endswith(".pt"):
+        from ..utils.optional_torch import torch
+
+        if torch.load(path, map_location="cpu", weights_only=False).get(
+            "atom_centred", False
+        ):
+            from .models.atomic_nn import AtomicNNModel
+
+            return AtomicNNModel.load(path)
         from .models.nn import NNModel
 
         return NNModel.load(path)
     with np.load(path) as z:
         keys = set(z.files)
         cls = str(z["model_class"]) if "model_class" in keys else ""
+    if cls in ("AtomicELMModel", "AtomicQELMModel"):
+        from .models import atomic
+
+        return getattr(atomic, cls).load(path)
     if "model_str" in keys:
         from .models.lightgbm_model import LightGBMModel
 
@@ -92,12 +108,18 @@ class MLIPForceField:
         self.model = model
         self.descriptor = descriptor_from_config(model.descriptor_config)
         self.r_cut = float(self.descriptor.r_cut)
+        self.atom_centred = bool(getattr(model, "atom_centred", False))
 
     @classmethod
     def from_file(cls, path: str) -> "MLIPForceField":
         return cls(load_mlip_model(path))
 
     def __call__(self, lattice, positions, atom_types, neigh_list=None):
+        if self.atom_centred:
+            J = self.descriptor.atomic_jacobian(lattice, positions, atom_types)
+            eps, g = self.model.atomic_energy_and_gradient(J.G, J.sp)
+            forces, stress = J.forces_and_stress(g)
+            return float(eps.sum()), forces, stress
         d, XF, XS = self.descriptor.structure_table(lattice, positions, atom_types)
         N = len(atom_types)
         f, g = self.model.energy_and_gradient(d)

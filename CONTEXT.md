@@ -134,3 +134,17 @@ An unordered pair of elements, which is how every pairwise parameter is
 keyed. Unordered is the point: the parameters for A–B and B–A are the
 same entry.
 _Avoid_: pair type, bond type, interaction pair
+
+**Tabular model**:
+An MLIP that sees one descriptor per structure (the per-atom average d)
+and learns E/N = f(d) from a table of E, F and S rows, the F and S rows
+holding derivatives of d (ADR-0004). Linear in d it is also atom-centred;
+nonlinear it is not local.
+_Avoid_: global model, structure model
+
+**Atom-centred model**:
+An MLIP whose energy is a sum of per-atom terms, E = sum_i eps_s(G_i),
+each depending only on one atom's own neighbourhood within the cutoff
+(Behler-Parrinello; ADR-0005). Locality is what lets it run on a cell
+size, surface or defect it was not trained on.
+_Avoid_: local model, per-atom model, HDNNP (for the ELM form)

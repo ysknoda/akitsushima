@@ -56,6 +56,7 @@ library.
 - `LinearModel` — linear model: OLS, ridge, smoothness-penalised ridge, LASSO, Elastic Net, PLS, Bayesian ridge, ARD
 - `NNModel` — PyTorch feed-forward network (lazily imported)
 - `LightGBMModel` — Gradient-boosted trees + Optuna search (lazily imported)
+- `AtomicELMModel` / `AtomicQELMModel` / `AtomicNNModel` — atom-centred (Behler-Parrinello) models E = sum_i eps_s(G_i), one function per species (ADR-0005)
 - `ACSF` — atom-centred symmetry functions G2 / G4 / G5 with analytic position and cell derivatives
 
 ### Simulation capabilities
@@ -250,6 +251,13 @@ potential:
   type:  MLIP
   model: ./mlip_output/elm_model.npz
 ```
+
+`mlip.form: atom_centred` (ADR-0005) trains the conventional atom-centred
+form instead, E = sum_i eps_s(G_i) on each atom's own ACSF vector G_i
+(models `elm`, `qelm`, `nn`), from the same structure list.  The energy is
+a sum of local terms, so a model trained on one cell size runs on others;
+the model file (`atomic_<model>_model.npz` / `.pt`) records the form and
+is used with the same `potential: {type: MLIP, model: ...}` entry.
 
 ## Project layout
 

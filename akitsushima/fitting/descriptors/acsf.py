@@ -53,7 +53,7 @@ import numpy as np
 from ...constants import ATOMIC_MASS
 from ...utils.jit import _numba_njit
 
-__all__ = ["ACSF", "ATOMIC_NUMBER", "sort_species"]
+__all__ = ["ACSF", "ATOMIC_NUMBER", "AtomicJacobian", "sort_species"]
 
 # ATOMIC_MASS is listed H, He, Li, ... in atomic-number order (Z = 1..86).
 ATOMIC_NUMBER = {el: z for z, el in enumerate(ATOMIC_MASS, start=1)}
@@ -116,7 +116,7 @@ def _neighbours(lattice, positions, r_cut):
 
 
 # ---------------------------------------------------------------------------
-#  Kernel
+#  Kernels
 # ---------------------------------------------------------------------------
 
 
@@ -139,20 +139,21 @@ def _acsf_kernel(
     want_deriv,
 ):
     """
-    Returns G (N, Dc), dS (N, 3, n_sp*Dc) = sum_i dG_i/dr_j placed in the
-    block of i's species, and Wv (3, 3, n_sp*Dc) = sum_i dG_i/dT_ab.
+    Returns G (N, Dc) and dGdv (M, 3, Dc): for neighbour entry m of atom
+    i (ptr[i] <= m < ptr[i+1]), dGdv[m, a, c] = dG_{i,c} / dv_{m,a}, the
+    derivative with respect to the entry's vector v_m = r_j + shift - r_i.
+    Every position and cell derivative follows from these (see
+    :func:`_aggregate` and :func:`_contract`).
     """
     N = ptr.shape[0] - 1
     n2 = g2_eta.shape[0]
     n4 = g4_eta.shape[0]
-    Dt = n_sp * Dc
     G = np.zeros((N, Dc))
-    dS = np.zeros((N, 3, Dt)) if want_deriv else np.zeros((1, 3, Dt))
-    Wv = np.zeros((3, 3, Dt))
+    M = vec.shape[0] if want_deriv else 1
+    dGdv = np.zeros((M, 3, Dc))
     pi_rc = math.pi / r_cut
     off4 = n_sp * n2
     for i in range(N):
-        base = sp[i] * Dc
         s0 = ptr[i]
         s1 = ptr[i + 1]
         # ---- G2 ----
@@ -171,25 +172,9 @@ def _acsf_kernel(
                 G[i, ch] += e * fc
                 if want_deriv:
                     dgdr = e * (dfc - 2.0 * g2_eta[q] * x * fc)
-                    gx = dgdr * vx / r
-                    gy = dgdr * vy / r
-                    gz = dgdr * vz / r
-                    c = base + ch
-                    dS[j, 0, c] += gx
-                    dS[j, 1, c] += gy
-                    dS[j, 2, c] += gz
-                    dS[i, 0, c] -= gx
-                    dS[i, 1, c] -= gy
-                    dS[i, 2, c] -= gz
-                    Wv[0, 0, c] += vx * gx
-                    Wv[0, 1, c] += vx * gy
-                    Wv[0, 2, c] += vx * gz
-                    Wv[1, 0, c] += vy * gx
-                    Wv[1, 1, c] += vy * gy
-                    Wv[1, 2, c] += vy * gz
-                    Wv[2, 0, c] += vz * gx
-                    Wv[2, 1, c] += vz * gy
-                    Wv[2, 2, c] += vz * gz
+                    dGdv[m, 0, ch] += dgdr * vx / r
+                    dGdv[m, 1, ch] += dgdr * vy / r
+                    dGdv[m, 2, ch] += dgdr * vz / r
         # ---- angular: G4 (jk = 1) and G5 (jk = 0) ----
         if n4 == 0:
             continue
@@ -251,12 +236,6 @@ def _acsf_kernel(
                         t2 = fa * dfb / rb
                         t3 = 0.0
                         rsum = ra * ra + rb * rb
-                    dFa_x = t1 * ax - t3 * cx
-                    dFa_y = t1 * ay - t3 * cy
-                    dFa_z = t1 * az - t3 * cz
-                    dFb_x = t2 * bx + t3 * cx
-                    dFb_y = t2 * by + t3 * cy
-                    dFb_z = t2 * bz + t3 * cz
                     eta = g4_eta[q]
                     zeta = g4_zeta[q]
                     lam = g4_lam[q]
@@ -267,53 +246,123 @@ def _acsf_kernel(
                     P = base_c**zeta
                     E = math.exp(-eta * rsum)
                     K = 2.0 ** (1.0 - zeta)
-                    T = K * P * E * F
-                    G[i, ch] += T
+                    G[i, ch] += K * P * E * F
                     if not want_deriv:
                         continue
+                    dFa_x = t1 * ax - t3 * cx
+                    dFa_y = t1 * ay - t3 * cy
+                    dFa_z = t1 * az - t3 * cz
+                    dFb_x = t2 * bx + t3 * cx
+                    dFb_y = t2 * by + t3 * cy
+                    dFb_z = t2 * bz + t3 * cz
                     dP = K * zeta * base_c ** (zeta - 1.0) * lam * E * F
+                    KPE = K * P * E
                     # d(exp)/da = -2 eta E (a - jk c), d/db = -2 eta E (b + jk c)
-                    ga_x = dP * dca_x + K * P * E * (
+                    dGdv[m, 0, ch] += dP * dca_x + KPE * (
                         -2.0 * eta * (ax - jk * cx) * F + dFa_x
                     )
-                    ga_y = dP * dca_y + K * P * E * (
+                    dGdv[m, 1, ch] += dP * dca_y + KPE * (
                         -2.0 * eta * (ay - jk * cy) * F + dFa_y
                     )
-                    ga_z = dP * dca_z + K * P * E * (
+                    dGdv[m, 2, ch] += dP * dca_z + KPE * (
                         -2.0 * eta * (az - jk * cz) * F + dFa_z
                     )
-                    gb_x = dP * dcb_x + K * P * E * (
+                    dGdv[n, 0, ch] += dP * dcb_x + KPE * (
                         -2.0 * eta * (bx + jk * cx) * F + dFb_x
                     )
-                    gb_y = dP * dcb_y + K * P * E * (
+                    dGdv[n, 1, ch] += dP * dcb_y + KPE * (
                         -2.0 * eta * (by + jk * cy) * F + dFb_y
                     )
-                    gb_z = dP * dcb_z + K * P * E * (
+                    dGdv[n, 2, ch] += dP * dcb_z + KPE * (
                         -2.0 * eta * (bz + jk * cz) * F + dFb_z
                     )
-                    c = base + ch
-                    dS[j, 0, c] += ga_x
-                    dS[j, 1, c] += ga_y
-                    dS[j, 2, c] += ga_z
-                    dS[k, 0, c] += gb_x
-                    dS[k, 1, c] += gb_y
-                    dS[k, 2, c] += gb_z
-                    dS[i, 0, c] -= ga_x + gb_x
-                    dS[i, 1, c] -= ga_y + gb_y
-                    dS[i, 2, c] -= ga_z + gb_z
-                    Wv[0, 0, c] += ax * ga_x + bx * gb_x
-                    Wv[0, 1, c] += ax * ga_y + bx * gb_y
-                    Wv[0, 2, c] += ax * ga_z + bx * gb_z
-                    Wv[1, 0, c] += ay * ga_x + by * gb_x
-                    Wv[1, 1, c] += ay * ga_y + by * gb_y
-                    Wv[1, 2, c] += ay * ga_z + by * gb_z
-                    Wv[2, 0, c] += az * ga_x + bz * gb_x
-                    Wv[2, 1, c] += az * ga_y + bz * gb_y
-                    Wv[2, 2, c] += az * ga_z + bz * gb_z
-    return G, dS, Wv
+    return G, dGdv
 
+
+@_numba_njit
+def _aggregate(ptr, nbj, vec, sp, dGdv, n_sp):
+    """
+    Structure-level sums of the entry derivatives, each atom's features
+    placed in its species block (width n_sp * Dc):
+
+        dS[j, a] = sum_i dG_i/dr_{j,a}      Wv[a, b] = sum_i dG_i/dT_{ab}
+
+    with dG_i/dr_j = sum_{m of i -> j} dGdv[m] - [i == j] sum_{m of i}
+    dGdv[m], and dG_i/dT_ab = sum_{m of i} v_{m,a} dGdv[m, b].
+    """
+    N = ptr.shape[0] - 1
+    Dc = dGdv.shape[2]
+    dS = np.zeros((N, 3, n_sp * Dc))
+    Wv = np.zeros((3, 3, n_sp * Dc))
+    for i in range(N):
+        base = sp[i] * Dc
+        for m in range(ptr[i], ptr[i + 1]):
+            j = nbj[m]
+            for a in range(3):
+                for c in range(Dc):
+                    g = dGdv[m, a, c]
+                    dS[j, a, base + c] += g
+                    dS[i, a, base + c] -= g
+                    for b in range(3):
+                        Wv[b, a, base + c] += vec[m, b] * g
+    return dS, Wv
+
+
+@_numba_njit
+def _contract(ptr, nbj, vec, dGdv, g):
+    """
+    Forces and virial of E = sum_i eps_i(G_i) given g[i] = d eps_i/dG_i:
+
+        F_j = -sum_i g_i . dG_i/dr_j        W_ab = sum_i g_i . dG_i/dT_ab
+
+    (stress = -W / V, compressive-positive).
+    """
+    N = ptr.shape[0] - 1
+    Dc = dGdv.shape[2]
+    F = np.zeros((N, 3))
+    W = np.zeros((3, 3))
+    for i in range(N):
+        for m in range(ptr[i], ptr[i + 1]):
+            j = nbj[m]
+            for a in range(3):
+                c = 0.0
+                for k in range(Dc):
+                    c += dGdv[m, a, k] * g[i, k]
+                F[j, a] -= c
+                F[i, a] += c
+                for b in range(3):
+                    W[b, a] += vec[m, b] * c
+    return F, W
 
 # ---------------------------------------------------------------------------
+
+
+class AtomicJacobian:
+    """
+    Per-atom ACSF vectors of one structure and their derivatives, stored
+    per neighbour entry (see :func:`_acsf_kernel`):
+
+    sp (N,) species index; G (N, Dc); ptr (N+1,), nbj (M,), vec (M, 3):
+    the CSR neighbour list (entry m belongs to atom ``centre[m]``);
+    dGdv (M, 3, Dc); volume [A^3].
+    """
+
+    def __init__(self, sp, G, ptr, nbj, vec, dGdv, volume):
+        self.sp, self.G, self.ptr, self.nbj = sp, G, ptr, nbj
+        self.vec, self.dGdv, self.volume = vec, dGdv, float(volume)
+
+    @property
+    def centre(self) -> np.ndarray:
+        return np.repeat(np.arange(len(self.sp)), np.diff(self.ptr))
+
+    def forces_and_stress(self, g):
+        """Forces (N, 3) and stress (3, 3) [compressive-positive, ADR-0001]
+        of E = sum_i eps_i(G_i), from g[i] = d eps_i / dG_i."""
+        F, W = _contract(
+            self.ptr, self.nbj, self.vec, self.dGdv, np.ascontiguousarray(g)
+        )
+        S = -W / self.volume
+        return F, 0.5 * (S + S.T)
 
 
 class ACSF:
@@ -432,12 +481,13 @@ class ACSF:
             )
         sp = np.array([self.species.index(t) for t in atom_types], dtype=np.int64)
         ptr, nbj, vec = _neighbours(lattice, positions, self.r_cut)
+        vec = np.ascontiguousarray(vec)
         g2 = np.array(self.g2, dtype=np.float64).reshape(-1, 2)
         g4 = np.array(self._angular, dtype=np.float64).reshape(-1, 4)
-        return sp, _acsf_kernel(
+        G, dGdv = _acsf_kernel(
             ptr,
             nbj,
-            np.ascontiguousarray(vec),
+            vec,
             sp,
             len(self.species),
             self.r_cut,
@@ -451,15 +501,21 @@ class ACSF:
             self.n_per_atom,
             want_deriv,
         )
+        return sp, ptr, nbj, vec, G, dGdv
 
     def atomic(self, lattice, positions, atom_types) -> np.ndarray:
         """Per-atom descriptors G (N, n_per_atom)."""
-        _, (G, _, _) = self._run(lattice, positions, atom_types, False)
-        return G
+        return self._run(lattice, positions, atom_types, False)[4]
+
+    def atomic_jacobian(self, lattice, positions, atom_types) -> "AtomicJacobian":
+        """Per-atom descriptors with their derivatives (ADR-0005)."""
+        lattice = np.asarray(lattice, dtype=np.float64)
+        sp, ptr, nbj, vec, G, dGdv = self._run(lattice, positions, atom_types, True)
+        return AtomicJacobian(sp, G, ptr, nbj, vec, dGdv, abs(np.linalg.det(lattice)))
 
     def structure(self, lattice, positions, atom_types) -> np.ndarray:
         """Structure descriptor d (n_features,) -- see the module docstring."""
-        sp, (G, _, _) = self._run(lattice, positions, atom_types, False)
+        sp, *_, G, _ = self._run(lattice, positions, atom_types, False)
         return self._blocks(G, sp)
 
     def _blocks(self, G, sp):
@@ -471,11 +527,10 @@ class ACSF:
 
     def structure_table(self, lattice, positions, atom_types):
         """(d, X_F, X_S) in the E/F/S row convention of load_mlip_csv."""
-        lattice = np.asarray(lattice, dtype=np.float64)
-        sp, (G, dS, Wv) = self._run(lattice, positions, atom_types, True)
-        N = len(sp)
-        V = abs(np.linalg.det(lattice))
-        return self._blocks(G, sp), -dS / N, -Wv / (N * V)
+        J = self.atomic_jacobian(lattice, positions, atom_types)
+        N = len(J.sp)
+        dS, Wv = _aggregate(J.ptr, J.nbj, J.vec, J.sp, J.dGdv, len(self.species))
+        return self._blocks(J.G, J.sp), -dS / N, -Wv / (N * J.volume)
 
     # ------------------------------------------------------------------
     def table_rows(

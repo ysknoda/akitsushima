@@ -9,7 +9,8 @@ A "force function" is any callable::
   'buckingham'     : Buckingham + Coulomb (built internally as a
                      one-potential PotentialEngine + compute_all_general).
   PotentialEngine  : arbitrary PotentialEngine (LJ, Morse, BornMayer, SW, ...).
-  ELMModel         : ML potential (numerical or analytical differentiation).
+  MLIP model       : a chain-rule / linear / atom-centred model trained on
+                     in-package descriptors (wrapped in MLIPForceField).
   callable         : pass your own function directly.
 
 ``.kind`` / ``.engine`` attributes (bug-fix note, S12/F13)
@@ -26,14 +27,14 @@ Buckingham closure and instead always builds a real
 ``PotentialEngine``).  Every force_fn returned by ``make_force_fn`` now
 carries two public, introspectable attributes instead:
 
-  fn.kind    : one of ``"buckingham"``, ``"engine"``, ``"elm"``, or
+  fn.kind    : one of ``"buckingham"``, ``"engine"``, ``"mlip"``, or
                ``None`` for a passed-through user callable that doesn't
                declare its own ``.kind`` (e.g. ``ESMCalculator`` sets
                ``self.kind = "esm"`` itself, and that is preserved
                here rather than overwritten).
   fn.engine  : the underlying ``PotentialEngine`` when one exists
                (``"buckingham"`` and ``"engine"`` kinds); absent for
-               ``"elm"`` and arbitrary callables.
+               ``"mlip"`` and arbitrary callables.
 
 Solver code should use ``getattr(force_fn, "kind", None)`` /
 ``getattr(force_fn, "engine", None)`` rather than ``isinstance`` or
@@ -43,8 +44,6 @@ import warnings
 from typing import Callable, Optional
 
 from ..engine import BuckinghamPotential, PotentialEngine, compute_all_general
-from .models.elm import ELMModel
-from .models.quantized_elm import QuantizedELMModel
 
 __all__ = ["compute_all", "make_force_fn", "_resolve_force_fn"]
 
@@ -128,7 +127,7 @@ def make_force_fn(backend,
                   pppm_accuracy  : float           = 1e-5,
                   pppm_mesh      : Optional[int]   = None,
                   pppm_order     : int             = 6,
-                  # ELM kwargs
+                  # removed in ADR-0005; kept to give a clear error
                   descriptor_fn  : Optional[Callable] = None,
                   ) -> Callable:
     """
@@ -157,10 +156,11 @@ def make_force_fn(backend,
             exactly as the 'buckingham' backend does.  That kwarg used to
             be accepted here and silently ignored, which turned an ionic
             calculation into a neutral one without a word.
-        ELMModel / QuantizedELMModel instance
-            Numerical differentiation of (1/2) sum_i.
-            Requires descriptor_fn=.  r_cut is not auto-detected; pass
-            r_cut= to the simulator explicitly.
+        MLIP model (ELM, QELM, NN, linear, or an atom-centred model)
+            Wrapped in MLIPForceField, which recomputes the in-package
+            descriptor stored with the model; r_cut is the descriptor's.
+            (ELMModel.compute() and descriptor_fn= were removed in
+            ADR-0005: the atom-centred models replace them.)
         callable
             Passed through as-is.  If it already carries its own
             ``.r_cut`` (e.g. ``ExternalFileEngine``) and no ``r_cut=``
@@ -173,7 +173,7 @@ def make_force_fn(backend,
         - PotentialEngine: auto-detected from engine.r_cut if None; a
           UserWarning is raised when the provided r_cut is smaller than
           the engine's maximum cutoff (would miss pairs).
-        - ELMModel / callable: optional; the simulator uses this value
+        - MLIP model / callable: optional; the simulator uses this value
           directly for NeighbourList construction.
 
     Notes on r_cut and NeighbourList
@@ -197,13 +197,25 @@ def make_force_fn(backend,
     >>> # r_cut is auto-detected as 10.0 from the engine
     >>> # Pass it to the simulator:  NVTSimulation(..., force_fn=fn, r_cut=fn.r_cut)
 
-    >>> # ELMModel
-    >>> def desc(lat, pos, types): return compute_soap(lat, pos, types)
-    >>> fn = make_force_fn(elm_model, descriptor_fn=desc)
+    >>> # A trained MLIP (in-package descriptors)
+    >>> fn = make_force_fn(load_mlip_model("atomic_elm_model.npz"))
     """
-    # -- callable passthrough (excludes ELMModel which is also callable) ----
-    if callable(backend) and not isinstance(
-            backend, (PotentialEngine, ELMModel, QuantizedELMModel)):
+    if descriptor_fn is not None:
+        raise ValueError(
+            "make_force_fn: descriptor_fn= was removed (ADR-0005).  Train an "
+            "MLIP on in-package descriptors and pass the model; the "
+            "atom-centred models (AtomicELMModel, AtomicNNModel) replace "
+            "ELMModel.compute().")
+    # -- MLIP model ----------------------------------------
+    if hasattr(backend, "descriptor_config"):
+        from .mlip_engine import MLIPForceField
+        ff = MLIPForceField(backend)
+        if r_cut is not None:
+            ff.r_cut = float(r_cut)
+        return ff
+
+    # -- callable passthrough ------------------------------
+    if callable(backend) and not isinstance(backend, PotentialEngine):
         fn = backend
         # Bug-fix note: the original unconditionally did `fn.r_cut = r_cut`,
         # which silently overwrote an already-configured attribute (e.g.
@@ -299,28 +311,10 @@ def make_force_fn(backend,
         _engine_fn.engine = _eng
         return _engine_fn
 
-    # -- ELMModel / QuantizedELMModel ----------------------
-    if isinstance(backend, (ELMModel, QuantizedELMModel)):
-        if not backend._fitted:
-            raise ValueError("make_force_fn: ELMModel has not been fitted.")
-        if descriptor_fn is None:
-            raise ValueError(
-                "make_force_fn: descriptor_fn= is required for ELMModel.\n"
-                "  descriptor_fn(lattice, positions, atom_types) -> (N, D) array")
-        _elm  = backend
-        _desc = descriptor_fn
-        _rc   = float(r_cut) if r_cut is not None else 10.0
-
-        def _elm_fn(lattice, positions, atom_types, neigh_list=None):
-            return _elm.compute(lattice, positions, atom_types,
-                                descriptor_fn=_desc)
-        _elm_fn.r_cut = _rc
-        _elm_fn.kind  = "elm"
-        return _elm_fn
-
     raise ValueError(
         f"make_force_fn: unsupported backend {type(backend)}. "
-        "Pass 'buckingham', a PotentialEngine, an ELMModel, or a callable.")
+        "Pass 'buckingham', a PotentialEngine, a trained MLIP model, or a "
+        "callable.")
 
 
 def _legacy_force_fn(buck_params, charges, r_cut, ewald_alpha,
