@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Stillinger-Weber: each three-body angle counted once, legs from their pair records
@@ -99,6 +99,19 @@ two-body term) are unaffected.
 | ADR-0004 SW-Si MLIP verification (`example/mlip/adr0004`) | re-run 2026-09-26 (data regenerated); decisions confirmed; exposed and fixed a Bayesian-ridge degeneracy | done: ADR-0004 appendix, "Re-run after ADR-0006" |
 | ADR-0005 comparison (`example/mlip/adr0005`) | re-run 2026-09-26 with both fixes; the ELM out-of-distribution gap of the first run closed | done: ADR-0005 appendix rewritten |
 | `tests/` | no existing test pinned a three-body-dependent SW number (all 470 pass unchanged; FD force/stress tests included) | new regression tests added |
+
+## Re-run of the SW examples (2026-09-26)
+
+`example/rerun_sw_examples.sh`; outputs under each example directory.
+
+| example | result | reading |
+|---|---|---|
+| GeSn relax (T2) | PASS (E -313.4005 eV, was -312.98; within 5e-6 eV/atom of scipy, RMSD 1e-3 A) | |
+| GeSn md (T2), 20 ps examples | NVE PASS (drift 0.022 meV/atom/ns); NVT 900 K PASS; NVT 300 / 600 K Var(K) ratio 1.52 / 1.32 (FAIL, 20% band); NPT 0 GPa PASS (B ratio 1.11); NPT 5 GPa B ratio 0.39 (FAIL) | the 20 ps NVT runs repeat ADR-0003's AlN finding (insufficient equilibration, not a thermostat defect) until shown otherwise; per-run B has little power (ADR-0003) |
+| GeSn NPT 200 ps (T2 powered test) | PASS: B_T 62.0 +/- 6.8 GPa vs static 60.1, ratio 1.03 (was 1.23 +/- 0.06, marginal) | |
+| GeSn fit (T8, 19 variables) | PASS: unseen compositions E MAE 0.019 meV/atom, F RMSE 1.6e-3 eV/A, S MAE 1.4e-3 GPa; P = 0 lattice constants within 0.004%; two-body parameters within 0.15%; angular prefactors within 2.8% (lambda and leg gamma trade off individually, up to 12%) | |
+| Si fit (T8 SW) | **FAIL**: differential evolution settled at sigma 7.70 A (cutoff 13.9 A in a 10.5 A cell), loss 771 (was 3.3e-6) | the engine's O(N^2) path evaluates a cutoff past half the cell width without error (minimum image drops the other images), so the global search found a spurious minimum there; loss at the true parameters is 7e-15 and a local-only fit reaches 2.3e-3.  Adding the minimum-image check that pair potentials already have fails ~25 tests that label SW on 8-atom cells -- a separate change (open) |
+| Si vacancy neb / tsa (T5) | **FAIL**: 2x2x2 profile has an image 1.2 eV below both endpoints; 3x3x3 profile breaks down | with SW's own three-body strength the symmetric vacancy the endpoints relax to is no longer a minimum (the doubled term held it); the check's endpoint construction must break the symmetry before relaxing (open) |
 
 ## Consequences
 
