@@ -694,31 +694,24 @@ class MultiSpeciesStillingerWeberParameterSet(FittableParameterSet):
       This class is stricter: it ties sigma/a/epsilon of the two
       records even when both have A = 0, because it fits them as one
       variable.)
-    * Three-body.  ``(i, j, k)`` supplies lambda, gamma and costheta0 for
-      the angle j-i-k, with its own sigma/a/epsilon used on both legs.
-      On a diagonal record those sigma/a/epsilon are the pair's (tied
-      above); on an off-diagonal record (j != k) they are that record's
-      own variables.  Every record's lambda and gamma are independent.
+    * Three-body (LAMMPS pair_sw; Tomita et al., Jpn. J. Appl. Phys. 57,
+      04FB04 (2018), eq. 4).  Each leg i-j of an angle centred on i takes
+      sigma, a and gamma from the pair record ``(i, j, j)``; the record
+      ``(i, j, k)`` supplies lambda, epsilon and costheta0 only.  A
+      diagonal record's gamma is therefore its own variable (it is the
+      leg gamma of every angle centred on i with a j neighbour), and a
+      mixed record (j != k) contributes only lambda here: its sigma, a
+      and gamma are never read and are not fitted.
 
     Identifiability (read before judging a fit by its parameters)
     -------------------------------------------------------------
     * epsilon enters only as epsilon*A and epsilon*lambda, so it is held
       fixed by default; fitting it as well gives a one-parameter family
       of exact solutions.
-    * The rows (i, j, k) and (i, k, j), j != k, are EXCHANGEABLE.  The
-      engine sums the angular term over both orderings of every
-      neighbour pair, and each record's term is symmetric in its two
-      legs, so the two records only ever enter as a sum: swapping their
-      complete parameter sets leaves every energy, force and stress
-      unchanged.  A fit can legitimately land on the swapped solution.
-      The degeneracy is not only discrete.  With equal sigma and a (as
-      in Tomita et al.) the pair contributes lambda1*exp(gamma1*u) +
-      lambda2*exp(gamma2*u) over a narrow range of u, which a shift in
-      one row can nearly compensate in the other: on three rattled GeSn
-      cells the loss fell from 28.9 to 3.5e-6 while (Ge;Ge,Sn).lambda,
-      started 10% low, ended 9.5% low, its partner row having moved
-      instead.  Judge such fits by their predictions, not by these
-      individual numbers.
+    * Each unordered neighbour pair counts once with the MEAN of the
+      ``(i, j, k)`` and ``(i, k, j)`` lambdas, so only their mean is
+      determined; the two are one variable here (started at their mean,
+      which leaves the energy unchanged).
     * A parameter is only as determined as the environments that
       exercise it.  (Sn;Ge,Sn) needs an Sn with both a Ge and an Sn
       neighbour; a dilute-Sn training set has few (30 in three 8-Sn
@@ -793,16 +786,30 @@ class MultiSpeciesStillingerWeberParameterSet(FittableParameterSet):
                         if key in self._PAIR_KEYS:
                             self.variables.append(
                                 (f"{i}-{j}:{key}", [(t, key) for t in targets]))
+            if j == k:
+                for key in self.fit_keys:
+                    if key not in self._PAIR_KEYS:          # lambda, gamma, ...
+                        self.variables.append(
+                            (f"{i};{j},{j}:{key}", [((i, j, j), key)]))
+                continue
+            # Mixed record: only lambda (and epsilon, costheta0 if fitted)
+            # is read by the engine.  lambda of (i, j, k) and (i, k, j)
+            # enter as their mean: one variable for the unordered pair.
             for key in self.fit_keys:
-                if key in self._PAIR_KEYS:
-                    if j == k or key in self._TWO_BODY_ONLY:
-                        continue                         # pair-owned
-                self.variables.append((f"{i};{j},{k}:{key}", [((i, j, k), key)]))
+                if key == "lambda":
+                    if (j, k) > (k, j) and (i, k, j) in self.records:
+                        continue                         # owned by its twin
+                    targets = [((i, j, k), key)]
+                    if (i, k, j) in self.records:
+                        targets.append(((i, k, j), key))
+                    self.variables.append((f"{i};{{{j},{k}}}:{key}", targets))
+                elif key in ("epsilon", "costheta0"):
+                    self.variables.append((f"{i};{j},{k}:{key}", [((i, j, k), key)]))
 
         x0, bounds = [], []
         for name, targets in self.variables:
             key = targets[0][1]
-            v = float(self.records[targets[0][0]][key])
+            v = float(np.mean([self.records[t][key] for t, _ in targets]))
             lo, hi = self._BOUNDS[key]
             if not lo <= v <= hi:
                 raise ValueError(

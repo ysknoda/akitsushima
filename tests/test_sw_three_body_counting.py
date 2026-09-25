@@ -1,17 +1,23 @@
-"""Stillinger-Weber three-body counting.
+"""Stillinger-Weber three-body counting and multi-species legs.
 
-Stillinger & Weber, PRB 31, 5262 (1985), eq. (4)-(5):
+Stillinger & Weber, PRB 31, 5262 (1985), eq. (4)-(5), and Tomita et al.,
+Jpn. J. Appl. Phys. 57, 04FB04 (2018), eqs. (2) and (4):
 
-    Phi3 = sum_{i<j<k} [h(r_ij, r_ik, theta_jik) + h(r_ji, r_jk, theta_ijk)
-                        + h(r_ki, r_kj, theta_ikj)],
+    E3 = sum_i sum_{j != i} sum_{k > j} phi3(r_ij, r_ik, theta_ijk)
+    phi3 = eps_ijk lambda_ijk exp[gamma_ij sigma_ij / (r_ij - a_ij sigma_ij)
+                                  + gamma_ik sigma_ik / (r_ik - a_ik sigma_ik)]
+           (cos theta_ijk - cos theta0_ijk)^2
 
-i.e. every (centre i, UNORDERED neighbour pair {j, k}) contributes h once.
-The references below are brute-force sums written from that definition,
-independent of the engine's neighbour list and kernels.  Multi-species:
-each unordered pair contributes (h_ijk + h_ikj) / 2 with the (i, j, k)
-record's own sigma, a, gamma, lambda (this engine's record convention),
-which is the definition above whenever the two records agree and does
-not depend on neighbour order when they do not.
+i.e. every (centre i, UNORDERED neighbour pair {j, k}) contributes once,
+and each leg carries the sigma, a, gamma of its own pair.  Tomita et al.
+give their parameters "optimized for LAMMPS", whose pair_sw takes leg
+i-j's sigma, a, gamma from the record (i, j, j) and lambda, epsilon,
+cos theta0 from (i, j, k).  When (i, j, k) and (i, k, j) differ in
+lambda, an unordered pair contributes their mean (LAMMPS would use
+whichever neighbour comes first; they are equal in Tomita's Table I).
+
+The references are brute-force sums written from these definitions,
+independent of the engine's neighbour list and kernels.
 """
 
 import contextlib
@@ -76,18 +82,20 @@ def _neighbours(lat, pos, rc):
     return nb
 
 
-def _h(v1, v2, rec):
-    eps, sig, a = rec.get("epsilon", 1.0), rec["sigma"], rec["a"]
-    x1, x2 = np.linalg.norm(v1) / sig, np.linalg.norm(v2) / sig
-    if x1 >= a or x2 >= a:
+def _h(v1, v2, rec, leg1, leg2):
+    """phi3 with lambda, epsilon, cos theta0 from rec and each leg's
+    sigma, a, gamma from its own pair record."""
+
+    def leg(v, L):
+        x = np.linalg.norm(v) / L["sigma"]
+        return None if x >= L["a"] else L["gamma"] / (x - L["a"])
+
+    e1, e2 = leg(v1, leg1), leg(v2, leg2)
+    if e1 is None or e2 is None:
         return 0.0
     c = v1 @ v2 / (np.linalg.norm(v1) * np.linalg.norm(v2))
-    return (
-        eps
-        * rec["lambda"]
-        * np.exp(rec["gamma"] / (x1 - a) + rec["gamma"] / (x2 - a))
-        * (c - rec.get("costheta0", -1.0 / 3.0)) ** 2
-    )
+    return (rec.get("epsilon", 1.0) * rec["lambda"] * np.exp(e1 + e2)
+            * (c - rec.get("costheta0", -1.0 / 3.0)) ** 2)
 
 
 def _v2(r, rec):
@@ -113,9 +121,9 @@ def brute_sw(lat, pos, types, records):
             E += 0.5 * _v2(np.linalg.norm(v), records[(types[i], types[j], types[j])])
         for (j, vj), (k, vk) in itertools.combinations(lst, 2):
             ti, tj, tk = types[i], types[j], types[k]
-            E += 0.5 * (
-                _h(vj, vk, records[(ti, tj, tk)]) + _h(vk, vj, records[(ti, tk, tj)])
-            )
+            lj, lk = records[(ti, tj, tj)], records[(ti, tk, tk)]
+            E += 0.5 * (_h(vj, vk, records[(ti, tj, tk)], lj, lk)
+                        + _h(vk, vj, records[(ti, tk, tj)], lk, lj))
     return E
 
 
@@ -162,8 +170,8 @@ def _tomita():
 
 @pytest.mark.parametrize("use_numba", [False, True])
 def test_multi_species_tomita_energy_matches_brute_force(use_numba):
-    """Tomita et al. (2018) GeSn, whose (i,j,k) and (i,k,j) records
-    differ in gamma: each unordered pair counts (h_ijk + h_ikj) / 2."""
+    """Tomita et al. (2018) GeSn: legs from the pair records, lambda from
+    the triple record, each unordered pair once."""
     nested = _tomita()
     lat, pos = _rattled(2, a=5.9)
     rng = np.random.default_rng(3)
@@ -217,3 +225,23 @@ def test_sw_si_elastic_constants_are_stillinger_webers():
     assert C[0, 0] == pytest.approx(151.4, abs=0.5)
     assert C[0, 1] == pytest.approx(76.4, abs=0.5)
     assert C[3, 3] == pytest.approx(56.4, abs=0.5)
+
+
+def test_mixed_records_supply_only_lambda_epsilon_and_costheta0():
+    """A mixed record's sigma, a and gamma are not used (LAMMPS pair_sw):
+    changing them leaves the energy unchanged; its lambda does not."""
+    nested = _tomita()
+    lat, pos = _rattled(6, a=5.9)
+    types = list(np.random.default_rng(7).choice(["Ge", "Sn"], len(pos)))
+
+    def energy(recs, use_numba):
+        eng = PotentialEngine().add(StillingerWeberPotential(recs, species=["Ge", "Sn"]))
+        return eng.compute(lat, pos, types, use_numba=use_numba)[0]
+
+    for use_numba in (False, True):
+        E0 = energy(nested, use_numba)
+        mod = {t: dict(v) for t, v in nested.items()}
+        mod[("Ge", "Ge", "Sn")].update(sigma=2.0, a=1.6, gamma=3.0)
+        assert energy(mod, use_numba) == pytest.approx(E0, rel=1e-12)
+        mod[("Ge", "Ge", "Sn")]["lambda"] *= 1.5
+        assert abs(energy(mod, use_numba) - E0) > 1e-3

@@ -1125,9 +1125,11 @@ def test_multi_species_sw_round_trips_and_ties_the_two_pair_records():
     from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
     recs = _gesn_records()
     ps = MS(recs, species=["Ge", "Sn"])
-    # 3 pairs x (sigma, A, B) + 8 rows x (lambda, gamma) + 4 off-diagonal
-    # rows x sigma, with epsilon/p/q/a/costheta0 fixed by default.
-    assert len(ps.variables) == 9 + 16 + 4
+    # 3 pairs x (sigma, A, B) + 4 diagonal rows x (lambda, gamma) + one
+    # lambda per mixed pair of rows ((Ge;Ge,Sn)/(Ge;Sn,Ge) and
+    # (Sn;Ge,Sn)/(Sn;Sn,Ge)), with epsilon/p/q/a/costheta0 fixed by
+    # default.  A mixed row's sigma, a and gamma are never read (ADR-0006).
+    assert len(ps.variables) == 9 + 8 + 2
 
     decoded = ps.decode(ps.x0)["sw"]
     for t, p in MS._to_nested(recs).items():
@@ -1188,10 +1190,10 @@ def test_multi_species_sw_consistent_records_are_permutation_invariant():
 
 
 def test_multi_species_sw_rows_ijk_and_ikj_are_exchangeable():
-    """The identifiability caveat in the class docstring, pinned: swapping
-    the COMPLETE parameter sets of (i,j,k) and (i,k,j) leaves E, F and S
-    unchanged, even with gamma 1.8136 vs 0.7232.  A fit that lands on the
-    swapped solution has found the same potential."""
+    """Swapping the COMPLETE parameter sets of (i,j,k) and (i,k,j) leaves
+    E, F and S unchanged, even with gamma 1.8136 vs 0.7232: a mixed row
+    supplies only lambda (equal in each pair of rows here), each leg's
+    gamma comes from its pair record (ADR-0006)."""
     from akitsushima.fitting import MultiSpeciesStillingerWeberParameterSet as MS
     nested = MS._to_nested(_gesn_records())
     swapped = {t: dict(p) for t, p in nested.items()}

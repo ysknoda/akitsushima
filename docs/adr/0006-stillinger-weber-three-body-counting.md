@@ -2,7 +2,7 @@
 status: proposed
 ---
 
-# Stillinger-Weber: each three-body angle counted once
+# Stillinger-Weber: each three-body angle counted once, legs from their pair records
 
 Until 2026-09-25 every Stillinger-Weber code path summed the three-body
 term over both orders (j, k) and (k, j) of each neighbour pair around a
@@ -58,17 +58,29 @@ three-body sum on a rattled cell, and now agrees to 1e-10.
    except those of perfect tetrahedral structures; listed in the next
    release notes.
 
-## Open question for the user (not decided here)
-
-The Tomita et al. GeSn records (Jpn. J. Appl. Phys. 57, 04FB04 (2018),
-`example/GeSn/relax/gesn_sw_relax.yaml`) have (i, j, k) and (i, k, j)
-rows that differ in gamma (e.g. Ge-Ge-Sn 1.8136, Ge-Sn-Ge 0.7232), and
-the engine applies a mixed row's sigma, a and gamma to both legs of the
-angle.  LAMMPS instead takes each leg's sigma, a and gamma from the
-diagonal records (i, j, j) and (i, k, k) and only lambda and cos theta0
-from (i, j, k).  The two readings give different energies for this
-parameter set.  Which one Tomita et al. used should be settled from the
-paper (the PDF is needed); the counting fix above does not depend on it.
+5. **Multi-species legs follow LAMMPS** (decided 2026-09-25 from Tomita
+   et al., Jpn. J. Appl. Phys. 57, 04FB04 (2018), PDF in `references/`).
+   Their eq. (2) sums the three-body term over sum_i sum_{j != i} sum_{k > j}
+   (each unordered pair once), eq. (4) gives each leg its own pair's
+   gamma, sigma, a, and the text states that Table I was "optimized for
+   LAMMPS", whose `pair_sw` takes leg i-j's sigma, a, gamma from
+   (i, j, j) and only lambda, epsilon, cos theta0 from (i, j, k).  The
+   engine used to apply a mixed row's own sigma, a, gamma to both legs,
+   which is a different potential for this table (mixed rows have sigma
+   2.337 A against Ge-Ge 2.181 A, and gamma 1.8136 / 0.7232 that LAMMPS
+   never reads).  Now: legs from the pair records; a mixed row supplies
+   lambda, epsilon, cos theta0.  The (i, j, k) and (i, k, j) lambdas are
+   equal in every row pair of Table I, so the (h_ijk + h_ikj) / 2 of
+   decision 2 is exactly LAMMPS for this set.  (The paper's eq. (4)
+   prints (cos theta + cos theta0)^2 with cos theta0 = -1/3, which would
+   favour 109.5 deg only with a minus sign; LAMMPS's (cos theta - cos
+   theta0)^2 is kept.)
+   `MultiSpeciesStillingerWeberParameterSet` fits accordingly: a mixed
+   row contributes one lambda variable per pair of rows (only their mean
+   is determined); its sigma, a, gamma are no longer variables
+   (29 -> 19 variables for GeSn).
+   Tests: brute force with per-leg parameters, and a mixed row's sigma,
+   a, gamma have no effect while its lambda does.
 
 ## What must be re-run or re-labelled
 
@@ -82,7 +94,7 @@ two-body term) are unaffected.
 | ADR-0003 T2 `relax` GeSn SW; `md` GeSn SW (NVT/NVE/NPT) | internal-consistency checks (relax vs scipy on the same potential, T, drift, P) remain valid logic; the numbers change | re-run `example/check_relax.py`, `example/check_md.py` (GeSn rows) |
 | `example/Si` relax (six optimisers, +/-5% volume) | ideal diamond, uniformly scaled: three-body zero; unaffected | none (spot-check) |
 | ADR-0003 T5 `neb` / `tsa`, SW Si vacancy (barrier 0.949 / 0.909 eV) | barrier, modes and prefactor change; the checks are internal | re-run `example/neb/check_neb_tsa.py`; re-state the barrier |
-| ADR-0003 T8 / `example/fit/Si_sw`, `example/fit/GeSn_sw` | training labels in `training_set/structures.csv` were made with the old engine; fitting them with the new engine would "recover" lambda ~ 2x | regenerate the training sets (`make_training_set.py`), re-fit, re-check |
+| ADR-0003 T8 / `example/fit/Si_sw`, `example/fit/GeSn_sw` | training labels in `training_set/structures.csv` were made with the old engine; fitting them with the new engine would "recover" lambda ~ 2x; the GeSn fit config fits mixed-row sigma/gamma, which are no longer variables | regenerate the training sets (`make_training_set.py`), re-fit, re-check |
 | `example/fit/GeSnVac_SW` | VASP data (OUTCAR, vasprun.xml), not labelled by the engine | none |
 | ADR-0004 SW-Si MLIP verification (`example/mlip/adr0004`, `sw_si_data*.npz`, all tables in its appendix) | the MLIPs learned the doubled potential; the learning / conservation / lattice results stay valid as "learning a known three-body potential", but the reference is not SW | re-label as "SW with a doubled three-body term" or regenerate the caches and re-run `sw_si_verify.py` (long) |
 | ADR-0005 comparison (`example/mlip/adr0005`, `data/*.npz`, ledgers) | same as ADR-0004; its reference elastic constants (201.8 / 51.6 / 90.6 GPa) are those of the doubled potential | re-label, or regenerate data and re-run `compare.py` (several hours) |

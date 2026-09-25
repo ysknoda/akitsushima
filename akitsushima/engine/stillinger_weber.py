@@ -410,21 +410,20 @@ def _sw_multi_2body_numpy(idx_i, idx_j, rij_arr, r_arr, type_ids, forces, stress
 
 
 def _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz,
-                        sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t):
-    """Table-driven analogue of _sw_h3_scalar, differing only in where
-    gamma comes from: here it is looked up per (i, j, k) triple from
-    tri_gam, whereas _sw_h3_scalar takes the single flat-format scalar.
-    (This function's explicit ``gam_t / (x - a_t)`` is what made the
-    legacy path's hard-coded ``1 / (x - a_sw)`` detectable as a defect;
-    see _sw_h3_scalar's bug-fix note.)"""
+                        sig_j, a_j, gam_j, sig_k, a_k, gam_k,
+                        eps_t, lam_t, costh0_t):
+    """Multi-species three-body term (Tomita et al., Jpn. J. Appl. Phys.
+    57, 04FB04 (2018), eq. 4; LAMMPS pair_sw): each leg i-j carries the
+    sigma, a, gamma of its own pair record (i, j, j); lambda, epsilon and
+    cos theta0 come from the triple record (i, j, k)."""
     r_ij = math.sqrt(rijx * rijx + rijy * rijy + rijz * rijz)
     r_ik = math.sqrt(rikx * rikx + riky * riky + rikz * rikz)
-    xij = r_ij / sigma_t
-    xik = r_ik / sigma_t
-    if xij >= a_t or xik >= a_t:
+    xij = r_ij / sig_j
+    xik = r_ik / sig_k
+    if xij >= a_j or xik >= a_k:
         return 0.0
-    exp_ij = _nb_exp(gam_t / (xij - a_t))
-    exp_ik = _nb_exp(gam_t / (xik - a_t))
+    exp_ij = _nb_exp(gam_j / (xij - a_j))
+    exp_ik = _nb_exp(gam_k / (xik - a_k))
     cos_th = (rijx * rikx + rijy * riky + rijz * rikz) / (r_ij * r_ik)
     dcos = cos_th - costh0_t
     return eps_t * lam_t * exp_ij * exp_ik * dcos * dcos
@@ -433,10 +432,15 @@ def _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz,
 def _sw_multi_3body_numpy(n_start, n_end,
                           nb_start, nb_idx, nb_rij, nb_r, type_ids,
                           forces, stress,
-                          tri_valid, tri_eps, tri_sig, tri_a, tri_lam, tri_gam, tri_cos):
+                          tri_valid, tri_eps, tri_lam, tri_cos,
+                          leg_sig, leg_a, leg_gam):
     """Table-driven multi-species analogue of _sw_3body_numpy. tri_* are
     (n_species, n_species, n_species) dense arrays indexed [i_sp, j_sp,
-    k_sp]; tri_valid mirrors `self._three_body(si, sj, sk) is not None`.
+    k_sp] holding lambda, epsilon and cos theta0 of the record (i, j, k);
+    leg_* are (n_species, n_species) arrays holding sigma, a and gamma of
+    the pair record (i, j, j), used for the leg i-j (LAMMPS pair_sw;
+    Tomita et al. 2018, eq. 4).  tri_valid is True where (i, j, k),
+    (i, j, j) and (i, k, k) all exist.
     Same central-finite-difference force/stress derivation as
     _sw_3body_numpy (see that function's docstring for why), and the
     same early `if h3 == 0.0: continue` skip the existing multi-species
@@ -467,9 +471,12 @@ def _sw_multi_3body_numpy(n_start, n_end,
                 riky = nb_rij[pk, 1]
                 rikz = nb_rij[pk, 2]
 
-                sigma_t = tri_sig[i_sp, j_sp, k_sp]
-                a_t     = tri_a[i_sp, j_sp, k_sp]
-                gam_t   = tri_gam[i_sp, j_sp, k_sp]
+                sj_t    = leg_sig[i_sp, j_sp]
+                aj_t    = leg_a[i_sp, j_sp]
+                gj_t    = leg_gam[i_sp, j_sp]
+                sk_t    = leg_sig[i_sp, k_sp]
+                ak_t    = leg_a[i_sp, k_sp]
+                gk_t    = leg_gam[i_sp, k_sp]
                 eps_t   = tri_eps[i_sp, j_sp, k_sp]
                 # Both orders (j, k) and (k, j) are visited, each with its
                 # own record, so each weighs one half: an unordered pair
@@ -480,23 +487,23 @@ def _sw_multi_3body_numpy(n_start, n_end,
                 costh0_t = tri_cos[i_sp, j_sp, k_sp]
 
                 h3 = _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz,
-                                         sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)
+                                         sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
                 if h3 == 0.0:
                     continue
                 energy += h3
 
-                dzj0 = (_sw_h3_scalar_multi(rijx + hh, rijy, rijz, rikx, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx - hh, rijy, rijz, rikx, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzj1 = (_sw_h3_scalar_multi(rijx, rijy + hh, rijz, rikx, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy - hh, rijz, rikx, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzj2 = (_sw_h3_scalar_multi(rijx, rijy, rijz + hh, rikx, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz - hh, rikx, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzk0 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx + hh, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx - hh, riky, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzk1 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky + hh, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky - hh, rikz, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzk2 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz + hh, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz - hh, sigma_t, a_t, gam_t, eps_t, lam_t, costh0_t)) / (2 * hh)
+                dzj0 = (_sw_h3_scalar_multi(rijx + hh, rijy, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
+                        - _sw_h3_scalar_multi(rijx - hh, rijy, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
+                dzj1 = (_sw_h3_scalar_multi(rijx, rijy + hh, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
+                        - _sw_h3_scalar_multi(rijx, rijy - hh, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
+                dzj2 = (_sw_h3_scalar_multi(rijx, rijy, rijz + hh, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
+                        - _sw_h3_scalar_multi(rijx, rijy, rijz - hh, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
+                dzk0 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx + hh, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
+                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx - hh, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
+                dzk1 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky + hh, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
+                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky - hh, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
+                dzk2 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz + hh, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
+                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz - hh, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
 
                 fj0 = -dzj0
                 fj1 = -dzj1
@@ -647,26 +654,25 @@ class StillingerWeberPotential:
     Multi-species format (LAMMPS .sw-file-like convention)
     ----------------------------------------------------------
     params : dict keyed by ordered element triples (i, j, k) -> dict with:
-        sigma, a           : pair-cutoff-scale parameters.  For a
-                              diagonal entry (i, j, j) these define the
-                              i-j pair's two-body AND three-body cutoff.
-                              For a mixed entry (i, j, k) with j != k,
-                              these are used (per this potential's own
-                              convention, matching the source table the
-                              user extracted) for BOTH exponential decay
-                              legs of that specific triplet's angular
-                              term -- i.e. sigma_ij and sigma_ik are not
-                              looked up separately from other rows; the
-                              (i, j, k) row's own sigma/a apply
-                              uniformly to both r_ij and r_ik in that
-                              triplet's h(i;j,k) contribution.
+        sigma, a, gamma     : on a diagonal entry (i, j, j): the i-j
+                              pair's two-body cutoff scale and, for every
+                              angle centred on i, the leg i-j's sigma, a
+                              and gamma (LAMMPS pair_sw; Tomita et al.,
+                              Jpn. J. Appl. Phys. 57, 04FB04 (2018),
+                              eq. 4, whose parameters are "optimized for
+                              LAMMPS").  On a mixed entry (i, j, k),
+                              j != k, they are NOT used: each leg reads
+                              its own pair entry.
         A, B, p, q          : two-body parameters.  Only meaningful (and
                               only read) for a diagonal entry (i, j, j);
                               for a mixed entry (j != k) they should be
                               0 (or omitted) since no two-body term is
                               evaluated on a mixed row.
-        lambda, gamma       : three-body parameters for this specific
-                              (i, j, k) angular term.
+        lambda              : three-body strength of the angle j-i-k.
+                              Each unordered neighbour pair {j, k} counts
+                              once, with the mean of the (i, j, k) and
+                              (i, k, j) entries' lambda (equal in every
+                              published set we know of).
         epsilon             : energy prefactor (defaults to 1.0, matching
                               the common convention of folding epsilon
                               into A, B, lambda directly).
@@ -676,7 +682,7 @@ class StillingerWeberPotential:
     Any (i, j, k) combination absent from `params` is treated as
     NON-INTERACTING for that role (two-body pair skipped if (i,j,j) is
     missing; a given three-body angular contribution skipped if the
-    specific (i,j,k) entry is missing).
+    specific (i,j,k) entry, or the pair entry of either leg, is missing).
 
     Parameters
     ----------
@@ -727,9 +733,19 @@ class StillingerWeberPotential:
         """Return two-body params for the (i,j) pair (diagonal entry)."""
         return self.p.get((si, sj, sj))
 
+    def _leg(self, si: str, sj: str) -> Optional[dict]:
+        """sigma, a, gamma of the leg i-j of an angle centred on i: the
+        pair record (i, j, j), as LAMMPS pair_sw reads it."""
+        return self.p.get((si, sj, sj))
+
     def _three_body(self, si: str, sj: str, sk: str) -> Optional[dict]:
-        """Return angular params for the (i; j,k) triple."""
-        return self.p.get((si, sj, sk))
+        """Return the (i; j,k) record, which supplies lambda, epsilon and
+        cos theta0 -- or None when it or either leg's pair record is
+        missing (non-interacting)."""
+        tri = self.p.get((si, sj, sk))
+        if tri is None or self._leg(si, sj) is None or self._leg(si, sk) is None:
+            return None
+        return tri
 
     # ------------------------------------------------------------------
     def compute(self,
@@ -1106,11 +1122,18 @@ class StillingerWeberPotential:
 
             tri_valid = np.zeros((n_sp, n_sp, n_sp), dtype=np.bool_)
             tri_eps = np.zeros((n_sp, n_sp, n_sp))
-            tri_sig = np.ones((n_sp, n_sp, n_sp))
-            tri_a = np.zeros((n_sp, n_sp, n_sp))
             tri_lam = np.zeros((n_sp, n_sp, n_sp))
-            tri_gam = np.zeros((n_sp, n_sp, n_sp))
             tri_cos = np.full((n_sp, n_sp, n_sp), -1.0 / 3.0)
+            leg_sig = np.ones((n_sp, n_sp))
+            leg_a = np.zeros((n_sp, n_sp))
+            leg_gam = np.zeros((n_sp, n_sp))
+            for i_sp, si in enumerate(self.species):
+                for j_sp, sj in enumerate(self.species):
+                    leg = self._leg(si, sj)
+                    if leg is not None:
+                        leg_sig[i_sp, j_sp] = float(leg['sigma'])
+                        leg_a[i_sp, j_sp] = float(leg['a'])
+                        leg_gam[i_sp, j_sp] = float(leg['gamma'])
             for i_sp, si in enumerate(self.species):
                 for j_sp, sj in enumerate(self.species):
                     for k_sp, sk in enumerate(self.species):
@@ -1119,10 +1142,7 @@ class StillingerWeberPotential:
                             continue
                         tri_valid[i_sp, j_sp, k_sp] = True
                         tri_eps[i_sp, j_sp, k_sp] = float(tri.get('epsilon', 1.0))
-                        tri_sig[i_sp, j_sp, k_sp] = float(tri['sigma'])
-                        tri_a[i_sp, j_sp, k_sp] = float(tri['a'])
                         tri_lam[i_sp, j_sp, k_sp] = float(tri['lambda'])
-                        tri_gam[i_sp, j_sp, k_sp] = float(tri['gamma'])
                         tri_cos[i_sp, j_sp, k_sp] = float(tri.get('costheta0', -1.0 / 3.0))
 
             e2 = _sw_multi_2body_jit(
@@ -1134,28 +1154,27 @@ class StillingerWeberPotential:
             e3 = _sw_multi_3body_jit(
                 n_start, n_end, nb_start, nb_idx, nb_rij, nb_r, type_ids,
                 forces, stress,
-                tri_valid, tri_eps, tri_sig, tri_a, tri_lam, tri_gam, tri_cos)
+                tri_valid, tri_eps, tri_lam, tri_cos, leg_sig, leg_a, leg_gam)
             energy += e3
 
         else:
-            def _h3_term(sign_i, rij_v, rik_v, tri):
-                """Scalar three-body term for a given (i,j,k) parameter set."""
+            def _h3_term(sign_i, rij_v, rik_v, trip):
+                """Scalar three-body term; trip = (record (i, j, k), pair
+                record of leg i-j, pair record of leg i-k)."""
+                tri, lj, lk = trip
                 r_ij_ = float(np.linalg.norm(rij_v))
                 r_ik_ = float(np.linalg.norm(rik_v))
-                sigma_t = float(tri['sigma'])
-                a_t = float(tri['a'])
-                xij_ = r_ij_ / sigma_t
-                xik_ = r_ik_ / sigma_t
-                if xij_ >= a_t or xik_ >= a_t:
+                xij_ = r_ij_ / float(lj['sigma'])
+                xik_ = r_ik_ / float(lk['sigma'])
+                if xij_ >= float(lj['a']) or xik_ >= float(lk['a']):
                     return 0.0
                 eps_t = float(tri.get('epsilon', 1.0))
                 # one half: both orders (j, k) and (k, j) are visited, see
                 # _sw_multi_3body_numpy
                 lam_t = 0.5 * float(tri['lambda'])
-                gam_t = float(tri['gamma'])
                 costh0_t = float(tri.get('costheta0', -1.0 / 3.0))
-                e_ij = math.exp(gam_t / (xij_ - a_t))
-                e_ik = math.exp(gam_t / (xik_ - a_t))
+                e_ij = math.exp(float(lj['gamma']) / (xij_ - float(lj['a'])))
+                e_ik = math.exp(float(lk['gamma']) / (xik_ - float(lk['a'])))
                 cos_ = float(np.dot(rij_v, rik_v)) / (r_ij_ * r_ik_)
                 return eps_t * lam_t * e_ij * e_ik * (cos_ - costh0_t)**2
 
@@ -1212,6 +1231,7 @@ class StillingerWeberPotential:
                         tri = self._three_body(si, sj, sk)
                         if tri is None:
                             continue
+                        tri = (tri, self._leg(si, sj), self._leg(si, sk))
                         h3 = _h3_term(si, rij_v, rik_v, tri)
                         if h3 == 0.0:
                             continue
