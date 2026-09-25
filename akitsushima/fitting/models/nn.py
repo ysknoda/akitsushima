@@ -80,6 +80,16 @@ class NNModel:
     batch_size     : mini-batch size in rows (chain-rule mode batches whole
                       structures, about batch_size rows per batch).
     weight_decay   : L2 regularisation coefficient (Adam's weight_decay).
+    batch_structures : chain-rule mode: structures per mini-batch (takes
+                      precedence over batch_size).  Default 30 since
+                      0.2.0a3 (SW-Si comparison, ADR-0004: fastest setting
+                      passing every seed; 4-6x faster than ~1-2 structures
+                      per batch).  None -> about batch_size rows per batch
+                      (batch_size is also what row-independent mode uses).
+    optimizer      : 'adam' (mini-batch) or 'lbfgs' (full batch, strong
+                      Wolfe line search, 20 iterations per epoch; with
+                      lbfgs, learning_rate is the initial step, 1.0 is
+                      the usual choice).
     deterministic  : make training bit-reproducible for a given seed:
                       torch's deterministic algorithms and a single CPU
                       thread during fit() (multi-threaded reductions sum
@@ -88,7 +98,11 @@ class NNModel:
                       the output, f(x) = MLP(x) + gamma . x_n (as the ELM's
                       RVFL option), so the network only has to learn the
                       nonlinear remainder of a nearly linear energy.
-    early_stopping_patience : stop training if validation loss does not
+    early_stopping_patience : (default 150, epochs default 1500 since
+                      0.2.0a3: E rows are 1 in ~3N+7 rows and converge last;
+                      patience 30-40 left E at up to 1.9 sigma on SW-Si,
+                      150 brought every seed to the noise, ADR-0004)
+                      stop training if validation loss does not
                       improve for this many consecutive epochs (0 disables
                       early stopping, always running the full `epochs`).
     device         : 'auto' | 'cpu' | 'cuda'. 'auto' selects CUDA if
@@ -106,16 +120,18 @@ class NNModel:
                  r0             : float = 1.0,
                  eps0           : float = 0.01,
                  learning_rate  : float = 1.0e-3,
-                 epochs         : int   = 500,
+                 epochs         : int   = 1500,
                  batch_size     : int   = 256,
                  weight_decay   : float = 1.0e-6,
-                 early_stopping_patience: int = 30,
+                 early_stopping_patience: int = 150,
                  device         : str   = 'auto',
                  seed           : int   = 42,
                  verbose        : bool  = True,
                  row_independent: bool  = False,
                  direct_link    : bool  = True,
-                 deterministic  : bool  = False):
+                 deterministic  : bool  = False,
+                 batch_structures: Optional[int] = 30,
+                 optimizer      : str   = 'adam'):
         if not HAS_TORCH:
             raise ImportError(
                 "NNModel requires PyTorch, which is not installed. "
@@ -138,6 +154,12 @@ class NNModel:
         self.row_independent = bool(row_independent)
         self.direct_link    = bool(direct_link)
         self.deterministic  = bool(deterministic)
+        self.batch_structures = (int(batch_structures) if batch_structures
+                                 else None)
+        self.optimizer      = str(optimizer).lower()
+        if self.optimizer not in ('adam', 'lbfgs'):
+            raise ValueError(f"NNModel: optimizer must be 'adam' or 'lbfgs', "
+                             f"got {optimizer!r}.")
         self.descriptor_config = ""   # see ELMModel.descriptor_config
 
         if device == 'auto':
@@ -324,64 +346,102 @@ class NNModel:
 
         torch.manual_seed(self.seed)
         self._net = self._build_network(D)
-        opt = torch.optim.Adam(self._net.parameters(),
-                                lr=self.learning_rate,
-                                weight_decay=self.weight_decay)
+        if self.optimizer == 'lbfgs':
+            opt = torch.optim.LBFGS(self._net.parameters(),
+                                    lr=self.learning_rate, max_iter=20,
+                                    history_size=20,
+                                    line_search_fn='strong_wolfe')
+        else:
+            opt = torch.optim.Adam(self._net.parameters(),
+                                    lr=self.learning_rate,
+                                    weight_decay=self.weight_decay)
 
         dev, f32 = self.device, torch.float32
 
         def _t(a, dtype=f32):
             return torch.as_tensor(a, dtype=dtype, device=dev)
 
+        # All data are converted to tensors once, here; a batch is then
+        # only index arithmetic on the device (ADR-0004 follow-up: the
+        # per-batch numpy -> torch conversion was 20-40% of the time).
+        y_all = _t(targets); w_all_t = _t(w_all)
         if self.row_independent:
-            def _blocks(idx, shuffle):
+            Xn_all = _t(self._normalise(X))
+
+            def _blocks(idx, shuffle, full=False):
                 order = (idx[torch.randperm(len(idx)).numpy()]
                          if shuffle else idx)
-                for s in range(0, len(order), self.batch_size):
-                    yield order[s:s + self.batch_size]
+                step = len(order) if full else self.batch_size
+                for s in range(0, len(order), max(step, 1)):
+                    yield _t(order[s:s + step], torch.long), None
 
-            def _pred(rows, create_graph):
-                return self._net(_t(self._normalise(X[rows]))).view(-1)
+            def _pred(rows_t, structs, create_graph):
+                return self._net(Xn_all[rows_t]).view(-1)
         else:
-            # Batches are whole structures, sized to ~batch_size rows.
-            rows_of = {}
-            for r, k in enumerate(sid):
-                rows_of.setdefault(int(k), []).append(r)
-            rows_of = {k: np.array(v) for k, v in rows_of.items()}
+            # Batches are whole structures: batch_structures of them, or
+            # enough to make ~batch_size rows.
+            order_rows = np.argsort(sid, kind="stable")
+            starts = np.searchsorted(sid[order_rows], np.arange(len(e_row)))
+            ends = np.append(starts[1:], len(order_rows))
             dn_all = _t(self._normalise(X[e_row]))
             nat_all = _t(n_at.astype(np.float64))
+            Xdir_all = _t(X / self._X_std)
+            isE_all = _t(labels == 'E', torch.bool)
+            sid_all = _t(sid, torch.long)
+            pos = torch.full((len(e_row),), -1, dtype=torch.long, device=dev)
 
-            def _blocks(idx, shuffle):
+            def _blocks(idx, shuffle, full=False):
                 structs = np.unique(sid[idx])
                 if shuffle:
                     structs = structs[torch.randperm(len(structs)).numpy()]
-                per = max(1, int(round(self.batch_size * len(structs)
-                                       / max(len(idx), 1))))
+                if full:
+                    per = len(structs)
+                elif self.batch_structures:
+                    per = self.batch_structures
+                else:
+                    per = max(1, int(round(self.batch_size * len(structs)
+                                           / max(len(idx), 1))))
                 for s in range(0, len(structs), per):
-                    yield np.concatenate([rows_of[int(k)]
-                                          for k in structs[s:s + per]])
+                    st = structs[s:s + per]
+                    rows = np.concatenate([order_rows[starts[k]:ends[k]]
+                                           for k in st])
+                    yield _t(rows, torch.long), np.sort(st)
 
-            def _pred(rows, create_graph):
-                st, loc = np.unique(sid[rows], return_inverse=True)
+            def _pred(rows_t, structs, create_graph):
+                st = _t(structs, torch.long)
+                pos[st] = torch.arange(len(structs), device=dev)
+                loc = pos[sid_all[rows_t]]
                 return self._chain_predict_t(
-                    dn_all[st], _t(X[rows] / self._X_std),
-                    _t(labels[rows] == 'E', torch.bool),
-                    _t(loc, torch.long), nat_all[st], create_graph)
+                    dn_all[st], Xdir_all[rows_t], isE_all[rows_t], loc,
+                    nat_all[st], create_graph)
 
-        y_all = _t(targets); w_all_t = _t(w_all)
-
-        def _loss(rows, create_graph):
-            p = _pred(rows, create_graph)
-            rr = _t(rows, torch.long)
-            return (w_all_t[rr] * (p - y_all[rr]) ** 2).sum(), len(rows)
+        def _loss(rows_t, structs, create_graph):
+            p = _pred(rows_t, structs, create_graph)
+            return (w_all_t[rows_t] * (p - y_all[rows_t]) ** 2).sum(), len(rows_t)
 
         def _eval_loss(idx):
             tot, n = 0.0, 0
-            for rows in _blocks(idx, shuffle=False):
+            for rows_t, structs in _blocks(idx, shuffle=False):
                 with torch.enable_grad():
-                    l, k = _loss(rows, create_graph=False)
+                    l, k = _loss(rows_t, structs, create_graph=False)
                 tot += float(l.detach()); n += k
             return tot / max(n, 1)
+
+        if self.optimizer == 'lbfgs':
+            # Full batch: every training structure in one closure.  L-BFGS
+            # has no weight_decay argument; the same L2 term Adam applies
+            # (gradient weight_decay * theta) is added to the loss.
+            full_rows, full_structs = next(_blocks(idx_train, False, full=True))
+
+            def _closure():
+                opt.zero_grad()
+                l, k = _loss(full_rows, full_structs, create_graph=True)
+                obj = l / k
+                if self.weight_decay:
+                    obj = obj + 0.5 * self.weight_decay * sum(
+                        (p ** 2).sum() for p in self._net.parameters())
+                obj.backward()
+                return obj
 
         best_val = float('inf')
         best_state = None
@@ -389,12 +449,18 @@ class NNModel:
         for epoch in range(self.epochs):
             self._net.train()
             epoch_loss, n_seen = 0.0, 0
-            for rows in _blocks(idx_train, shuffle=True):
-                opt.zero_grad()
-                l, k = _loss(rows, create_graph=True)
-                (l / k).backward()
-                opt.step()
-                epoch_loss += float(l.detach()); n_seen += k
+            if self.optimizer == 'lbfgs':
+                opt.step(_closure)
+                with torch.enable_grad():
+                    l, k = _loss(full_rows, full_structs, create_graph=False)
+                epoch_loss, n_seen = float(l.detach()), k
+            else:
+                for rows_t, structs in _blocks(idx_train, shuffle=True):
+                    opt.zero_grad()
+                    l, k = _loss(rows_t, structs, create_graph=True)
+                    (l / k).backward()
+                    opt.step()
+                    epoch_loss += float(l.detach()); n_seen += k
             epoch_loss /= max(n_seen, 1)
 
             if n_val:
@@ -423,6 +489,7 @@ class NNModel:
                                      or epoch == self.epochs - 1):
                     print(f"  epoch {epoch:5d}  train_loss={epoch_loss:.6e}")
 
+        self.n_epochs_run_ = epoch + 1
         if best_state is not None:
             self._net.load_state_dict(best_state)
 

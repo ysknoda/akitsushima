@@ -45,10 +45,17 @@ transferability for that is an open, measurable question.
 
 4. **Weighting**: the ADR-0004 rule, w_cat x w_unit^2 x w_user.
 
-5. **Engine**: the same `potential: {type: MLIP, model: ...}` entry as
+5. **Force/stress-row subsampling** is to be considered for this model.
+   Unlike the tabular models (network evaluated once per structure, an F
+   row is one dot product), the atom-centred model evaluates the network
+   per atom and needs per-atom Jacobian contractions for the forces, so
+   using a fraction of the F rows (or atoms) per step can cut training time
+   substantially (ADR-0004 follow-up, Q4).
+
+6. **Engine**: the same `potential: {type: MLIP, model: ...}` entry as
    ADR-0004; the model file records that it is atom-centred.
 
-6. **Verification**: as ADR-0004 decision 7 -- finite-difference forces and
+7. **Verification**: as ADR-0004 decision 7 -- finite-difference forces and
    stress, invariances, learning SW-labelled Si to the noise level, NVE
    conservation and the relaxed lattice constant.
 

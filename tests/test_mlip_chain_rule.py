@@ -734,3 +734,38 @@ def test_model_defaults_follow_the_adr_0004_follow_up():
         m = NNModel(verbose=False)
         assert m.activation == "softplus" and m.direct_link
         assert not m.deterministic
+        assert m.batch_structures == 30 and m.optimizer == "adam"
+        assert m.early_stopping_patience == 150 and m.epochs == 1500
+
+
+def test_nn_batch_structures_and_lbfgs_train_and_stay_consistent():
+    """batch_structures and the full-batch L-BFGS optimiser run, keep the
+    F rows derivatives of the energy, and L-BFGS is reproducible."""
+    if not HAS_TORCH:
+        pytest.skip("torch not installed")
+    import copy
+
+    import torch
+
+    from akitsushima.fitting.models.nn import NNModel
+    y, lab, w, X = _chain_table(n_struct=40)
+    for kw in ({"batch_structures": 4},
+               {"optimizer": "lbfgs", "learning_rate": 1.0}):
+        preds = []
+        for _ in range(2):
+            m = NNModel(hidden_layers=[8], epochs=5, verbose=False,
+                        deterministic=True, **kw).fit(y, lab, X, weights=w)
+            preds.append(m.predict_table(lab, X))
+        np.testing.assert_array_equal(preds[0], preds[1])
+        net64 = copy.deepcopy(m._net).double()
+
+        def f64(d):
+            t = torch.as_tensor(m._normalise(d[None]), dtype=torch.float64)
+            return float(net64(t))
+        d, h = X[0], 1e-5
+        pt = preds[1]
+        for k in range(1, 16):
+            fd = 3 * (f64(d + h * X[k]) - f64(d - h * X[k])) / (2 * h)
+            assert pt[k] == pytest.approx(fd, rel=1e-4, abs=1e-6)
+    with pytest.raises(ValueError, match="optimizer"):
+        NNModel(optimizer="sgd", verbose=False)

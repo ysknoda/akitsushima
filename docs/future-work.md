@@ -76,3 +76,14 @@ Recorded 2026-09-25 (ADR-0004, decision 9 lists what is implemented now).
   structures in real DFT data (e.g. poorly converged SCF).  Its benefit
   cannot be shown on noise-free labels from a known potential, so it waits
   for the real-data stage.
+
+## FW-4  Force/stress-row subsampling for LightGBM
+
+Recorded 2026-09-25 (ADR-0004 follow-up, Q4).  In the chain-rule tabular
+models an F or S row costs one dot product (the network runs once per
+structure), so subsampling F/S rows saves little there.  LightGBM's cost
+grows with the number of rows, so a per-label row fraction (e.g.
+`force_row_fraction`) could shorten its training substantially.  Its
+existing `bagging_fraction` (searched by Optuna) already subsamples rows
+without regard to label; decide on a label-aware fraction once training
+time on real DFT data shows it is needed.

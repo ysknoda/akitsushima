@@ -608,14 +608,16 @@ mlip:
 #   row_independent: false
 #   direct_link:   true       # + linear term in d (see ELM above)
 #   deterministic: false      # true = bit-reproducible training (1 thread)
+#   batch_structures: 30      # structures per mini-batch (overrides batch_size)
+#   optimizer:     adam       # adam | lbfgs (full batch; use learning_rate 1.0)
 #   w_energy:      1.0
 #   w_forces:      0.1
 #   w_stress:      10.0
 #   learning_rate: 1.0e-3
-#   epochs:        500
-#   batch_size:    256        # rows per batch (whole structures)
+#   epochs:        1500
+#   batch_size:    256        # rows per batch (row_independent, or batch_structures: null)
 #   weight_decay:  1.0e-6
-#   early_stopping_patience: 30
+#   early_stopping_patience: 150
 #   device:        auto      # auto | cpu | cuda
 #   seed:          42
 #   verbose:       true

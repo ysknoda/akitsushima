@@ -197,7 +197,11 @@ data.)
     - `NNModel`: `activation='softplus'` and `direct_link=True` by
       default; `deterministic=True` (torch deterministic algorithms, one
       CPU thread during fit) is available for bit-reproducible training,
-      off by default for speed.
+      off by default for speed.  Training defaults: early-stopping
+      patience 150 epochs with at most 1500 epochs, and mini-batches of
+      30 whole structures (`batch_structures`), chosen by the rule "every
+      v2 seed passes, then shortest training time" (appendix).  A
+      full-batch L-BFGS optimiser (`optimizer='lbfgs'`) is available.
     - Decision 7's learning criterion is judged on SW-Si data whose test
       cells lie inside the training strain range (data set v2).  Test
       cells with strains outside it (data set v1) measure transferability
@@ -373,7 +377,7 @@ far later (trial 0: 1066 s against 87 s), so the raised iteration cap makes
 
 ### Follow-up (2026-09-25): RVFL, NN, activation functions, LightGBM weights
 
-Changes, all opt-in (defaults unchanged, pending the user's decision):
+Changes (opt-in when written; decision 10 later made them defaults):
 
 - `ELMModel(direct_link=True)`: random-vector functional link (Pao, Park
   & Sobajic, Neurocomputing 6, 163 (1994)), E/N = beta . h(d) +
@@ -459,7 +463,45 @@ models `elm_def` = ELM 400 units with the direct link and reg_search,
 The deterministic runs repeat exactly (patience-40 numbers identical in two
 separate runs).  E is the slowest quantity for the NN to converge (one E
 row per 199 rows): an early-stopping patience of 150 epochs brings every
-seed to the noise level on both data sets.  The NN's defaults
-(`early_stopping_patience=30`, `epochs=500`) are unchanged here, pending
-the user's decision; the recommendation is patience 150 with up to 1500
-epochs.
+seed to the noise level on both data sets.  The user adopted this as the
+default (patience 150, at most 1500 epochs).
+
+### NN training cost: batching and optimiser (2026-09-25)
+
+Where the time goes (SW-Si v2, 450 structures, 89 550 rows): ACSF table
+3.3 s; ELM fit 1.7 s in total, of which the solve is 0.13 s (full batch,
+closed form -- not a bottleneck); NN 477 ms per epoch with the old
+default of 256 rows per batch (~1-2 structures, ~360 Adam steps per
+epoch).  In chain-rule mode the network runs once per *structure*, and an
+F or S row costs one dot product with grad f(d), so the time per step is
+fixed overhead (backward pass, optimiser, and numpy-to-torch conversion
+per batch), not the row count.  Consequences:
+
+- Converting all data to tensors once before training (batches are then
+  index operations) is bit-identical in deterministic mode and took the
+  time per epoch from 477 to 396 ms (256 rows) and from 131 to 64 ms
+  (2000 rows).
+- Subsampling F/S rows would save little here; it matters for LightGBM
+  (cost grows with rows; FW-4) and for the atom-centred model (ADR-0005,
+  decision 5).
+
+Comparison (`example/mlip/adr0004/nn_batch_scan.py`; defaults otherwise:
+softplus, direct link, [64, 64], patience 150, <= 1500 epochs;
+deterministic; seeds 42/1/2; the five configurations ran in parallel, so
+wall times carry some contention, and two 2460-2530 s values include an
+interruption):
+
+| configuration | v2 E / F / S | v2 pass | v2 fit [s] | v1 E / F / S | v1 pass |
+|---|---|---|---|---|---|
+| Adam, 256 rows (~1-2 structures) | 1.03-1.35 / 1.06-1.07 / 1.01-1.02 | 3/3 | 454-615 | 1.05-4.75 / 1.09-1.37 / 1.01-10.2 | 2/3 |
+| Adam, 10 structures | 1.04-1.11 / 1.06-1.07 / 1.00-1.01 | 3/3 | 82-132 | 1.04-1.15 / 1.10-1.12 / 1.01-1.08 | 3/3 |
+| **Adam, 30 structures (new default)** | 1.08-1.09 / 1.07-1.09 / 1.00-1.01 | 3/3 | 70-129 (mean 96) | 1.03-1.28 / 1.11-1.15 / 1.01-1.23 | 3/3 |
+| Adam, all structures | 1.13-1.16 / 1.24-1.27 / 1.06-1.14 | 3/3 | 94-102 | 1.80-2.14 / 2.69-2.91 / 3.21-4.36 | 0/3 |
+| L-BFGS, full batch | 1.03 / 1.03 / 0.98 | 3/3 | 473-604 | 1.59-1.70 / 1.27-1.38 / 3.50-3.79 | 0/3 |
+
+Full-batch Adam always ran into the 1500-epoch cap (one step per epoch)
+and extrapolates poorly; L-BFGS is the most accurate and most
+reproducible inside the training range but about 5x slower, and
+extrapolates poorly.  30 structures per batch is the fastest
+configuration that passes every seed, and it also transfers best, so it
+is the new default.
