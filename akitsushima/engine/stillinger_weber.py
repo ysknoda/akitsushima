@@ -146,9 +146,9 @@ def _sw_3body_numpy(n_start, n_end,
             rijx = nb_rij[pj, 0]
             rijy = nb_rij[pj, 1]
             rijz = nb_rij[pj, 2]
-            for pk in range(si, ei):
-                if pk == pj:
-                    continue
+            # Each unordered pair {j, k} once (Stillinger & Weber 1985,
+            # eq. 5: Phi3 = sum_{i<j<k} of three h terms, one per centre).
+            for pk in range(pj + 1, ei):
                 k_at = nb_idx[pk]
                 r_ik = nb_r[pk]
                 xik = r_ik / sig
@@ -286,9 +286,9 @@ def _sw_3body_numpy_par(n_start, n_end,
             rijx = nb_rij[pj, 0]
             rijy = nb_rij[pj, 1]
             rijz = nb_rij[pj, 2]
-            for pk in range(si, ei):
-                if pk == pj:
-                    continue
+            # Each unordered pair {j, k} once (Stillinger & Weber 1985,
+            # eq. 5: Phi3 = sum_{i<j<k} of three h terms, one per centre).
+            for pk in range(pj + 1, ei):
                 k_at = nb_idx[pk]
                 r_ik = nb_r[pk]
                 xik = r_ik / sig
@@ -471,7 +471,12 @@ def _sw_multi_3body_numpy(n_start, n_end,
                 a_t     = tri_a[i_sp, j_sp, k_sp]
                 gam_t   = tri_gam[i_sp, j_sp, k_sp]
                 eps_t   = tri_eps[i_sp, j_sp, k_sp]
-                lam_t   = tri_lam[i_sp, j_sp, k_sp]
+                # Both orders (j, k) and (k, j) are visited, each with its
+                # own record, so each weighs one half: an unordered pair
+                # contributes (h_ijk + h_ikj) / 2, which is Stillinger &
+                # Weber's single h when the two records agree and does not
+                # depend on neighbour order when they do not.
+                lam_t   = 0.5 * tri_lam[i_sp, j_sp, k_sp]
                 costh0_t = tri_cos[i_sp, j_sp, k_sp]
 
                 h3 = _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz,
@@ -911,9 +916,8 @@ class StillingerWeberPotential:
                     xij = r_ij / sig
                     if xij >= a_sw:
                         continue
-                    for pk in range(len(nbj)):
-                        if pk == pj:
-                            continue
+                    # each unordered pair once (see _sw_3body_numpy)
+                    for pk in range(pj + 1, len(nbj)):
                         k_at = int(nbj[pk])
                         rik_v = rij_i[pk]
                         r_ik = float(r_i[pk])
@@ -1145,7 +1149,9 @@ class StillingerWeberPotential:
                 if xij_ >= a_t or xik_ >= a_t:
                     return 0.0
                 eps_t = float(tri.get('epsilon', 1.0))
-                lam_t = float(tri['lambda'])
+                # one half: both orders (j, k) and (k, j) are visited, see
+                # _sw_multi_3body_numpy
+                lam_t = 0.5 * float(tri['lambda'])
                 gam_t = float(tri['gamma'])
                 costh0_t = float(tri.get('costheta0', -1.0 / 3.0))
                 e_ij = math.exp(gam_t / (xij_ - a_t))
@@ -1209,18 +1215,17 @@ class StillingerWeberPotential:
                         h3 = _h3_term(si, rij_v, rik_v, tri)
                         if h3 == 0.0:
                             continue
-                        # NOTE on convention: matches the single-species
-                        # implementation, which sums over ALL ORDERED (j,k)
-                        # neighbour pairs (both (j,k) and (k,j)) without an
-                        # extra 0.5 factor. This is intentional: the
-                        # literature Stillinger-Weber parameters (lambda,
-                        # gamma, etc.) are conventionally fit/quoted assuming
-                        # this exact "ordered-pair, no halving" summation
-                        # convention (equivalent to a constant 2x rescaling
-                        # of lambda relative to a naive unordered-pair sum),
-                        # so introducing a 0.5 factor here would silently
-                        # halve all three-body energies/forces relative to
-                        # the intended, literature-consistent result.
+                        # Both orders (j, k) and (k, j) are visited and
+                        # _h3_term carries a factor 1/2, so each unordered
+                        # pair contributes (h_ijk + h_ikj) / 2.  Bug-fix note
+                        # (2026-09-25): this used to sum both orders WITHOUT
+                        # the 1/2, under a comment claiming that literature
+                        # SW parameters assume that convention.  They do
+                        # not: Stillinger & Weber (PRB 31, 5262, eq. 5) count
+                        # each (centre, unordered pair) once, as LAMMPS
+                        # pair_sw does (jj < kk).  The doubled three-body term
+                        # gave SW Si C11/C12/C44 = 201.4/51.4/90.5 GPa instead
+                        # of 151.4/76.4/56.4 (tests/test_sw_three_body_counting.py).
                         energy += h3
                         hh = 1e-6
                         dz_dposj = np.zeros(3)
