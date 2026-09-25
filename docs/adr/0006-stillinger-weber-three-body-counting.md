@@ -96,8 +96,8 @@ two-body term) are unaffected.
 | ADR-0003 T5 `neb` / `tsa`, SW Si vacancy (barrier 0.949 / 0.909 eV) | barrier, modes and prefactor change; the checks are internal | re-run `example/neb/check_neb_tsa.py`; re-state the barrier |
 | ADR-0003 T8 / `example/fit/Si_sw`, `example/fit/GeSn_sw` | training labels in `training_set/structures.csv` were made with the old engine; fitting them with the new engine would "recover" lambda ~ 2x; the GeSn fit config fits mixed-row sigma/gamma, which are no longer variables | regenerate the training sets (`make_training_set.py`), re-fit, re-check |
 | `example/fit/GeSnVac_SW` | VASP data (OUTCAR, vasprun.xml), not labelled by the engine | none |
-| ADR-0004 SW-Si MLIP verification (`example/mlip/adr0004`, `sw_si_data*.npz`, all tables in its appendix) | the MLIPs learned the doubled potential; the learning / conservation / lattice results stay valid as "learning a known three-body potential", but the reference is not SW | re-label as "SW with a doubled three-body term" or regenerate the caches and re-run `sw_si_verify.py` (long) |
-| ADR-0005 comparison (`example/mlip/adr0005`, `data/*.npz`, ledgers) | same as ADR-0004; its reference elastic constants (201.8 / 51.6 / 90.6 GPa) are those of the doubled potential | re-label, or regenerate data and re-run `compare.py` (several hours) |
+| ADR-0004 SW-Si MLIP verification (`example/mlip/adr0004`) | re-run 2026-09-26 (data regenerated); decisions confirmed; exposed and fixed a Bayesian-ridge degeneracy | done: ADR-0004 appendix, "Re-run after ADR-0006" |
+| ADR-0005 comparison (`example/mlip/adr0005`) | re-run 2026-09-26 with both fixes; the ELM out-of-distribution gap of the first run closed | done: ADR-0005 appendix rewritten |
 | `tests/` | no existing test pinned a three-body-dependent SW number (all 470 pass unchanged; FD force/stress tests included) | new regression tests added |
 
 ## Consequences

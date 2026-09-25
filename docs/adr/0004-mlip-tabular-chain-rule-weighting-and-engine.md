@@ -255,6 +255,13 @@ the unweighted fit (A0) is the weighting, which decision 2 changes.
 
 ## Appendix: implementation notes and verification (2026-09-25)
 
+> **Reference potential.**  The SW-Si numbers in this appendix up to the
+> section "Re-run after ADR-0006" were computed with the SW engine before
+> ADR-0006, whose three-body term was twice Stillinger-Weber's.  They
+> describe learning that potential; the re-run with the corrected engine
+> is at the end of this appendix, and the decisions above are confirmed
+> by it.
+
 ### Implementation notes (deviations and additions)
 
 - **ELM direct solver.** The chain-rule system mixes rows of very different
@@ -505,3 +512,77 @@ reproducible inside the training range but about 5x slower, and
 extrapolates poorly.  30 structures per batch is the fastest
 configuration that passes every seed, and it also transfers best, so it
 is the new default.
+
+### Re-run after ADR-0006 (2026-09-26)
+
+Same scripts, seeds, noise and settings (`sw_si_verify.py`,
+`activation_scan.py`, `nn_batch_scan.py`); data sets v1 and v2 regenerated
+with the corrected SW engine (Si C11 / C12 / C44 = 151.7 / 76.7 / 56.4
+GPa).  Earlier results are kept in
+`example/mlip/adr0004/archive_pre_adr0006/`.  SW itself: NVE 0.014 /
+0.001 meV/atom; the same relaxation gives a = 5.42955 A (-0.026%, the
+procedure's own offset).  `adam_default` in `nn_batch_scan.py` now sets
+`batch_structures: None` explicitly, i.e. the ~256-row batches the row
+refers to (after the default change it had silently become the
+30-structure setting).
+
+**Decision-7 verification** (test RMSE / sigma; a error; NVE std / drift
+in meV/atom):
+
+| model | v2 E / F / S | v2 a err | v1 E / F / S | verdict |
+|---|---|---|---|---|
+| linear (ridge) | 1.03 / 1.02 / 0.97 | -0.020% | 1.02 / 1.04 / 0.99 | PASS both |
+| bayes_ridge | 1.02 / 1.01 / 0.97 (after the fix below) | | 1.01 / 1.02 / 0.99 | PASS both |
+| ard | 1.04 / 1.04 / 0.98 | -0.050% | 1.02 / 1.04 / 0.99 | PASS both |
+| ELM tanh, plain | 1.03 / 1.01 / 0.97 | -0.025% | 2.11 / 1.47 / 3.31 | v2 PASS, v1 fails |
+| RVFL / ELM default (direct link, reg_search) | 1.03 / 1.01 / 0.97 | -0.012% | 1.03 / 1.05 / 1.04 | PASS both |
+| NN silu (patience 40), 3 seeds | 1.20-1.96 / 1.20-1.33 / 1.61-2.31 | -0.50 to +0.14% | 130-177 / 22-26 / 262-367 | fail |
+| NN silu + direct link, 3 seeds | 1.24-2.42 / 1.21-1.96 / 2.03-3.25 | | 143-197 / 19-24 / 282-400 | fail |
+| NN softplus + direct link, patience 40, 3 seeds | 1.08-1.25 / 1.08-1.11 / 0.99-1.15 | -0.08 to +0.06% | 1.07-1.12 / 1.46-1.75 / 1.30-1.73 | v2 PASS, v1 F/S above 1.5 for 2 seeds |
+| NN default (softplus + direct link, 30 structures, patience 150), 3 seeds | 1.06-1.09 / 1.06 / 0.98-1.00 | | 1.05-1.12 / 1.10 / 1.01-1.05 | PASS both, every seed |
+
+Every engine conserves energy as SW does (NVE std 0.012-0.015 meV/atom),
+except the failed Bayesian-ridge fit before the fix (0.096 / 0.282).
+
+**Bayesian ridge fix.**  On the new v2 set `bayes_ridge` first ended at
+14 / 38 / 13 sigma (training error as large), with the prior precision
+collapsed to 1.5e-11 after 22 iterations.  The SW-Si ACSF set has five
+exactly dependent columns (e.g. G5 with eta = 0, lambda = +1 plus
+lambda = -1 loses the angle), so G = A^T A has eigenvalues at round-off
+level; the MacKay update amplified the round-off in q along them
+(m = beta qU / (beta s + lam)), |m| grew, lam = gamma / |m|^2 fell, and the
+iteration settled on that degenerate point.  Eigen-directions below
+D * eps * max(s) are now dropped (they carry no information); v2 then
+gives 1.02 / 1.01 / 0.97.  A unit-scale reproduction was not found (the
+small SW sets converge correctly with and without the fix); the test
+`test_bayesian_ridge_ignores_directions_the_data_cannot_resolve` checks
+the property, and the v2 run above is the regression check.
+
+**Activation functions** (ELM 400 units with reg_search; NN [64, 64],
+patience 40, three seeds):
+- v2: every ELM activation 1.03-1.05 / 1.01-1.13 / 0.97-1.00 (plain and
+  direct link); NN softplus 1.08-1.25 / 1.08-1.11 / 0.99-1.15, tanh
+  1.02-1.34 / 1.20-1.30 / 1.09-1.24, silu / gelu / mish S 1.6-4.7.
+- v1: with the direct link every ELM activation passes (1.02-1.08 /
+  1.03-1.06 / 1.00-1.09); without it every one fails (tanh 2.4 / 3.4 /
+  4.5 at best).  NN: softplus 1.07-1.37 / 1.35-1.75 / 1.24-1.73 (closest),
+  tanh 2.1-4.8, silu / gelu / mish 90-254 in E.
+- The pattern of the first run holds: the activation hardly matters inside
+  the training range; outside it the direct link (ELM) and softplus (NN)
+  are what extrapolate.
+
+**NN batching and optimiser** (softplus, direct link, [64, 64], patience
+150, <= 1500 epochs, deterministic, seeds 42 / 1 / 2):
+
+| configuration | v2 E / F / S | v2 pass | v2 fit [s] | v1 E / F / S | v1 pass |
+|---|---|---|---|---|---|
+| Adam, ~256 rows | 1.07-1.17 / 1.05 / 0.98-1.02 | 3/3 | 258-502 | 1.09-1.41 / 1.12-1.13 / 1.22-2.43 | 1/3 |
+| Adam, 10 structures | 1.06-1.13 / 1.05 / 0.98-0.99 | 3/3 | 108-125 | 1.08-1.11 / 1.10-1.11 / 0.99-1.26 | 3/3 |
+| **Adam, 30 structures (default)** | 1.06-1.09 / 1.06 / 0.98-1.00 | 3/3 | 95-121 | 1.05-1.12 / 1.10 / 1.01-1.05 | 3/3 |
+| Adam, all structures | 1.12-1.13 / 1.13-1.14 / 1.03-1.05 | 3/3 | 117-135 | 1.27-1.56 / 2.11-2.17 / 2.17-2.46 | 0/3 |
+| L-BFGS, full batch | 1.04 / 1.03 / 0.98 | 3/3 | 335-540 | 1.49-1.56 / 1.11-1.15 / 3.06-3.16 | 0/3 |
+
+30 structures per batch remains the fastest configuration that passes
+every seed on both sets; decision 10 stands.
+
+**LightGBM (T3a)** does not involve SW and was not re-run.
