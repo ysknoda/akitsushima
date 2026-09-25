@@ -24,6 +24,7 @@ from .io_utils import (
 from .loss import generic_loss_function
 from .models import (
     ELMModel,
+    LinearModel,
     QuantizedELMModel,
     load_mlip_csv,
     load_weights_csv,
@@ -76,6 +77,7 @@ __all__ = [
     "ScaledForceEngine",
     "ELMModel",
     "QuantizedELMModel",
+    "LinearModel",
     "NNModel",
     "LightGBMModel",
     "load_mlip_csv",

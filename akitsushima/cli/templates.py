@@ -520,33 +520,75 @@ _YAML_ELM_DEFAULT = """\
 # akitsushima  --  Machine-learning potential fitting
 # Usage: akitsushima mlip mlip.yaml
 #
-# Available mlip.model choices: elm | qelm | nn | lgbm
+# Available mlip.model choices: elm | qelm | nn | linear | lgbm
 # The section below shows the default (ELM) configuration in full,
-# followed by commented-out examples for the other 3 model types.
+# followed by commented-out examples for the other model types.
 # Keys not relevant to the selected model are ignored.
+#
+# Model form (ADR-0004): elm / qelm / nn learn E/N = f(d) and fit every
+# F and S row as N grad f(d) . X (chain rule), so E, F and S come from one
+# energy function; linear is E/N = w . d + b (exact without the chain
+# rule).  lgbm regresses each row on its own and is not a force field.
+# Row weight on the squared residual: w_cat * w_unit^2 * w_user.
+#
+# Training data -- either
+#   (a) training_csv = a descriptor table (target,label,weight,<features>;
+#       see load_mlip_csv), e.g. from an external descriptor script; or
+#   (b) with mlip.descriptor set: training_csv = a structure list in the
+#       `fit` layout (target,label,weight,struct_idx; E in eV/atom, forces,
+#       Voigt stress xx yy zz yz zx xy compressive-positive) with
+#       <poscar_dir>/<k>/POSCAR.  ACSF descriptors are computed in-package
+#       and stored in the model file; the model can then run relax / md as
+#           potential: {type: MLIP, model: ./mlip_output/elm_model.npz}
 
 structure:
-  training_csv: training_data.csv   # see load_mlip_csv for the CSV format
+  training_csv: training_data.csv
+  # poscar_dir: ./training_set      # (b) only; default: training_csv's dir
 
 potential:
-  type:  ELM
-  r_cut: 5.0
-  species: [Si]
+  species: [Si]                     # (b): element list (Z order is applied)
 
 mlip:
   output_dir: ./mlip_output
-  model:      elm            # elm | qelm | nn | lgbm
+  model:      elm            # elm | qelm | nn | linear | lgbm
   n_hidden:   512
   activation: tanh
+  solver:     auto           # auto | direct | lsqr
+  row_independent: false     # true = pre-0.2.0a3 per-row form (not a force field)
   w_energy:   1.0
   w_forces:   0.1
   w_stress:   10.0
   reg:        1.0e-6
-  r0:         1.0
-  eps0:       0.01
+  r0:         1.0            # (b): F-row unit weight r0 [A]
+  eps0:       0.01           # (b): S-row unit weight eps0 * V
+  val_fraction: 0.2
   seed:       42
   verbose:    true
-  test_csv:   null
+  test_csv:   null           # same kind of file as training_csv
+  # (b) in-package descriptor.  Example for Si with Stillinger-Weber
+  # labels: r_cut = a * sigma = 1.80 * 2.0951 = 3.771 A (SW's own cutoff,
+  # Stillinger & Weber, PRB 31, 5262 (1985)); radial G2 centred every
+  # 0.2 A from 2.0 to 3.6 A with width 0.2 A (eta = 1/(2 * 0.2^2)).
+  # descriptor:
+  #   type:  acsf
+  #   r_cut: 3.771
+  #   g2: {eta: [12.5], rs: [2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.4, 3.6]}
+  #   # G5 (no r_jk term): with r_c = 3.771 A two neighbours of a Si atom
+  #   # are 3.84 A apart, so G4's fc(r_jk) would drop the bond angles.
+  #   g5: {eta: [0.0, 0.05], zeta: [1, 2, 4], lambda: [-1, 1]}
+  # write_table: false       # also write the descriptor table CSV
+
+# ----------------------------------------------------------------------
+# Example: model: linear  (E/N = w . d + b; methods ADR-0004 decision 9)
+# ----------------------------------------------------------------------
+# mlip:
+#   model:        linear
+#   method:       ridge     # ols | ridge | smooth_ridge | lasso |
+#                           # elastic_net | pls | bayes_ridge | ard
+#   alpha:        1.0e-6    # ridge / smooth_ridge / lasso / elastic_net
+#   l1_ratio:     0.5       # elastic_net
+#   n_components: 20        # pls
+#   alpha_search: null      # e.g. [1.0e-8, 1.0e-6, 1.0e-4]; pls: [5, 10, 20]
 
 # ----------------------------------------------------------------------
 # Example: model: nn  (PyTorch feedforward neural network)
@@ -558,14 +600,13 @@ mlip:
 #   # layer's width. [128, 64] -> 2 hidden layers; [64] -> 1; etc.
 #   hidden_layers: [128, 64]
 #   activation:    silu       # tanh | relu | gelu | silu | mish | softplus
+#   row_independent: false
 #   w_energy:      1.0
 #   w_forces:      0.1
 #   w_stress:      10.0
-#   r0:            1.0
-#   eps0:          0.01
 #   learning_rate: 1.0e-3
 #   epochs:        500
-#   batch_size:    256
+#   batch_size:    256        # rows per batch (whole structures)
 #   weight_decay:  1.0e-6
 #   early_stopping_patience: 30
 #   device:        auto      # auto | cpu | cuda
@@ -583,23 +624,25 @@ mlip:
 #   w_energy:   1.0
 #   w_forces:   0.1
 #   w_stress:   10.0
-#   r0:         1.0
-#   eps0:       0.01
 #   # Fixed (non-optimised) LightGBM parameters, merged with the
 #   # Optuna-selected values (learning_rate, num_leaves, max_depth,
-#   # min_data_in_leaf, bagging_fraction, feature_fraction,
-#   # min_gain_to_split, lambda_l1, lambda_l2, max_bin) before training.
+#   # min_data_in_leaf, bagging_fraction, feature_fraction, lambda_l1,
+#   # lambda_l2, max_bin) before training.  min_gain_to_split is fixed
+#   # at 0 (ADR-0004).
 #   lgbm_params:
 #     objective:       regression
 #     boosting:        gbdt
-#     num_iterations:  10000
+#     num_iterations:  100000   # early stopping ends training
 #     bagging_freq:    1
 #     min_data_in_bin: 3
+#     min_gain_to_split: 0.0
 #     metric:          rmse
 #     seed:            0
 #     verbosity:       -1
 #   optuna_trials:  100
 #   optuna_timeout: null      # seconds, null = no timeout
+#   optuna_storage: null      # e.g. sqlite:///lgbm_study.db (resumable)
+#   label_feature:  true      # row label (E/F/S) as a categorical feature
 #   early_stopping_rounds: 100
 #   seed:    42
 #   verbose: true

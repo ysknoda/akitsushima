@@ -58,7 +58,8 @@ class QuantizedELMModel(ELMModel):
                  n_bits          : int   = 3,
                  p_zero          : float = 0.5,
                  use_sparse_w    : bool  = True,
-                 verbose         : bool  = True):
+                 verbose         : bool  = True,
+                 row_independent : bool  = False):
 
         super().__init__(
             n_hidden         = n_hidden,
@@ -79,6 +80,7 @@ class QuantizedELMModel(ELMModel):
             rff_gamma        = rff_gamma,
             w_init_scale     = w_init_scale,
             verbose          = verbose,
+            row_independent  = row_independent,
         )
         if not (0 <= p_zero < 1):
             raise ValueError(f"p_zero must be in [0, 1), got {p_zero}")
@@ -250,18 +252,17 @@ class QuantizedELMModel(ELMModel):
             weight_csv   : Optional[str]         = None,
             val_fraction : float = 0.2,
             val_seed     : int   = 0,
+            struct_ids   : Optional[np.ndarray] = None,
+            n_atoms      : Optional[np.ndarray] = None,
             ) -> 'QuantizedELMModel':
         """
         Fit and quantise the ELM.
 
         Quantises the random hidden-layer weight matrix W to n_bits-bit
-        fixed-point, then delegates all training (Uncertainty Weighting,
-        weight composition, LSQR, score reporting) to :meth:`ELMModel.fit`
-        via ``super().fit()``.
-
-        As a result, ``self._sigma2_uw`` (Uncertainty Weighting sigma^2
-        per category) is set by :meth:`ELMModel.fit` and is accessible
-        on the QuantizedELMModel instance after fitting.
+        fixed-point, then delegates all training (weight composition,
+        chain-rule design rows, LSQR, score reporting) to
+        :meth:`ELMModel.fit` via ``super().fit()``.  The chain-rule rows use
+        the quantised W, so forces are derivatives of the quantised model.
 
         Parameters
         ----------
@@ -272,6 +273,7 @@ class QuantizedELMModel(ELMModel):
         weight_csv   : str or None -- path to user weight file.
         val_fraction : float
         val_seed     : int
+        struct_ids, n_atoms : optional CSV metadata columns (see ELMModel.fit).
 
         Returns
         -------
@@ -308,7 +310,7 @@ class QuantizedELMModel(ELMModel):
             qs = self._quant_stats
             print(f'  Quantization ({t_q*1000:.0f} ms):  '
                   f'levels={qs["levels"]}  sparsity={qs["sparsity_W"]:.3f}')
-        # Delegate training to ELMModel.fit (UW, weights, LSQR, scoring)
+        # Delegate training to ELMModel.fit (weights, LSQR, scoring)
         _orig_seed = self.seed
         self.seed  = None   # skip W/b re-init inside ELMModel.fit
         try:
@@ -316,7 +318,9 @@ class QuantizedELMModel(ELMModel):
                         weights      = weights,
                         weight_csv   = weight_csv,
                         val_fraction = val_fraction,
-                        val_seed     = val_seed)
+                        val_seed     = val_seed,
+                        struct_ids   = struct_ids,
+                        n_atoms      = n_atoms)
         finally:
             self.seed = _orig_seed
         return self
@@ -490,7 +494,8 @@ class QuantizedELMModel(ELMModel):
                  p_zero          = np.array(self.p_zero),
                  use_sparse_w    = np.array(self.use_sparse_w),
                  W_q_dense       = self._W_q_dense,
-                 W_scale         = self._W_scale)
+                 W_scale         = self._W_scale,
+                 **self._extra_state())
         if self.verbose:
             print(f"  QuantizedELMModel saved -> {path}.npz")
 
@@ -537,6 +542,7 @@ class QuantizedELMModel(ELMModel):
         obj._D         = obj._W.shape[0]
         obj._W_q_dense = npz['W_q_dense']
         obj._W_scale   = npz['W_scale']
+        obj._restore_extra_state(npz)
         obj._fitted    = True
         # A reloaded model has no full-precision reference available
         # (it was never saved); quantization_error() falls back to

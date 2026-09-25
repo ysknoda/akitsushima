@@ -771,7 +771,9 @@ def test_lightgbm_save_load_round_trip_without_pickle(tmp_path, monkeypatch):
             assert npz[key].dtype != object
 
     reloaded = LightGBMModel.load(path)
-    np.testing.assert_allclose(reloaded.predict(X), model.predict(X))
+    # The row label is a model feature since 0.2.0a3 (ADR-0004).
+    np.testing.assert_allclose(reloaded.predict(X, labels),
+                               model.predict(X, labels))
 
 
 # ===========================================================================

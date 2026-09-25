@@ -12,7 +12,16 @@
 > the default is now SW's own 1.20), removes a spurious sign flip from
 > `VASP_KB_TO_EV_ANG3`, fixes variable-cell RFO, and now refuses
 > multi-species SW parameters and `fit` optimiser choices it used to
-> accept and get wrong.
+> accept and get wrong. 0.2.0a3 fixes phonon frequencies (minimum-image
+> force constants, the ASR and the unit conversions), the GCMC deletion
+> acceptance, and the Green-Kubo heat flux and seeding (ADR-0003); and
+> changes every MLIP fit (ADR-0004): ELM / QELM / NN now learn one energy
+> whose derivatives give the F and S rows (chain rule; `row_independent:
+> true` restores the old per-row form), all models weight the squared
+> residual by w_cat x w_unit^2 x w_user (the ELM Uncertainty Weighting is
+> gone), and LightGBM uses the row label as a feature, standardises each
+> label and searches a new space. LightGBM files from earlier versions
+> must be refitted.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -43,8 +52,10 @@ library.
 **Machine-learning potentials**
 - `ELMModel` — Extreme Learning Machine (single hidden layer)
 - `QuantizedELMModel` — ELM with quantised hidden-layer weights
+- `LinearModel` — linear model: OLS, ridge, smoothness-penalised ridge, LASSO, Elastic Net, PLS, Bayesian ridge, ARD
 - `NNModel` — PyTorch feed-forward network (lazily imported)
 - `LightGBMModel` — Gradient-boosted trees + Optuna search (lazily imported)
+- `ACSF` — atom-centred symmetry functions G2 / G4 / G5 with analytic position and cell derivatives
 
 ### Simulation capabilities
 
@@ -153,7 +164,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `esm`    | Effective screening medium |
 | `phonon` | Phonon band structure, DOS, Debye temperature, free energy |
 | `kappa`  | Thermal conductivity (Green-Kubo + optional Slack-Debye) |
-| `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / LightGBM) |
+| `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear / LightGBM) |
 | `fit`    | Fit a classical potential (LJ / Morse / Born-Mayer / Buckingham / Stillinger-Weber / Tersoff) |
 
 ### Fitting a classical potential
@@ -210,6 +221,34 @@ If `L-BFGS-B` stops early from a poor starting point -- it stalled at a
 loss of 14 on an LJ test where the others reached 1e-14 -- rerun with
 `Nelder-Mead` or `COBYQA`, which do not rely on a finite-difference
 gradient.
+
+### Fitting a machine-learning potential
+
+`akitsushima mlip mlip.yaml` (template: `akitsushima mlip --dump-default`)
+trains on a table of E, F and S rows (`load_mlip_csv`):
+`target, label, weight, <descriptors>`, where an E row holds the structure
+descriptor d (target E/N), an F row X = -dd/dr and an S row
+X = -(1/V) dd/dT.  Per `docs/adr/0004`:
+
+- **ELM / QELM / NN** learn E/N = f(d) and fit every F and S row as
+  N grad f(d) . X of its own structure (chain rule), so one energy function
+  gives E, F and S.  `row_independent: true` restores the pre-0.2.0a3
+  per-row regression, which is not a force field.
+- **linear** is E/N = w . d + b; with d the per-atom average of atomic
+  descriptors it is an atom-centred linear potential.
+- **lgbm** regresses each row on its own (label as a feature); trees give
+  no conservative force, so it is not a force field.
+- Every model weights the squared residual by w_cat x w_unit^2 x w_user.
+
+With `mlip.descriptor` set (ACSF), `training_csv` is a structure list in the
+`fit` layout above and the descriptors are computed in-package and stored
+in the model file.  Such a model then drives `relax` / `md` / ... with
+
+```yaml
+potential:
+  type:  MLIP
+  model: ./mlip_output/elm_model.npz
+```
 
 ## Project layout
 

@@ -63,3 +63,16 @@ hessian).  Trees are piecewise constant, so -dE/dr is zero almost everywhere
 and jumps at split boundaries: this gives energies only, never forces for
 `relax`/`md`.  Candidate use: an energy correction (Delta-learning) on top
 of a force-field model.
+
+## FW-3  Further linear methods for the tabular MLIP
+
+Recorded 2026-09-25 (ADR-0004, decision 9 lists what is implemented now).
+
+- **Group LASSO**: keep or drop whole descriptor blocks (RDF_A-B, ADF...),
+  showing which element pairs / angle types matter.
+- **Principal-component regression**: PLS's counterpart that picks
+  components without looking at the targets; a reference for PLS.
+- **Huber regression** (iteratively reweighted): robust to outlying
+  structures in real DFT data (e.g. poorly converged SCF).  Its benefit
+  cannot be shown on noise-free labels from a known potential, so it waits
+  for the real-data stage.

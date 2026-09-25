@@ -98,7 +98,8 @@ def get_by_yaml_type(pot_type: str) -> PotentialSpec:
     except KeyError:
         raise ValueError(
             f"Unknown potential type '{pot_type}'. "
-            f"Supported: SW, Tersoff, LJ, Morse, BornMayer, EAM, Buckingham")
+            f"Supported: SW, Tersoff, LJ, Morse, BornMayer, EAM, Buckingham, "
+            f"MLIP")
 
 
 def names() -> list:
@@ -687,3 +688,22 @@ def _build_from_yaml_eam(pot_cfg):
 
 
 register(PotentialSpec("eam", build_from_yaml=_build_from_yaml_eam))
+
+
+# ============================================================================
+#  MLIP (YAML-bridge lookup only; trained by `akitsushima mlip`)
+# ============================================================================
+
+def _build_from_yaml_mlip(pot_cfg):
+    """``potential: {type: MLIP, model: path}`` (ADR-0004, decision 6).
+    The descriptor and element list come from the model file."""
+    from .mlip_engine import MLIPForceField
+    path = pot_cfg.get("model")
+    if not path:
+        raise ValueError("potential.type MLIP needs potential.model: the "
+                         "model file written by `akitsushima mlip`.")
+    fn = MLIPForceField.from_file(path)
+    return fn, fn.r_cut
+
+
+register(PotentialSpec("mlip", build_from_yaml=_build_from_yaml_mlip))

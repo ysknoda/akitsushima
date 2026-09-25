@@ -20,7 +20,12 @@ from typing import Callable, Dict, Optional, Tuple
 
 import numpy as np
 
-from .csv_io import load_mlip_csv, load_weights_csv, structure_grouped_split
+from .csv_io import (
+    build_structure_index,
+    load_mlip_csv,
+    load_weights_csv,
+    structure_grouped_split,
+)
 
 __all__ = ["ELMModel"]
 
@@ -38,15 +43,18 @@ class ELMModel:
     Input  : descriptor vector x in R^D
     Hidden : h(x) = sigma(x W + b)  in R^{N_h}
              W in R^{D x N_h}, b in R^{N_h}  -- fixed random (ELM paradigm)
-    Output : y_hat = h(x) . beta    beta in R^{N_h}  -- learned by LSQR
+    Output : E/N = f(d) = h(d) . beta + beta0   -- learned by LSQR
 
-    PI weighting
-    ------------
-    Rows with label "E" are weighted by w_energy,
-    rows with label "F" by w_forces,
-    rows with label "S" by w_stress.
-    Three additional weight factors are combined in fit(); see that method
-    for the complete formula.
+    Every F and S row is trained as N grad f(d) . X with d the descriptor
+    of the row's structure (chain rule, ADR-0004); see :meth:`fit`.
+    ``row_independent=True`` restores the pre-0.2.0a3 form y = h(x) . beta
+    applied to each row alone.
+
+    Weighting
+    ---------
+    Each row's squared residual is weighted by w_cat * w_unit^2 * w_user
+    (category weight w_energy / w_forces / w_stress, CSV col 2, optional
+    weights.csv); see :meth:`fit`.
 
     CSV format  (4-column layout)
     ------------------------------
@@ -97,8 +105,8 @@ class ELMModel:
     w_energy       : category weight applied to 'E' rows.
     w_forces       : category weight applied to 'F' rows.
     w_stress       : category weight applied to 'S' rows.
-    r0             : typical atomic displacement [A] for UW and F-row scaling.
-    eps0           : typical cell strain [dimensionless] for UW and S-row scaling.
+    r0, eps0       : recorded with the model for reference only; the unit
+                     weights themselves come from CSV col 2.
     reg            : Tikhonov regularisation lambda (LSQR damp = sqrt(lambda)).
     lsqr_maxiter   : maximum LSQR iterations.
     lsqr_atol      : LSQR convergence tolerance.
@@ -131,7 +139,9 @@ class ELMModel:
                  rff_gamma       : Optional[float] = None,
                  w_init_scale    : Optional[float] = None,
                  verbose         : bool  = True,
-                 masses          : Optional[np.ndarray] = None):
+                 masses          : Optional[np.ndarray] = None,
+                 row_independent : bool  = False,
+                 solver          : str   = 'auto'):
         """
         Parameters
         ----------
@@ -147,23 +157,12 @@ class ELMModel:
             Category weight applied to F rows in the loss function.
         w_stress   : float
             Category weight applied to S rows in the loss function.
-        r0         : float [[A]]
-            Typical atomic displacement used in Uncertainty Weighting
-            to rescale force residuals to eV:
-
-                r_i(F) = w_unit_i * y_i * r0   [eV/[A] * [A] = eV]
-
-            This should match the F-row weight in the training CSV
-            (col 2 of :func:`load_mlip_csv`), i.e. ``CSV F weight = r0``.
-            Default 1.0 [A] (no rescaling).
-        eps0       : float [dimensionless]
-            Typical cell strain used in Uncertainty Weighting to
-            rescale stress residuals to eV:
-
-                r_i(S) = w_unit_i * y_i * eps0   [eV/[A]^3 * epsilon0.V = eV]
-
-            This should be consistent with the S-row weight in the CSV:
-            ``CSV S weight = eps0 * V``.  Default 1.0 (no extra scaling).
+        r0, eps0   : float
+            Typical displacement [A] and strain used to build the CSV's
+            unit weights (F row: r0, S row: eps0 * V).  Kept with the
+            model for reference; training reads the weights from CSV
+            col 2 and does not rescale by these again (the former
+            Uncertainty Weighting did, see ADR-0003 M1).
         reg        : float
             Ridge (L2) regularisation coefficient lambda for LSQR.
         lsqr_maxiter : int
@@ -192,6 +191,18 @@ class ELMModel:
             Ignored in RFF mode (rff_gamma plays the same role).
         verbose    : bool
             Print training progress and score table.
+        row_independent : bool
+            False (default): chain-rule training, a force field.
+            True: pre-0.2.0a3 per-row regression (not a force field).
+        solver     : str
+            ``'direct'``: normal equations (A^T A + reg I) beta = A^T t,
+            accumulated chunk by chunk and solved by Cholesky -- the same
+            minimiser as LSQR with damp = sqrt(reg), in one pass.
+            ``'lsqr'``: iterative LSQR (the pre-0.2.0a3 solver).
+            ``'auto'`` (default): direct when there are at most 6000
+            output weights, LSQR otherwise.  The chain-rule system mixes
+            rows of very different scale; LSQR then often stops at its
+            iteration limit (flag 7) short of the minimum.
         """
         from scipy.sparse.linalg import lsqr as _lsqr, LinearOperator as _LO
         self._lsqr = _lsqr
@@ -215,11 +226,22 @@ class ELMModel:
         self.rff_gamma        = rff_gamma
         self.w_init_scale     = w_init_scale   # None -> Glorot at fit() time
         self.verbose          = verbose
+        self.row_independent  = bool(row_independent)
+        if solver not in ('auto', 'direct', 'lsqr'):
+            raise ValueError(
+                f"ELMModel: solver must be 'auto', 'direct' or 'lsqr', "
+                f"got {solver!r}.")
+        self.solver           = solver
+        # Descriptor the model was trained on, when generated in-package
+        # (JSON string; empty for external CSV descriptors).  Needed to
+        # run the model as a relax/md engine (ADR-0004, decision 6).
+        self.descriptor_config = ""
 
         # Set by fit()
         self._W    : Optional[np.ndarray] = None
         self._b    : Optional[np.ndarray] = None
         self._beta : Optional[np.ndarray] = None
+        self._beta0: float                = 0.0
         self._D    : Optional[int]        = None
         self._fitted = False
 
@@ -444,6 +466,7 @@ class ELMModel:
 
         A = self._LO((N_tr, N_h),
                      matvec=matvec, rmatvec=rmatvec, dtype=float)
+        A.row_blocks = lambda: iter([(slice(0, N_tr), H_w)])
         return A
 
     def _build_operator_full_mf(self,
@@ -526,7 +549,83 @@ class ELMModel:
 
         A = self._LO((N_tr, N_h),
                      matvec=matvec, rmatvec=rmatvec, dtype=float)
+        A.row_blocks = lambda: ((slice(s, min(s + chunk, N_tr)),
+                                 _h_chunk(X_tr_n[s:s + chunk],
+                                          w_tr[s:s + chunk]))
+                                for s in range(0, N_tr, chunk))
         return A
+
+    # ------------------------------------------------------------------
+    #  Weighting (ADR-0004, decision 2)
+    # ------------------------------------------------------------------
+    def _row_weights(self, labels, w_unit, w_user) -> np.ndarray:
+        """Weight on each row's SQUARED residual: w_cat * w_unit^2 * w_user."""
+        _wmap = {'E': self.w_energy, 'F': self.w_forces, 'S': self.w_stress}
+        w_cat = np.array([_wmap.get(c, 1.0) for c in labels], dtype=np.float64)
+        return w_cat * w_unit ** 2 * w_user
+
+    # ------------------------------------------------------------------
+    #  Chain-rule design rows (ADR-0004, decision 1)
+    # ------------------------------------------------------------------
+    def _W_eff(self) -> np.ndarray:
+        """Dense hidden-layer weights actually used by _hidden()."""
+        return self._W
+
+    def _n_out(self) -> int:
+        """Number of output weights (hidden units, plus the E-row bias
+        in chain-rule mode)."""
+        n_h = (2 * self._W.shape[1] if self.activation == 'rff'
+               else self._W.shape[1])
+        return n_h if self.row_independent else n_h + 1
+
+    def _preact(self, X_norm: np.ndarray) -> np.ndarray:
+        """Z = X_norm W (+ b), float64, with the effective weights."""
+        Z = X_norm @ self._W_eff()
+        if self.activation != 'rff':
+            Z = Z + self._b
+        return Z
+
+    def _hidden_from_Z(self, Z: np.ndarray) -> np.ndarray:
+        if self.activation == 'rff':
+            return np.hstack([np.cos(Z), np.sin(Z)]) / np.sqrt(Z.shape[1])
+        return self._act(Z)
+
+    def _hidden_dir(self, Z: np.ndarray, V: np.ndarray) -> np.ndarray:
+        """Directional derivative of the hidden layer: dh = h'(Z) (*) V,
+        where V = (direction / X_std) W is the pre-activation change."""
+        if self.activation == 'rff':
+            s = 1.0 / np.sqrt(Z.shape[1])
+            return np.hstack([-np.sin(Z) * V, np.cos(Z) * V]) * s
+        return self._dact(Z) * V
+
+    def _chain_rows(self, X_rows, lab_rows, sid_rows, Zs, n_at) -> np.ndarray:
+        """
+        Design matrix of the given rows, one column per output weight
+        (hidden units, then the E-row bias):
+
+            E row : [ h(z_s),                         1 ]
+            F/S   : [ N_s h'(z_s) (*) ((X / X_std) W), 0 ]
+
+        z_s is the pre-activation of the row's structure descriptor d_s.
+        An F row's X is -dd/dr and an S row's X is -(1/V) dd/dT, so these
+        rows are exactly N grad f(d) . X for f(d) = beta . h(d) + beta0.
+        """
+        n = len(lab_rows)
+        A = np.zeros((n, self._n_out()), dtype=np.float64)
+        isE = lab_rows == 'E'
+        if isE.any():
+            A[isE, :-1] = self._hidden_from_Z(Zs[sid_rows[isE]])
+            A[isE, -1] = 1.0
+        isD = ~isE
+        if isD.any():
+            V = (X_rows[isD] / self._X_std) @ self._W_eff()
+            A[isD, :-1] = (self._hidden_dir(Zs[sid_rows[isD]], V)
+                           * n_at[sid_rows[isD]][:, None])
+        return A
+
+    def _structure_Z(self, X, e_row) -> np.ndarray:
+        """Pre-activations of every structure's descriptor (its E row)."""
+        return self._preact(self._normalise(X[e_row]))
 
     # ------------------------------------------------------------------
     def fit(self,
@@ -537,28 +636,40 @@ class ELMModel:
             weight_csv   : Optional[str]         = None,
             val_fraction : float = 0.2,
             val_seed     : int   = 0,
+            struct_ids   : Optional[np.ndarray] = None,
+            n_atoms      : Optional[np.ndarray] = None,
             ) -> 'ELMModel':
         r"""
-        Fit the ELM using three combined weight factors.
+        Fit the ELM output weights by weighted linear least squares.
 
-        Total per-sample weight applied to the squared residual:
+        Weight on each row's squared residual (ADR-0004, decision 2)::
 
-            w_total_i = w_cat_i  x  w_unit_i  x  (1/sigma_c^2)  x  w_user_i
+            w_i = w_cat_i  x  w_unit_i^2  x  w_user_i
 
-        (1) w_cat    : category weight (w_energy / w_forces / w_stress)
-                       set in the ELMModel constructor.
-        (2) w_unit   : unit-normalisation weight from CSV col 2.
-                       Converts each squared residual to eV^2:
-                         E: (w_unit * y)^2 = (N * y [eV/atom])^2 = (eV)^2
-                         F: (w_unit * y)^2 = (r0 * y [eV/A])^2  = (eV)^2
-                         S: (w_unit * y)^2 = (eps0*V * y [eV/A^3])^2 = (eV)^2
-        (3) 1/sigma_c^2 : Uncertainty Weighting (Kendall et al. NeurIPS 2018).
-                       Estimated from the **training split** for each
-                       category c in {E, F, S}:
-                         sigma2_c = mean( (w_unit_i * y_i * scale_c)^2 )
-                       where scale_c = 1 (E), r0 (F), eps0 (S).
-                       Normalised so geometric mean of sigma2 = 1.
-        (4) w_user   : block-wise user weight from weight_csv file.
+        (1) w_cat  : category weight (w_energy / w_forces / w_stress).
+        (2) w_unit : unit-normalisation weight from CSV col 2, which makes
+                     every squared residual eV^2:
+                       E: (N * dy [eV/atom])^2,  F: (r0 * dF)^2,
+                       S: (eps0 * V * dsigma)^2.
+        (3) w_user : block-wise user weight from ``weight_csv``.
+
+        Each row of the least-squares system is multiplied by sqrt(w_i).
+        (The former Uncertainty Weighting, which applied 1/sigma^2 to the
+        residual and squared w_unit a second time, is removed: ADR-0003
+        finding M1.)
+
+        Model form
+        ----------
+        Default (chain rule, ADR-0004 decision 1): E/N = f(d) =
+        beta . h(d) + beta0, and each F/S row is N grad f(d) . X with d
+        the descriptor of the row's structure -- see :meth:`_chain_rows`
+        and :func:`~akitsushima.fitting.models.csv_io.load_mlip_csv` for
+        the descriptor convention.  All rows are linear in (beta, beta0),
+        so E, F and S are solved together in closed form.
+
+        ``row_independent=True`` (constructor): the pre-0.2.0a3 form
+        y = beta . h(x) applied to every row by itself.  It is not a
+        force field and exists to reproduce old fits and for comparison.
 
         Parameters
         ----------
@@ -567,22 +678,17 @@ class ELMModel:
         X            : (N, D)      descriptor feature matrix.
         weights      : (N,) float or None
             Unit-normalisation weights from load_mlip_csv col 2.
-            Recommended: N for E rows, r0 for F rows, eps0*V for S rows.
             None -> all 1.0 (no unit normalisation).
         weight_csv   : str or None
             Path to user weight file (weights.csv).  None -> all 1.0.
         val_fraction : float
-            Fraction of **structures** (not rows) held out for validation.
-            Since the F17 fix the split is grouped by structure -- whole
-            structures go to training or to validation, never both -- so
-            the resulting *row* fraction is only approximately
-            ``val_fraction`` when structures have different atom counts.
-            Structure boundaries are inferred from ``labels`` (each 'E' row
-            starts a new structure); see
-            :func:`~akitsushima.fitting.models.csv_io.structure_grouped_split`.
-            A single-structure dataset cannot be split and yields an empty
-            validation set with a warning.
+            Fraction of **structures** (not rows) held out for validation;
+            the split is grouped by structure (F17, see
+            :func:`~akitsushima.fitting.models.csv_io.structure_grouped_split`).
         val_seed     : int    RNG seed for the train/val split.
+        struct_ids   : (N,) int or None -- explicit structure id per row
+            (CSV ``struct_id`` column); None opens a structure at each E row.
+        n_atoms      : (N,) int or None -- CSV ``n_atoms`` column.
 
         Returns
         -------
@@ -590,9 +696,9 @@ class ELMModel:
         """
         import time as _time
 
+        labels = np.array([str(c).strip().upper() for c in labels])
         N, D = X.shape
 
-        # (1) Unit-normalisation weights
         if weights is not None:
             w_unit = np.asarray(weights, dtype=np.float64)
             if w_unit.shape != (N,):
@@ -605,58 +711,50 @@ class ELMModel:
         else:
             w_unit = np.ones(N, dtype=np.float64)
 
-        # (3) User weights from weights.csv
         if weight_csv is not None:
             w_user = load_weights_csv(weight_csv, n_total=N,
                                        verbose=self.verbose)
         else:
             w_user = np.ones(N, dtype=np.float64)
 
+        w_row = self._row_weights(labels, w_unit, w_user)
+
+        if not self.row_independent:
+            sid, e_row, n_at = build_structure_index(
+                labels, struct_ids, n_atoms, caller='ELMModel.fit')
+
         mode_str = ('full MF' if self.full_matrix_free else 'cached H')
+        form_str = ('row-independent' if self.row_independent
+                    else 'chain rule')
         if self.verbose:
-            print(f'\nELM fitting  [{mode_str}]')
+            print(f'\nELM fitting  [{mode_str}, {form_str}]')
             print(f'  Samples      : {N}  (D={D}  N_h={self.n_hidden})')
             print(f'  Category wts : wE={self.w_energy}  '
                   f'wF={self.w_forces}  wS={self.w_stress}')
             print(f'  reg={self.reg}  activation={self.activation}')
 
-        # Train / val split, grouped by structure.
-        #
-        # Bug-fix note (F17): this used to be a plain row-wise shuffle,
-        #     idx_all = np.random.default_rng(val_seed).permutation(N)
-        # over the N CSV *rows*.  Since one structure contributes
-        # 1 E + 3N_atoms F + 6 S rows that are all derived from the same
-        # atomic configuration (F and S are spatial derivatives of the very
-        # energy the E row records), that put essentially every structure on
-        # both sides of the split -- measured at 8/8 structures leaked on a
-        # synthetic 8-structure set -- so the reported validation error
-        # measured interpolation within already-seen configurations rather
-        # than generalisation.  structure_grouped_split() assigns whole
-        # structures instead; see its docstring in csv_io.py for the
-        # boundary-inference rules and the edge cases (single-structure
-        # dataset, file with no E rows, rows before the first E row).
+        # Train / val split, grouped by structure (F17): whole structures
+        # go to one side, since the 1 E + 3N F + 6 S rows of a structure
+        # all derive from one configuration.
         idx_train, idx_val = structure_grouped_split(
             labels, val_fraction=val_fraction, val_seed=val_seed,
-            caller='ELMModel.fit')
+            caller='ELMModel.fit', struct_ids=struct_ids)
         n_val = int(idx_val.size)
-
-        X_tr      = X[idx_train]
-        y_tr      = targets[idx_train]
-        cat_tr    = labels[idx_train]
-        w_unit_tr = w_unit[idx_train]
-        w_user_tr = w_user[idx_train]
-        X_va      = X[idx_val]       if n_val else None
-        y_va      = targets[idx_val]  if n_val else None
-        cat_va    = labels[idx_val]   if n_val else None
 
         if self.verbose:
             print(f'  Train/val split: train={len(idx_train)}  val={n_val}')
 
-        # Normalise descriptors
-        self._X_mean = X_tr.mean(axis=0)
-        self._X_std  = X_tr.std(axis=0)
+        # Descriptor normalisation.  In chain-rule mode the statistics are
+        # those of the structure descriptors d (E rows); F/S rows hold
+        # derivatives of d, which live in a different space.
+        if self.row_independent:
+            X_stat = X[idx_train]
+        else:
+            tr_struct = np.unique(sid[idx_train])
+            X_stat = X[e_row[tr_struct]]
+        self._X_mean = X_stat.mean(axis=0)
+        self._X_std  = X_stat.std(axis=0)
         self._X_std[self._X_std < 1e-12] = 1.0
-        X_tr_n = self._normalise(X_tr)
         self._D = D
 
         # Initialise random hidden layer (fixed)
@@ -670,7 +768,6 @@ class ELMModel:
                            else float(np.sqrt(D / 2.0)))
                 self._W    = rng.standard_normal((D, N_omega)) / gamma
                 self._b    = None
-                actual_N_h = 2 * N_omega
             else:
                 if self.w_init_scale is not None:
                     scale = float(self.w_init_scale)
@@ -678,210 +775,213 @@ class ELMModel:
                     scale = float(np.sqrt(2.0 / (D + self.n_hidden)))
                 self._W    = rng.standard_normal((D, self.n_hidden)) * scale
                 self._b    = rng.standard_normal(self.n_hidden) * scale
-                actual_N_h = self.n_hidden
-        else:
-            # W and b already set by caller; determine actual_N_h
-            if self.activation == 'rff':
-                actual_N_h = 2 * self._W.shape[1]
-            else:
-                actual_N_h = self._W.shape[1]
 
-        # (2) Uncertainty Weighting (Kendall et al. 2018)
-        # Always computed from the training split, regardless of weight_csv.
-        # Delegate sigma2 computation to the shared _compute_sigma2 helper.
-        w_uw_tr = np.ones(len(idx_train), dtype=np.float64)
-        sigma2  = self._compute_sigma2(y_tr, cat_tr, w_unit_tr)
-
-        log_mean_s2 = float(np.mean([np.log(sigma2[c]) for c in ('E','F','S')]))
-        norm_f      = np.exp(log_mean_s2)
-        for c in ('E', 'F', 'S'):
-            mask = cat_tr == c
-            if mask.any():
-                w_uw_tr[mask] = norm_f / sigma2[c]
+        mult_tr = np.sqrt(w_row[idx_train])
+        t_vec   = mult_tr * targets[idx_train]
+        N_tr    = len(idx_train)
+        N_out   = self._n_out()
 
         if self.verbose:
-            print(f'  Uncertainty Weighting (Kendall et al. 2018)'
-                  f'  [estimated from training split]:')
+            print('  Row weights w_cat * w_unit^2 * w_user (training set):')
             for c in ('E', 'F', 'S'):
-                mask = cat_tr == c
+                mask = labels[idx_train] == c
                 if mask.any():
-                    print(f'    sigma2[{c}] = {sigma2[c]:.4e}'
-                          f'    w_uw[{c}] = {w_uw_tr[mask][0]:.4g}')
-
-        self._sigma2_uw = sigma2
-
-        # Compose total weight: w_cat * w_unit * w_uw * w_user
-        _wmap    = {'E': self.w_energy, 'F': self.w_forces, 'S': self.w_stress}
-        w_cat_tr = np.array([_wmap.get(c, 1.0) for c in cat_tr])
-        w_tr     = w_cat_tr * w_unit_tr * w_uw_tr * w_user_tr
-
-        if self.verbose:
-            print('  Combined weights (training set):')
-            for c in ('E', 'F', 'S'):
-                mask = cat_tr == c
-                if mask.any():
-                    wc = w_tr[mask]
+                    wc = w_row[idx_train][mask]
                     print(f'    [{c}]  mean={wc.mean():.4e}  '
                           f'min={wc.min():.4e}  max={wc.max():.4e}')
-
-        t_vec = w_tr * y_tr
-
-        # Build LinearOperator
-        N_h  = actual_N_h
-        N_tr = len(idx_train)
-        if self.verbose:
-            print(f'  Building LinearOperator (N_eq={N_tr}  N_h={N_h}) ...')
+            print(f'  Building LinearOperator (N_eq={N_tr}  N_out={N_out}) ...')
 
         t_build0 = _time.perf_counter()
-        if self.full_matrix_free:
-            A = self._build_operator_full_mf(X_tr_n, w_tr)
+        if self.row_independent:
+            X_tr_n = self._normalise(X[idx_train])
+            if self.full_matrix_free:
+                A = self._build_operator_full_mf(X_tr_n, mult_tr)
+            else:
+                A = self._build_operator_cached(X_tr_n, mult_tr)
         else:
-            A = self._build_operator_cached(X_tr_n, w_tr)
+            Zs = self._structure_Z(X, e_row)
+            rows = (X[idx_train], labels[idx_train], sid[idx_train])
+            A = self._build_chain_operator(rows, Zs, n_at, mult_tr)
         t_build = _time.perf_counter() - t_build0
 
         if self.verbose:
             print(f'  Operator ready in {t_build*1000:.0f} ms')
             print(f'  Running LSQR (maxiter={self.lsqr_maxiter}) ...')
 
-        # LSQR
+        use_direct = (self.solver == 'direct'
+                      or (self.solver == 'auto' and N_out <= 6000))
         t_lsqr0 = _time.perf_counter()
-        result   = self._lsqr(A, t_vec,
-                               damp     = np.sqrt(self.reg),
-                               iter_lim = self.lsqr_maxiter,
-                               atol     = self.lsqr_atol,
-                               btol     = self.lsqr_atol,
-                               show     = False)
+        if use_direct:
+            result = self._solve_direct(A, t_vec)
+        else:
+            result = self._lsqr(A, t_vec,
+                                damp     = np.sqrt(self.reg),
+                                iter_lim = self.lsqr_maxiter,
+                                atol     = self.lsqr_atol,
+                                btol     = self.lsqr_atol,
+                                show     = False)
         t_lsqr  = _time.perf_counter() - t_lsqr0
 
-        self._beta   = result[0]
-        flag         = result[1]
-        itn          = result[2]
-        rnorm        = result[3]
+        coef = result[0]
+        if self.row_independent:
+            self._beta, self._beta0 = coef, 0.0
+        else:
+            self._beta, self._beta0 = coef[:-1], float(coef[-1])
+        flag, itn, rnorm = result[1], result[2], result[3]
         self._fitted = True
 
+        self._solver_info = {'solver': 'direct' if use_direct else 'lsqr',
+                             'flag': int(flag), 'iter': int(itn),
+                             'rnorm': float(rnorm), 'time_s': t_lsqr}
         if self.verbose:
-            t_ms = t_lsqr / itn * 1000 if itn > 0 else 0.0
-            print(f'  LSQR: flag={flag}  iter={itn}  r={rnorm:.4e}  '
-                  f'total={t_lsqr:.1f}s  ({t_ms:.1f} ms/iter)')
+            if use_direct:
+                print(f'  Direct solve: r={rnorm:.4e}  total={t_lsqr:.2f}s')
+            else:
+                t_ms = t_lsqr / itn * 1000 if itn > 0 else 0.0
+                print(f'  LSQR: flag={flag}  iter={itn}  r={rnorm:.4e}  '
+                      f'total={t_lsqr:.1f}s  ({t_ms:.1f} ms/iter)')
 
-        # ScoreCards
-        train_sc = self._score(y_tr, self.predict(X_tr), cat_tr, 'train')
-        val_sc   = (self._score(y_va, self.predict(X_va), cat_va, 'val')
+        def _sub(idx):
+            return dict(labels=labels[idx], X=X[idx],
+                        struct_ids=(None if struct_ids is None
+                                    else np.asarray(struct_ids)[idx]),
+                        n_atoms=(None if n_atoms is None
+                                 else np.asarray(n_atoms)[idx]))
+
+        train_sc = self._score(targets[idx_train],
+                               self.predict_table(**_sub(idx_train)),
+                               labels[idx_train], 'train')
+        val_sc   = (self._score(targets[idx_val],
+                                self.predict_table(**_sub(idx_val)),
+                                labels[idx_val], 'val')
                     if n_val else None)
         self._train_sc = train_sc
         self._val_sc   = val_sc
-        self._print_scores(train_sc, val_sc)
+        if self.verbose:
+            self._print_scores(train_sc, val_sc)
 
         return self
 
-    def _compute_sigma2(self,
-                         targets : np.ndarray,
-                         labels  : np.ndarray,
-                         weights : np.ndarray,
-                         ) -> dict:
+    def _solve_direct(self, A, t_vec):
         """
-        Compute Uncertainty Weighting sigma^2 per category.
-
-        sigma2_c = mean( (w_unit_i * y_i * scale_c)^2 )
-        where scale_c = 1 (E), r0 (F), eps0 (S).
-
-        Normalised so that geometric mean of sigma2_{E,F,S} = 1,
-        which preserves the overall loss scale while redistributing
-        emphasis between categories.
-
-        Parameters
-        ----------
-        targets : (N,) float  -- target values.
-        labels  : (N,) str    -- 'E', 'F', or 'S'.
-        weights : (N,) float  -- unit-normalisation weights (CSV col 2).
-
-        Returns
-        -------
-        dict with keys 'E', 'F', 'S' -> sigma2 values (float, > 0).
+        Minimise ||A beta - t||^2 + reg ||beta||^2 through the normal
+        equations G = A^T A, accumulated over the operator's row blocks
+        (one block in cached mode; chunks in full matrix-free mode).
+        Returns an LSQR-shaped tuple (beta, flag, iter, rnorm).
         """
-        _scale = {'E': 1.0, 'F': self.r0, 'S': self.eps0}
-        sigma2: dict = {}
-        for c in ('E', 'F', 'S'):
-            mask = np.asarray(labels) == c
-            if not mask.any():
-                sigma2[c] = 1.0
-                continue
-            rescaled  = (np.asarray(weights)[mask]
-                         * np.asarray(targets)[mask]
-                         * _scale[c])
-            sigma2[c] = max(float(np.mean(rescaled ** 2)), 1e-30)
-        return sigma2
+        import scipy.linalg as _sla
+        n, m = A.shape
+        G = np.zeros((m, m))
+        rhs = np.zeros(m)
+        for sl, B in A.row_blocks():
+            B = np.asarray(B, dtype=np.float64)
+            G += B.T @ B
+            rhs += B.T @ t_vec[sl]
+        G[np.diag_indices(m)] += self.reg
+        try:
+            beta = _sla.cho_solve(_sla.cho_factor(G, lower=True), rhs)
+        except np.linalg.LinAlgError:
+            beta = _sla.lstsq(G, rhs)[0]
+        rnorm = float(np.linalg.norm(A.matvec(beta) - t_vec))
+        return beta, 0, 0, rnorm
+
+    def _build_chain_operator(self, rows, Zs, n_at, mult):
+        """LinearOperator of the weighted chain-rule design matrix.
+        Cached mode builds it once; full matrix-free mode rebuilds it
+        chunk by chunk on every product."""
+        X_r, lab_r, sid_r = rows
+        n, n_out = len(lab_r), self._n_out()
+        if not self.full_matrix_free:
+            A = self._chain_rows(X_r, lab_r, sid_r, Zs, n_at) * mult[:, None]
+            if self.use_float32:
+                A = A.astype(np.float32)
+            if self.verbose:
+                print(f'  [cached] design matrix ({n}, {n_out})  '
+                      f'{A.nbytes / 1e6:.1f} MB')
+            op = self._LO(
+                (n, n_out),
+                matvec=lambda x: (A @ x.astype(A.dtype)).astype(np.float64),
+                rmatvec=lambda y: (A.T @ y.astype(A.dtype)).astype(np.float64),
+                dtype=float)
+            op.row_blocks = lambda: iter([(slice(0, n), A)])
+            return op
+
+        chunk = self.chunk_size
+
+        def _block(s, e):
+            return (self._chain_rows(X_r[s:e], lab_r[s:e], sid_r[s:e], Zs, n_at)
+                    * mult[s:e, None])
+
+        def matvec(x):
+            out = np.empty(n)
+            for s in range(0, n, chunk):
+                e = min(s + chunk, n)
+                out[s:e] = _block(s, e) @ x
+            return out
+
+        def rmatvec(y):
+            out = np.zeros(n_out)
+            for s in range(0, n, chunk):
+                e = min(s + chunk, n)
+                out += _block(s, e).T @ y[s:e]
+            return out
+
+        if self.verbose:
+            print(f'  [full MF] design rows rebuilt per product, chunk={chunk}')
+        op = self._LO((n, n_out), matvec=matvec, rmatvec=rmatvec, dtype=float)
+        op.row_blocks = lambda: ((slice(s, min(s + chunk, n)),
+                                  _block(s, min(s + chunk, n)))
+                                 for s in range(0, n, chunk))
+        return op
 
     # ------------------------------------------------------------------
-
-    def uncertainty_summary(self,
-                             targets : np.ndarray,
-                             labels  : np.ndarray,
-                             weights : Optional[np.ndarray] = None,
-                             label   : str = "",
-                             ) -> dict:
+    def predict_table(self,
+                      labels     : np.ndarray,
+                      X          : np.ndarray,
+                      struct_ids : Optional[np.ndarray] = None,
+                      n_atoms    : Optional[np.ndarray] = None,
+                      ) -> np.ndarray:
         """
-        Compute and display Uncertainty Weighting sigma^2 statistics on
-        an arbitrary dataset (e.g. the validation or test set).
+        Predict every row of a training-format table (E, F and S rows).
 
-        sigma2_c is estimated as mean((w_unit_i * y_i * scale_c)^2)
-        where scale_c = 1 (E), r0 (F), eps0 (S).
-
-        Comparing train and validation sigma2 values reveals whether the
-        UW normalisation computed during training is appropriate for the
-        full data distribution.
-
-        Parameters
-        ----------
-        targets : (N,) float  -- target values.
-        labels  : (N,) str    -- "E", "F", or "S" labels.
-        weights : (N,) float or None  -- unit-normalisation weights (CSV col 2).
-                  None -> all 1.0.
-        label   : str  -- description string shown in the printed table.
-
-        Returns
-        -------
-        dict with keys 'E', 'F', 'S' mapping to sigma2 values,
-        and 'w_uw' mapping to the per-sample UW weights.
-
-        Raises
-        ------
-        RuntimeError  if called before fit().
+        In chain-rule mode F/S rows need their structure's descriptor, so
+        the whole table is passed, not single rows.  In row-independent
+        mode this is :meth:`predict`.
         """
         if not self._fitted:
+            raise RuntimeError("ELMModel: call fit() or fit_csv() first.")
+        if self.row_independent:
+            return self.predict(X)
+        labels = np.array([str(c).strip().upper() for c in labels])
+        sid, e_row, n_at = build_structure_index(
+            labels, struct_ids, n_atoms, caller='ELMModel.predict_table')
+        Zs = self._structure_Z(X, e_row)
+        coef = np.append(self._beta, self._beta0)
+        out = np.empty(len(labels))
+        for s in range(0, len(labels), self.chunk_size):
+            e = min(s + self.chunk_size, len(labels))
+            out[s:e] = self._chain_rows(X[s:e], labels[s:e], sid[s:e],
+                                        Zs, n_at) @ coef
+        return out
+
+    def energy_and_gradient(self, d: np.ndarray) -> Tuple[float, np.ndarray]:
+        """
+        f(d) = E/N and its gradient with respect to the raw structure
+        descriptor d (chain-rule models only; used by the MLIP engine).
+        """
+        if self.row_independent:
             raise RuntimeError(
-                "ELMModel.uncertainty_summary(): call fit() first.")
-
-        N = len(targets)
-        w_unit = (np.asarray(weights, dtype=np.float64)
-                  if weights is not None else np.ones(N, dtype=np.float64))
-
-        sigma2 = self._compute_sigma2(targets, labels, w_unit)
-
-        # Compute w_uw from these sigma2 values
-        log_mean = float(np.mean([np.log(sigma2[c]) for c in ('E', 'F', 'S')]))
-        norm_f   = np.exp(log_mean)
-        w_uw     = np.ones(N, dtype=np.float64)
-        for c in ('E', 'F', 'S'):
-            mask = np.asarray(labels) == c
-            if mask.any():
-                w_uw[mask] = norm_f / sigma2[c]
-
-        title = f"Uncertainty Weighting summary{(' -- ' + label) if label else ''}"
-        print(f"\n  {title}")
-        print("  " + "-" * 50)
-        train_s2 = getattr(self, '_sigma2_uw', {})
-        print(f"  {'Cat':<5}  {'sigma2':>12}  {'w_uw':>10}  "
-              f"{'sigma2_train':>14}")
-        for c in ('E', 'F', 'S'):
-            ts = train_s2.get(c, float('nan'))
-            mask = np.asarray(labels) == c
-            wc   = w_uw[mask][0] if mask.any() else float('nan')
-            print(f"  {c:<5}  {sigma2[c]:>12.4e}  {wc:>10.4g}  {ts:>14.4e}")
-        print("  " + "-" * 50)
-
-        return {'E': sigma2['E'], 'F': sigma2['F'], 'S': sigma2['S'],
-                'w_uw': w_uw}
+                "ELMModel: a row_independent model has no energy function "
+                "whose derivative gives its force rows (ADR-0004).")
+        z = self._preact(self._normalise(d[None, :]))       # (1, n_h')
+        f = float(self._hidden_from_Z(z)[0] @ self._beta + self._beta0)
+        # grad = sum_k beta_k dh_k/dd = W (h'(z) (*) beta) / X_std
+        Dn = self._W_eff().shape[0]
+        g = np.empty(Dn)
+        eye = np.eye(Dn) / self._X_std[:, None]             # directions
+        V = eye @ self._W_eff()                              # (D, n_w)
+        g[:] = self._hidden_dir(np.repeat(z, Dn, axis=0), V) @ self._beta
+        return f, g
 
     # ------------------------------------------------------------------
     def fit_csv(self,
@@ -923,13 +1023,16 @@ class ELMModel:
         >>> model.fit_csv("structures.csv")
         >>> model.fit_csv("structures.csv", weight_csv="weights.csv")
         """
-        targets, labels, weights, X = load_mlip_csv(csv_path, verbose=self.verbose)
+        targets, labels, weights, X, meta = load_mlip_csv(
+            csv_path, verbose=self.verbose, return_meta=True)
 
         return self.fit(targets, labels, X,
                         weights=weights,
                         weight_csv=weight_csv,
                         val_fraction=val_fraction,
-                        val_seed=val_seed)
+                        val_seed=val_seed,
+                        struct_ids=meta["struct_id"],
+                        n_atoms=meta["n_atoms"])
 
     # ------------------------------------------------------------------
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -947,7 +1050,7 @@ class ELMModel:
         if not self._fitted:
             raise RuntimeError("ELMModel: call fit() or fit_csv() first.")
         X_n = self._normalise(X)
-        return self._hidden(X_n) @ self._beta
+        return self._hidden(X_n) @ self._beta + self._beta0
 
     def compute(self,
                 lattice          : np.ndarray,
@@ -1192,12 +1295,14 @@ class ELMModel:
                   csv_path  : str,
                   label     : str = "test") -> dict:
         """Load a CSV and return a score dict without re-fitting."""
-        targets, labels, weights, X = load_mlip_csv(csv_path, verbose=False)
-        y_pred = self.predict(X)
+        targets, labels, weights, X, meta = load_mlip_csv(
+            csv_path, verbose=False, return_meta=True)
+        y_pred = self.predict_table(labels, X, struct_ids=meta["struct_id"],
+                                    n_atoms=meta["n_atoms"])
         # Bug-fix note (F7): the original referenced an undefined name
         # `categories` here (NameError on every call) instead of the
         # `labels` array actually returned by load_mlip_csv.
-        sc     = self._score(targets, y_pred, labels, label)
+        sc     = self._score(targets, y_pred, np.asarray(labels), label)
         self._print_scores(sc)
         return sc
 
@@ -1288,9 +1393,24 @@ class ELMModel:
                                             if self.w_init_scale is not None
                                             else -1.0),
                  r0              = np.array(self.r0),
-                 eps0            = np.array(self.eps0))
+                 eps0            = np.array(self.eps0),
+                 **self._extra_state())
         if self.verbose:
             print(f"  ELMModel saved -> {path}.npz")
+
+    def _extra_state(self) -> dict:
+        """Arrays added in 0.2.0a3 (chain rule, ADR-0004)."""
+        return dict(beta0             = np.array(self._beta0),
+                    row_independent   = np.array(self.row_independent),
+                    descriptor_config = np.array(self.descriptor_config))
+
+    def _restore_extra_state(self, npz) -> None:
+        # A file written before 0.2.0a3 holds a row-independent model.
+        self.row_independent = (bool(npz['row_independent'])
+                                if 'row_independent' in npz else True)
+        self._beta0 = float(npz['beta0']) if 'beta0' in npz else 0.0
+        self.descriptor_config = (str(npz['descriptor_config'])
+                                  if 'descriptor_config' in npz else "")
 
     @classmethod
     def load(cls, path: str, verbose: bool = False) -> 'ELMModel':
@@ -1337,5 +1457,6 @@ class ELMModel:
         obj._X_mean  = npz['X_mean']
         obj._X_std   = npz['X_std']
         obj._D       = obj._W.shape[0]
+        obj._restore_extra_state(npz)
         obj._fitted  = True
         return obj

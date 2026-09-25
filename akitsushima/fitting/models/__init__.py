@@ -21,11 +21,13 @@ longer drags them in unless a caller actually asks for
 """
 from .csv_io import load_mlip_csv, load_weights_csv
 from .elm import ELMModel
+from .linear import LinearModel
 from .quantized_elm import QuantizedELMModel
 
 __all__ = [
     "ELMModel",
     "QuantizedELMModel",
+    "LinearModel",
     "NNModel",
     "LightGBMModel",
     "load_mlip_csv",

@@ -6,17 +6,24 @@ splits (see :func:`structure_grouped_split`).
 """
 import csv as _csv
 import warnings
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
 __all__ = ["load_mlip_csv", "load_weights_csv",
-           "infer_structure_ids", "structure_grouped_split"]
+           "infer_structure_ids", "structure_grouped_split",
+           "build_structure_index", "META_COLUMNS"]
+
+# Optional named columns (matched on the header, case-insensitive) that
+# carry structure metadata rather than descriptor features.  They may sit
+# anywhere from col 3 on and are removed from the descriptor matrix.
+META_COLUMNS = ("struct_id", "n_atoms")
 
 
-def load_mlip_csv(csv_path: str,
-                 verbose  : bool = True,
-                 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_mlip_csv(csv_path     : str,
+                 verbose      : bool = True,
+                 return_meta  : bool = False,
+                 ):
     """
     Load ML-potential training data from a CSV file.
 
@@ -80,10 +87,36 @@ def load_mlip_csv(csv_path: str,
     F rows and S rows are optional.
     Blank lines and lines starting with ``#`` are ignored.
 
+    Descriptor convention for chain-rule training (ADR-0004)
+    ---------------------------------------------------------
+    ELM / QELM / NN train by default with the chain rule, which assumes
+    the tabular convention of ``atomic_descriptor_ver2.0.0.py`` and of the
+    in-package ACSF table (``akitsushima.fitting.descriptors``):
+
+    * E row : d, an intensive (per-atom-averaged) structure descriptor;
+      target E/N.
+    * F row : X_{i,a} = -dd/dr_{i,a}; target F_{i,a}.
+    * S row : X_{ab} = -(1/V) dd/dT_{ab} under ``lattice' = lattice @ T``
+      (ADR-0001); target sigma_{ab}, compressive-positive.
+
+    so that for a model E/N = f(d) every row is exact:
+    F_{i,a} = N grad f(d) . X_{i,a} and sigma_{ab} = N grad f(d) . X_{ab}.
+    The rows of one structure are tied together by the structure id and
+    N is its atom count (see :func:`build_structure_index`).
+
+    Optional metadata columns
+    -------------------------
+    Header names ``struct_id`` and ``n_atoms`` (case-insensitive) in any
+    column from col 3 on are read as metadata and removed from X.
+    ``struct_id`` overrides the default structure boundaries (each E row
+    opens a structure); ``n_atoms`` supplies N for a structure that has
+    S rows but no F rows.
+
     Parameters
     ----------
-    csv_path : str   Path to the CSV file.
-    verbose  : bool  Print a summary table when True.
+    csv_path    : str   Path to the CSV file.
+    verbose     : bool  Print a summary table when True.
+    return_meta : bool  Also return the metadata dict (see below).
 
     Returns
     -------
@@ -91,6 +124,11 @@ def load_mlip_csv(csv_path: str,
     labels  : (M,)   str     -- "E" / "F" / "S"           (col 1)
     weights : (M,)   float64 -- per-sample weights         (col 2)
     X       : (M, D) float64 -- descriptor feature matrix  (col 3+)
+    meta    : dict           -- only with ``return_meta=True``:
+              ``{"struct_id": (M,) int64 or None,
+              "n_atoms": (M,) int64 or None,
+              "columns": list of descriptor column names (lower-cased)
+              or None}``
 
     Raises
     ------
@@ -105,9 +143,16 @@ def load_mlip_csv(csv_path: str,
     rows_w   : list = []
     rows_X   : list = []
 
+    rows_meta: dict = {}
+
     with open(csv_path, newline='', encoding='utf-8') as fh:
         reader = _csv.reader(fh)
-        next(reader)        # skip header row
+        header = [h.strip().lower() for h in next(reader)]
+        meta_cols = {name: j for j, name in enumerate(header)
+                     if j >= 3 and name in META_COLUMNS}
+        rows_meta = {name: [] for name in meta_cols}
+        desc_names = [h for j, h in enumerate(header)
+                      if j >= 3 and j not in meta_cols.values()]
 
         for lineno, row in enumerate(reader, start=2):
             if not row or row[0].strip().startswith('#'):
@@ -128,7 +173,10 @@ def load_mlip_csv(csv_path: str,
                 y_val = float(row[0])
                 lbl   = row[1].strip().upper()
                 w_val = float(row[2])
-                feats = [float(v) for v in row[3:]]
+                feats = [float(v) for j, v in enumerate(row[3:], start=3)
+                         if j not in meta_cols.values()]
+                for name, j in meta_cols.items():
+                    rows_meta[name].append(int(float(row[j])))
             except (ValueError, IndexError) as exc:
                 raise ValueError(
                     f"load_mlip_csv: parse error at line {lineno}: {exc}\n"
@@ -187,6 +235,14 @@ def load_mlip_csv(csv_path: str,
             print(f"         weight  mean={w.mean():.4g}  "
                   f"range=[{w.min():.4g}, {w.max():.4g}]")
 
+    if return_meta:
+        meta = {name: (np.array(rows_meta[name], dtype=np.int64)
+                       if name in rows_meta else None)
+                for name in META_COLUMNS}
+        # Descriptor column names, if the header has one per column.
+        meta["columns"] = (desc_names if len(desc_names) == X.shape[1]
+                           else None)
+        return targets, labels, weights, X, meta
     return targets, labels, weights, X
 
 
@@ -197,11 +253,11 @@ def load_weights_csv(path    : str,
     """
     Load user-defined per-sample weights from a weights.csv file.
 
-    This is the **third** of three weight factors combined in
-    :meth:`~akitsushima.fitting.models.elm.ELMModel.fit`.  It lets the
-    user manually adjust the relative learning emphasis of contiguous
-    blocks of samples, independently of the unit-normalisation weights
-    (col 2 of the training CSV) and the Uncertainty Weighting terms.
+    This is the third factor of the row weight w_cat * w_unit^2 * w_user
+    that every MLIP model applies to the squared residual (ADR-0004).  It
+    lets the user adjust the relative learning emphasis of contiguous
+    blocks of samples, independently of the category weights and the
+    unit-normalisation weights (col 2 of the training CSV).
 
     File format
     -----------
@@ -459,6 +515,7 @@ def structure_grouped_split(labels       : Sequence,
                             val_fraction : float = 0.2,
                             val_seed     : int   = 0,
                             caller       : str   = "structure_grouped_split",
+                            struct_ids   : Optional[Sequence] = None,
                             ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Split CSV rows into training and validation sets **by structure**.
@@ -491,6 +548,9 @@ def structure_grouped_split(labels       : Sequence,
     caller       : str
         Name used in warning messages (e.g. ``'ELMModel.fit'``) so a
         warning points at the model the user actually called.
+    struct_ids   : (M,) sequence of int or None
+        Explicit structure id per row (the CSV ``struct_id`` column).
+        None infers the boundaries from the E rows.
 
     Returns
     -------
@@ -523,7 +583,11 @@ def structure_grouped_split(labels       : Sequence,
       yields one validation structure (``max(1, ...)``), matching the
       convention of :func:`akitsushima.fitting.driver.split_train_val`.
     """
-    structure_ids = infer_structure_ids(labels)
+    if struct_ids is not None:
+        structure_ids = np.unique(np.asarray(struct_ids),
+                                  return_inverse=True)[1].astype(np.int64)
+    else:
+        structure_ids = infer_structure_ids(labels)
     n_rows = int(structure_ids.size)
     all_rows = np.arange(n_rows, dtype=np.int64)
     no_rows  = np.empty(0, dtype=np.int64)
@@ -565,3 +629,96 @@ def structure_grouped_split(labels       : Sequence,
     is_val_row = np.isin(structure_ids, val_structures)
 
     return all_rows[~is_val_row], all_rows[is_val_row]
+
+
+def build_structure_index(labels     : Sequence,
+                          struct_ids : Optional[Sequence] = None,
+                          n_atoms    : Optional[Sequence] = None,
+                          caller     : str = "build_structure_index",
+                          ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Tie every row to its structure for chain-rule training (ADR-0004).
+
+    Parameters
+    ----------
+    labels     : (M,) 'E' / 'F' / 'S' per row.
+    struct_ids : (M,) explicit structure id per row, or None to open a new
+                 structure at every E row (:func:`infer_structure_ids`).
+    n_atoms    : (M,) atom count per row, or None.  Needed only for a
+                 structure with S rows but no F rows.
+
+    Returns
+    -------
+    sid    : (M,) int64 -- 0-based structure index of each row.
+    e_row  : (S,) int64 -- row index of each structure's E row.
+    n_at   : (S,) int64 -- atom count N of each structure (0 when the
+             structure has neither F rows nor ``n_atoms``; such a
+             structure may only have its E row).
+
+    Raises
+    ------
+    ValueError
+        A structure without exactly one E row, an F-row count that is not
+        a multiple of 3, an S-row count other than 0 or 6, an ``n_atoms``
+        that contradicts the F-row count, or S rows with no way to know N.
+    """
+    lab = np.array([str(c).strip().upper() for c in np.asarray(labels,
+                                                            dtype=object)])
+    M = lab.size
+    if struct_ids is not None:
+        sid = np.unique(np.asarray(struct_ids),
+                        return_inverse=True)[1].astype(np.int64)
+    else:
+        if M and lab[0] != "E":
+            raise ValueError(
+                f"{caller}: the first row is '{lab[0]}', not 'E'.  Without a "
+                f"struct_id column every structure must start with its E "
+                f"row, because the E row carries the structure descriptor "
+                f"the chain rule needs for the structure's F and S rows.")
+        sid = (np.cumsum(lab == "E") - 1).astype(np.int64)
+    n_struct = int(sid.max()) + 1 if M else 0
+
+    nE = np.bincount(sid[lab == "E"], minlength=n_struct)
+    nF = np.bincount(sid[lab == "F"], minlength=n_struct)
+    nS = np.bincount(sid[lab == "S"], minlength=n_struct)
+    bad = np.flatnonzero(nE != 1)
+    if bad.size:
+        k = int(bad[0])
+        raise ValueError(
+            f"{caller}: structure {k} has {int(nE[k])} E rows; the chain "
+            f"rule needs exactly one (its descriptor is the structure's d).")
+    bad = np.flatnonzero(nF % 3)
+    if bad.size:
+        k = int(bad[0])
+        raise ValueError(
+            f"{caller}: structure {k} has {int(nF[k])} F rows, not a "
+            f"multiple of 3 (expected 3N: atom 0 x/y/z, atom 1 x/y/z, ...).")
+    bad = np.flatnonzero((nS != 0) & (nS != 6))
+    if bad.size:
+        k = int(bad[0])
+        raise ValueError(
+            f"{caller}: structure {k} has {int(nS[k])} S rows; expected 0 "
+            f"or 6 (Voigt xx yy zz yz zx xy).")
+
+    e_row = np.empty(n_struct, dtype=np.int64)
+    e_row[sid[lab == "E"]] = np.flatnonzero(lab == "E")
+
+    n_at = (nF // 3).astype(np.int64)
+    if n_atoms is not None:
+        na = np.asarray(n_atoms, dtype=np.int64)
+        given = na[e_row]
+        clash = np.flatnonzero((n_at > 0) & (given != n_at))
+        if clash.size:
+            k = int(clash[0])
+            raise ValueError(
+                f"{caller}: structure {k} has n_atoms = {int(given[k])} but "
+                f"{int(nF[k])} F rows (= 3 x {int(n_at[k])}).")
+        n_at = np.where(n_at > 0, n_at, given)
+    bad = np.flatnonzero((nS > 0) & (n_at == 0))
+    if bad.size:
+        k = int(bad[0])
+        raise ValueError(
+            f"{caller}: structure {k} has S rows but no F rows, so its atom "
+            f"count N (needed for sigma = N grad f(d) . X) is unknown.  Add "
+            f"an n_atoms column to the CSV.")
+    return sid, e_row, n_at

@@ -1,0 +1,108 @@
+"""A trained tabular MLIP as a relax / md force function (ADR-0004,
+decision 6).
+
+YAML::
+
+    potential:
+      type: MLIP
+      model: path/to/model.npz      # or .pt for NNModel
+
+The model file carries its descriptor configuration (in-package ACSF) and
+element list, so nothing else is needed and the descriptor at inference is
+the one used in training.  For a structure with N atoms, descriptor d and
+its derivative rows X_F = -dd/dr, X_S = -(1/V) dd/dT, and a model
+E/N = f(d)::
+
+    E     = N f(d)
+    F_j   = N X_F[j] . grad f(d)
+    sigma = N X_S . grad f(d)          (compressive-positive, ADR-0001)
+"""
+
+import os
+
+import numpy as np
+
+from .descriptors import descriptor_from_config
+
+__all__ = ["MLIPForceField", "load_mlip_model"]
+
+
+def load_mlip_model(path: str):
+    """Load an ELM / QELM / NN / linear / LightGBM model file by content."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"MLIP model file not found: '{path}'")
+    if path.endswith(".pt"):
+        from .models.nn import NNModel
+
+        return NNModel.load(path)
+    with np.load(path) as z:
+        keys = set(z.files)
+        cls = str(z["model_class"]) if "model_class" in keys else ""
+    if "model_str" in keys:
+        from .models.lightgbm_model import LightGBMModel
+
+        return LightGBMModel.load(path)
+    if cls == "LinearModel":
+        from .models.linear import LinearModel
+
+        return LinearModel.load(path)
+    if cls == "QuantizedELMModel":
+        from .models.quantized_elm import QuantizedELMModel
+
+        return QuantizedELMModel.load(path)
+    from .models.elm import ELMModel
+
+    return ELMModel.load(path)
+
+
+class MLIPForceField:
+    """
+    Force function ``fn(lattice, positions, atom_types, neigh_list=None)
+    -> (energy, forces, stress)`` around a chain-rule / linear model
+    trained on in-package descriptors.
+    """
+
+    kind = "mlip"
+
+    def __init__(self, model):
+        name = type(model).__name__
+        if name == "LightGBMModel":
+            raise ValueError(
+                "MLIP engine: a LightGBM model cannot drive relax/md -- trees "
+                "are piecewise constant, so -dE/dr is zero almost everywhere "
+                "and the model gives no conservative force (ADR-0004, "
+                "decision 3)."
+            )
+        if getattr(model, "row_independent", True):
+            raise ValueError(
+                f"MLIP engine: this {name} was trained row-independently "
+                f"(row_independent=True, or a file written before 0.2.0a3). "
+                f"Its force rows are not derivatives of its energy, so it is "
+                f"not a force field.  Retrain with the chain rule "
+                f"(the default)."
+            )
+        if not getattr(model, "descriptor_config", ""):
+            raise ValueError(
+                f"MLIP engine: this {name} was trained on descriptors from an "
+                f"external CSV; akitsushima cannot recompute them for a new "
+                f"structure.  Train on in-package descriptors (mlip: "
+                f"descriptor: ...) to use it as an engine "
+                f"(external descriptors at inference: docs/future-work.md FW-1)."
+            )
+        self.model = model
+        self.descriptor = descriptor_from_config(model.descriptor_config)
+        self.r_cut = float(self.descriptor.r_cut)
+
+    @classmethod
+    def from_file(cls, path: str) -> "MLIPForceField":
+        return cls(load_mlip_model(path))
+
+    def __call__(self, lattice, positions, atom_types, neigh_list=None):
+        d, XF, XS = self.descriptor.structure_table(lattice, positions, atom_types)
+        N = len(atom_types)
+        f, g = self.model.energy_and_gradient(d)
+        energy = N * f
+        forces = N * (XF @ g)
+        stress = N * (XS @ g)
+        stress = 0.5 * (stress + stress.T)
+        return float(energy), forces, stress

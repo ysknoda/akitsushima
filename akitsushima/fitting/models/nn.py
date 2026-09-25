@@ -7,7 +7,12 @@ from typing import Optional
 import numpy as np
 
 from ...utils.optional_torch import HAS_TORCH, _torch_nn, torch
-from .csv_io import load_mlip_csv, load_weights_csv, structure_grouped_split
+from .csv_io import (
+    build_structure_index,
+    load_mlip_csv,
+    load_weights_csv,
+    structure_grouped_split,
+)
 from .elm import ELMModel
 
 __all__ = ["NNModel"]
@@ -33,16 +38,18 @@ class NNModel:
              two hidden layers of size 128 and 64); there is no separate
              "number of layers" parameter to avoid redundant/inconsistent
              configuration.
-    Output : a single scalar prediction per row (matching the row-based
-             E / F / S target scheme used throughout this codebase's
-             CSV format).
+    Output : E/N = f(d) for a structure descriptor d.  F and S rows are
+             predicted as N grad f(d) . X by autograd (chain rule,
+             ADR-0004); ``row_independent=True`` instead predicts every
+             row as f(x) (the pre-0.2.0a3 behaviour).
 
     Supported activation functions: 'tanh', 'relu', 'gelu', 'silu'
     (a.k.a. swish), 'mish', 'softplus'.
 
     Weighting scheme
     ----------------
-    Sample weight = w_cat * w_unit * w_user, where:
+    Weight on the squared residual = w_cat * w_unit^2 * w_user
+    (ADR-0004; w_unit was not squared before 0.2.0a3), where:
       w_cat  : category weight (w_energy / w_forces / w_stress).
       w_unit : unit-normalisation weight from CSV column 2 (see
                load_mlip_csv for the exact convention -- N for E rows,
@@ -50,15 +57,8 @@ class NNModel:
       w_user : optional user-defined block weight from a weights.csv
                file (see load_weights_csv).
 
-    NOTE: unlike ELMModel, this does NOT include an Uncertainty
-    Weighting (UW) term. ELMModel's UW is a simplified, closed-form,
-    one-shot weighting scheme (target-variance-based) that works
-    because ELM's training is a single linear least-squares solve.
-    Implementing the genuine Kendall et al. (2018) UW scheme for a
-    trainable deep network requires promoting log(sigma_c) to a
-    LEARNABLE parameter jointly optimized with the network weights via
-    backpropagation -- a loss-function redesign beyond the scope of
-    this class. Sample weighting here uses only w_cat * w_unit * w_user.
+    This is the same rule as ELMModel and LightGBMModel and as the
+    classical ``fit`` (w_cat x w_unit^2).
 
     Parameters
     ----------
@@ -74,7 +74,8 @@ class NNModel:
                       weight consistency with load_mlip_csv).
     learning_rate  : Adam optimizer learning rate.
     epochs         : maximum number of training epochs.
-    batch_size     : mini-batch size for stochastic gradient descent.
+    batch_size     : mini-batch size in rows (chain-rule mode batches whole
+                      structures, about batch_size rows per batch).
     weight_decay   : L2 regularisation coefficient (Adam's weight_decay).
     early_stopping_patience : stop training if validation loss does not
                       improve for this many consecutive epochs (0 disables
@@ -100,7 +101,8 @@ class NNModel:
                  early_stopping_patience: int = 30,
                  device         : str   = 'auto',
                  seed           : int   = 42,
-                 verbose        : bool  = True):
+                 verbose        : bool  = True,
+                 row_independent: bool  = False):
         if not HAS_TORCH:
             raise ImportError(
                 "NNModel requires PyTorch, which is not installed. "
@@ -120,6 +122,8 @@ class NNModel:
         self.early_stopping_patience = int(early_stopping_patience)
         self.seed           = int(seed)
         self.verbose        = bool(verbose)
+        self.row_independent = bool(row_independent)
+        self.descriptor_config = ""   # see ELMModel.descriptor_config
 
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -165,6 +169,35 @@ class NNModel:
         return (X - self._X_mean) / self._X_std
 
     # ------------------------------------------------------------------
+    def _row_weights(self, labels, w_unit, w_user) -> np.ndarray:
+        """Weight on each row's SQUARED residual: w_cat * w_unit^2 * w_user
+        (ADR-0004, decision 2)."""
+        _wmap = {'E': self.w_energy, 'F': self.w_forces, 'S': self.w_stress}
+        w_cat = np.array([_wmap.get(c, 1.0) for c in labels], dtype=np.float64)
+        return w_cat * w_unit ** 2 * w_user
+
+    def _chain_predict_t(self, d_n, X_dir, lab_isE, sid_loc, n_at,
+                         create_graph):
+        """
+        Predictions of a block of rows in chain-rule mode (torch).
+
+        d_n     : (S, D) normalised descriptors of the block's structures
+        X_dir   : (R, D) row descriptors divided by X_std (F/S rows use it)
+        lab_isE : (R,) bool, True for E rows
+        sid_loc : (R,) long, row -> structure index into d_n
+        n_at    : (S,) float, atom count per structure
+
+        E row: f(d);  F/S row: N grad f(d) . X   (grad w.r.t. raw d,
+        hence X / X_std against the gradient in normalised variables).
+        """
+        d_n = d_n.detach().requires_grad_(True)
+        f = self._net(d_n).view(-1)                          # (S,)
+        g = torch.autograd.grad(f.sum(), d_n, create_graph=create_graph)[0]
+        pred_E = f[sid_loc]
+        pred_D = n_at[sid_loc] * (g[sid_loc] * X_dir).sum(dim=1)
+        return torch.where(lab_isE, pred_E, pred_D)
+
+    # ------------------------------------------------------------------
     def fit(self,
             targets      : np.ndarray,
             labels       : np.ndarray,
@@ -173,12 +206,19 @@ class NNModel:
             weight_csv   : Optional[str]        = None,
             val_fraction : float = 0.2,
             val_seed     : int   = 0,
+            struct_ids   : Optional[np.ndarray] = None,
+            n_atoms      : Optional[np.ndarray] = None,
             ) -> 'NNModel':
         """
         Train the network on (targets, labels, X) descriptor rows.
 
-        See the class docstring for the CSV row convention and the
-        sample-weighting scheme (w_cat * w_unit * w_user).
+        Model form: E/N = f(d); every F/S row is N grad f(d) . X with d the
+        descriptor of the row's structure (chain rule, ADR-0004), computed
+        by autograd.  ``row_independent=True`` (constructor) restores the
+        pre-0.2.0a3 per-row regression y = f(x).
+
+        Loss: mean over rows of w_i (pred_i - y_i)^2 with
+        w_i = w_cat * w_unit^2 * w_user (ADR-0004, decision 2).
 
         Parameters
         ----------
@@ -189,14 +229,17 @@ class NNModel:
                        from load_mlip_csv col 2. None -> all 1.0.
         weight_csv   : optional path to a weights.csv file for
                        user-defined block weights.
-        val_fraction : fraction of samples held out for validation /
+        val_fraction : fraction of structures held out for validation /
                        early stopping.
         val_seed     : RNG seed for the train/val split.
+        struct_ids, n_atoms : optional CSV metadata columns (see
+                       ELMModel.fit).
 
         Returns
         -------
         self
         """
+        labels = np.array([str(c).strip().upper() for c in labels])
         N, D = X.shape
 
         if weights is not None:
@@ -214,32 +257,19 @@ class NNModel:
         else:
             w_user = np.ones(N, dtype=np.float64)
 
-        _wmap  = {'E': self.w_energy, 'F': self.w_forces, 'S': self.w_stress}
-        w_cat  = np.array([_wmap.get(c, 1.0) for c in labels])
-        w_all  = w_cat * w_unit * w_user
+        w_all = self._row_weights(labels, w_unit, w_user)
 
-        # Train / val split, grouped by structure.
-        #
-        # Bug-fix note (F17): this used to be a plain row-wise shuffle over
-        # the N CSV *rows*, which leaked essentially every structure into
-        # both splits -- one structure contributes 1 E + 3N_atoms F + 6 S
-        # rows that are all derived from the same atomic configuration.
-        # That mattered doubly here: the leaked validation loss is also
-        # this model's early-stopping criterion and best-state selector, so
-        # training stopped on a signal the network had effectively already
-        # seen.  See csv_io.structure_grouped_split for the full note.
+        # Train / val split, grouped by structure (F17): the rows of one
+        # structure all derive from one configuration, and the validation
+        # loss is this model's early-stopping criterion.
         idx_train, idx_val = structure_grouped_split(
             labels, val_fraction=val_fraction, val_seed=val_seed,
-            caller='NNModel.fit')
+            caller='NNModel.fit', struct_ids=struct_ids)
         n_val = int(idx_val.size)
 
-        X_tr = X[idx_train]; y_tr = targets[idx_train]; w_tr = w_all[idx_train]
-        X_va = X[idx_val]    if n_val else None
-        y_va = targets[idx_val] if n_val else None
-        w_va = w_all[idx_val]   if n_val else None
-
         if self.verbose:
-            print(f"\nNNModel fitting")
+            print(f"\nNNModel fitting  "
+                  f"[{'row-independent' if self.row_independent else 'chain rule'}]")
             print(f"  Samples      : {N}  (D={D})")
             print(f"  Architecture : {D} -> " +
                   " -> ".join(str(h) for h in self.hidden_layers) + " -> 1"
@@ -249,64 +279,95 @@ class NNModel:
             print(f"  Train/val split: train={len(idx_train)}  val={n_val}")
             print(f"  Device       : {self.device}")
 
-        # Normalise descriptors (statistics from training split only)
-        self._X_mean = X_tr.mean(axis=0)
-        self._X_std  = X_tr.std(axis=0)
+        if self.row_independent:
+            X_stat = X[idx_train]
+        else:
+            sid, e_row, n_at = build_structure_index(
+                labels, struct_ids, n_atoms, caller='NNModel.fit')
+            X_stat = X[e_row[np.unique(sid[idx_train])]]
+        self._X_mean = X_stat.mean(axis=0)
+        self._X_std  = X_stat.std(axis=0)
         self._X_std[self._X_std < 1e-12] = 1.0
-        X_tr_n = self._normalise(X_tr)
-        X_va_n = self._normalise(X_va) if n_val else None
         self._D = D
 
-        # Bug-fix note (F12): the original also called the legacy global
-        # `np.random.seed(self.seed)` here.  Nothing in this method (or
-        # anywhere downstream in this class) draws from the legacy
-        # global `np.random.*` state -- the train/val split above already
-        # uses its own `np.random.default_rng(val_seed)` Generator, and
-        # network weight initialisation is seeded by `torch.manual_seed`
-        # below -- so the call was dead and has been removed.
         torch.manual_seed(self.seed)
         self._net = self._build_network(D)
-
         opt = torch.optim.Adam(self._net.parameters(),
                                 lr=self.learning_rate,
                                 weight_decay=self.weight_decay)
 
-        X_tr_t = torch.as_tensor(X_tr_n, dtype=torch.float32, device=self.device)
-        y_tr_t = torch.as_tensor(y_tr,   dtype=torch.float32, device=self.device).view(-1, 1)
-        w_tr_t = torch.as_tensor(w_tr,   dtype=torch.float32, device=self.device).view(-1, 1)
-        if n_val:
-            X_va_t = torch.as_tensor(X_va_n, dtype=torch.float32, device=self.device)
-            y_va_t = torch.as_tensor(y_va,   dtype=torch.float32, device=self.device).view(-1, 1)
-            w_va_t = torch.as_tensor(w_va,   dtype=torch.float32, device=self.device).view(-1, 1)
+        dev, f32 = self.device, torch.float32
 
-        n_train  = X_tr_t.shape[0]
+        def _t(a, dtype=f32):
+            return torch.as_tensor(a, dtype=dtype, device=dev)
+
+        if self.row_independent:
+            def _blocks(idx, shuffle):
+                order = (idx[torch.randperm(len(idx)).numpy()]
+                         if shuffle else idx)
+                for s in range(0, len(order), self.batch_size):
+                    yield order[s:s + self.batch_size]
+
+            def _pred(rows, create_graph):
+                return self._net(_t(self._normalise(X[rows]))).view(-1)
+        else:
+            # Batches are whole structures, sized to ~batch_size rows.
+            rows_of = {}
+            for r, k in enumerate(sid):
+                rows_of.setdefault(int(k), []).append(r)
+            rows_of = {k: np.array(v) for k, v in rows_of.items()}
+            dn_all = _t(self._normalise(X[e_row]))
+            nat_all = _t(n_at.astype(np.float64))
+
+            def _blocks(idx, shuffle):
+                structs = np.unique(sid[idx])
+                if shuffle:
+                    structs = structs[torch.randperm(len(structs)).numpy()]
+                per = max(1, int(round(self.batch_size * len(structs)
+                                       / max(len(idx), 1))))
+                for s in range(0, len(structs), per):
+                    yield np.concatenate([rows_of[int(k)]
+                                          for k in structs[s:s + per]])
+
+            def _pred(rows, create_graph):
+                st, loc = np.unique(sid[rows], return_inverse=True)
+                return self._chain_predict_t(
+                    dn_all[st], _t(X[rows] / self._X_std),
+                    _t(labels[rows] == 'E', torch.bool),
+                    _t(loc, torch.long), nat_all[st], create_graph)
+
+        y_all = _t(targets); w_all_t = _t(w_all)
+
+        def _loss(rows, create_graph):
+            p = _pred(rows, create_graph)
+            rr = _t(rows, torch.long)
+            return (w_all_t[rr] * (p - y_all[rr]) ** 2).sum(), len(rows)
+
+        def _eval_loss(idx):
+            tot, n = 0.0, 0
+            for rows in _blocks(idx, shuffle=False):
+                with torch.enable_grad():
+                    l, k = _loss(rows, create_graph=False)
+                tot += float(l.detach()); n += k
+            return tot / max(n, 1)
+
         best_val = float('inf')
         best_state = None
         patience_ctr = 0
-
         for epoch in range(self.epochs):
             self._net.train()
-            perm = torch.randperm(n_train, device=self.device)
-            epoch_loss = 0.0
-            for start in range(0, n_train, self.batch_size):
-                idx = perm[start:start + self.batch_size]
-                xb, yb, wb = X_tr_t[idx], y_tr_t[idx], w_tr_t[idx]
+            epoch_loss, n_seen = 0.0, 0
+            for rows in _blocks(idx_train, shuffle=True):
                 opt.zero_grad()
-                pred = self._net(xb)
-                loss = (wb * (pred - yb) ** 2).mean()
-                loss.backward()
+                l, k = _loss(rows, create_graph=True)
+                (l / k).backward()
                 opt.step()
-                # .detach() before the scalar conversion: numerically
-                # identical, but float() on a requires_grad tensor makes
-                # torch emit a UserWarning about the silent graph exit.
-                epoch_loss += float(loss.detach()) * xb.shape[0]
-            epoch_loss /= n_train
+                epoch_loss += float(l.detach()); n_seen += k
+            epoch_loss /= max(n_seen, 1)
 
             if n_val:
                 self._net.eval()
-                with torch.no_grad():
-                    pred_va = self._net(X_va_t)
-                    val_loss = float((w_va_t * (pred_va - y_va_t) ** 2).mean())
+                val_loss = _eval_loss(idx_val)
                 if val_loss < best_val - 1e-12:
                     best_val = val_loss
                     best_state = {k: v.clone() for k, v in self._net.state_dict().items()}
@@ -334,7 +395,67 @@ class NNModel:
             self._net.load_state_dict(best_state)
 
         self._fitted = True
+        self._net.eval()
+
+        def _sub(idx):
+            return dict(labels=labels[idx], X=X[idx],
+                        struct_ids=(None if struct_ids is None
+                                    else np.asarray(struct_ids)[idx]),
+                        n_atoms=(None if n_atoms is None
+                                 else np.asarray(n_atoms)[idx]))
+        self._train_sc = ELMModel._score(
+            targets[idx_train], self.predict_table(**_sub(idx_train)),
+            labels[idx_train], 'train')
+        self._val_sc = (ELMModel._score(
+            targets[idx_val], self.predict_table(**_sub(idx_val)),
+            labels[idx_val], 'val') if n_val else None)
+        if self.verbose:
+            ELMModel._print_scores(self._train_sc, self._val_sc)
         return self
+
+    # ------------------------------------------------------------------
+    def predict_table(self,
+                      labels     : np.ndarray,
+                      X          : np.ndarray,
+                      struct_ids : Optional[np.ndarray] = None,
+                      n_atoms    : Optional[np.ndarray] = None,
+                      ) -> np.ndarray:
+        """Predict every row of a training-format table (E, F and S rows);
+        see ELMModel.predict_table."""
+        if not self._fitted:
+            raise RuntimeError("NNModel: call fit() or fit_csv() first.")
+        if self.row_independent:
+            return self.predict(X)
+        labels = np.array([str(c).strip().upper() for c in labels])
+        sid, e_row, n_at = build_structure_index(
+            labels, struct_ids, n_atoms, caller='NNModel.predict_table')
+        dev, f32 = self.device, torch.float32
+        self._net.eval()
+        with torch.enable_grad():
+            p = self._chain_predict_t(
+                torch.as_tensor(self._normalise(X[e_row]), dtype=f32, device=dev),
+                torch.as_tensor(X / self._X_std, dtype=f32, device=dev),
+                torch.as_tensor(labels == 'E', device=dev),
+                torch.as_tensor(sid, dtype=torch.long, device=dev),
+                torch.as_tensor(n_at, dtype=f32, device=dev),
+                create_graph=False)
+        return p.detach().cpu().numpy().astype(np.float64)
+
+    def energy_and_gradient(self, d: np.ndarray):
+        """f(d) = E/N and its gradient w.r.t. the raw descriptor d
+        (chain-rule models only; used by the MLIP engine)."""
+        if self.row_independent:
+            raise RuntimeError(
+                "NNModel: a row_independent model has no energy function "
+                "whose derivative gives its force rows (ADR-0004).")
+        self._net.eval()
+        dn = torch.as_tensor(self._normalise(d[None, :]), dtype=torch.float32,
+                             device=self.device).requires_grad_(True)
+        with torch.enable_grad():
+            f = self._net(dn).sum()
+            g = torch.autograd.grad(f, dn)[0]
+        return (float(f.detach()),
+                g.detach().cpu().numpy()[0].astype(np.float64) / self._X_std)
 
     # ------------------------------------------------------------------
     def fit_csv(self,
@@ -344,10 +465,12 @@ class NNModel:
                 val_seed     : int   = 0,
                 ) -> 'NNModel':
         """Convenience wrapper: load CSV (load_mlip_csv format) then fit()."""
-        targets, labels, weights, X = load_mlip_csv(csv_path, verbose=self.verbose)
+        targets, labels, weights, X, meta = load_mlip_csv(
+            csv_path, verbose=self.verbose, return_meta=True)
         return self.fit(targets, labels, X,
                         weights=weights, weight_csv=weight_csv,
-                        val_fraction=val_fraction, val_seed=val_seed)
+                        val_fraction=val_fraction, val_seed=val_seed,
+                        struct_ids=meta["struct_id"], n_atoms=meta["n_atoms"])
 
     # ------------------------------------------------------------------
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -364,9 +487,11 @@ class NNModel:
     # ------------------------------------------------------------------
     def score_csv(self, csv_path: str, label: str = "test") -> dict:
         """Load a CSV and return a score dict without re-fitting."""
-        targets, labels, weights, X = load_mlip_csv(csv_path, verbose=False)
-        y_pred = self.predict(X)
-        sc = ELMModel._score(targets, y_pred, labels, label)
+        targets, labels, weights, X, meta = load_mlip_csv(
+            csv_path, verbose=False, return_meta=True)
+        y_pred = self.predict_table(labels, X, struct_ids=meta["struct_id"],
+                                    n_atoms=meta["n_atoms"])
+        sc = ELMModel._score(targets, y_pred, np.asarray(labels), label)
         ELMModel._print_scores(sc)
         return sc
 
@@ -391,6 +516,8 @@ class NNModel:
             'D'             : self._D,
             'X_mean'        : self._X_mean,
             'X_std'         : self._X_std,
+            'row_independent'  : self.row_independent,
+            'descriptor_config': self.descriptor_config,
         }, p)
         if self.verbose:
             print(f"  NNModel saved -> {p}")
@@ -419,5 +546,8 @@ class NNModel:
         obj._net.load_state_dict(ckpt['state_dict'])
         obj._X_mean = ckpt['X_mean']
         obj._X_std  = ckpt['X_std']
+        # A checkpoint written before 0.2.0a3 holds a row-independent model.
+        obj.row_independent   = bool(ckpt.get('row_independent', True))
+        obj.descriptor_config = str(ckpt.get('descriptor_config', ''))
         obj._fitted = True
         return obj

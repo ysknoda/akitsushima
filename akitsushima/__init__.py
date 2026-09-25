@@ -27,6 +27,7 @@ Force fields
   Machine-learning potentials
     ELMModel         -- Extreme Learning Machine (single hidden layer)
     QuantizedELMModel -- ELM with quantised hidden-layer weights
+    LinearModel      -- linear E/F/S model (OLS, ridge, LASSO, PLS, Bayesian, ...)
     NNModel          -- PyTorch feedforward network (lazy import)
     LightGBMModel    -- Gradient-boosted trees + Optuna search (lazy import)
 
@@ -116,6 +117,7 @@ from .fitting import (
     ELMModel,
     ExternalFileEngine,
     FittableParameterSet,
+    LinearModel,
     LJParameterSet,
     MieParameterSet,
     MorseParameterSet,
@@ -150,7 +152,7 @@ from .solvers import (
     fit_equation_of_state,
 )
 
-__version__ = "0.2.0a2"
+__version__ = "0.2.0a3"
 
 __all__ = [
     "__version__",
@@ -171,7 +173,7 @@ __all__ = [
     "MieParameterSet", "YukawaParameterSet",
     "StillingerWeberParameterSet", "TersoffParameterSet",
     "ExternalFileEngine", "ScaledForceEngine",
-    "ELMModel", "QuantizedELMModel", "NNModel", "LightGBMModel",
+    "ELMModel", "QuantizedELMModel", "LinearModel", "NNModel", "LightGBMModel",
     # solvers
     "GeometryOptimiser", "NVTSimulation", "NVESimulation", "NPTSimulation",
     "GCMCMDSimulation", "OSMMCSimulation", "SpeciesParams",
