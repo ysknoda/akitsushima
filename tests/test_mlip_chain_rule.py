@@ -647,6 +647,38 @@ def test_bayesian_linear_converges_with_noise_optimal_weights(method):
     np.testing.assert_allclose(m.coef_, wt, atol=5e-3)
 
 
+def test_bayesian_ridge_ignores_directions_the_data_cannot_resolve():
+    """Exactly dependent descriptor columns (the SW-Si ACSF set has five:
+    e.g. G5 with eta = 0 and lambda = +1 plus lambda = -1 loses its angle)
+    give G = A^T A eigenvalues at round-off level, which the evidence
+    iteration now ignores; dependent columns must not change the fit.
+    This is a property check: the degenerate fixed point it guards
+    against (prior precision 1.5e-11, SW-Si v2 at 14 / 38 / 13 sigma) was
+    only reproduced on the full SW-Si v2 set, by
+    example/mlip/adr0004/sw_si_verify.py --dataset v2 --models bayes."""
+    rng = np.random.default_rng(6)
+    D, N, sig_E, sig_F = 6, 8, 0.002, 0.05
+    wt, bt = rng.normal(size=D), -4.3
+    y, lab, w, X = [], [], [], []
+    for _ in range(150):
+        d = rng.normal(size=D)
+        y.append(d @ wt + bt + sig_E * rng.normal()); lab.append("E")
+        w.append(N); X.append(d)
+        for _ in range(3 * N):
+            x = rng.normal(size=D)
+            y.append(N * wt @ x + sig_F * rng.normal()); lab.append("F")
+            w.append(0.1); X.append(x)
+    y, lab, w, X = map(np.array, (y, lab, w, X))
+    kw = dict(method="bayes_ridge", verbose=False,
+              w_energy=1 / (sig_E * N) ** 2, w_forces=1 / (sig_F * 0.1) ** 2)
+    ref = LinearModel(**kw).fit(y, lab, X, weights=w, val_fraction=0.0)
+    mix = rng.normal(size=(D, 4))
+    Xz = np.hstack([X, X @ mix])            # four exactly dependent columns
+    m = LinearModel(**kw).fit(y, lab, Xz, weights=w, val_fraction=0.0)
+    np.testing.assert_allclose(m.predict_table(lab, Xz), ref.predict_table(lab, X),
+                               rtol=1e-6, atol=1e-6)
+
+
 # ---------------------------------------------------------------- RVFL
 
 

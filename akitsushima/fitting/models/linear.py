@@ -297,6 +297,15 @@ class LinearModel:
         s, U = np.linalg.eigh(G)
         s = np.clip(s, 0.0, None)
         qU = U.T @ q
+        # Directions G cannot resolve (eigenvalues at round-off level, e.g.
+        # ACSF channels that are ~0 for every atom) carry no information:
+        # their qU is round-off too.  Left in, m = beta qU / (beta s + lam)
+        # blows up along them, lam = gamma / |m|^2 collapses, and the
+        # iteration settles on a degenerate fixed point (SW-Si v2 after
+        # ADR-0006: lam 1.5e-11, test error 14-38 sigma).  Zero them.
+        null = s <= s.max() * D * np.finfo(float).eps
+        s[null] = 0.0
+        qU[null] = 0.0
         beta = n_eff / max(tt, 1e-300)
         lam = np.full(D, max(float(s.mean()), 1e-300) * beta * 1e-6)
 
