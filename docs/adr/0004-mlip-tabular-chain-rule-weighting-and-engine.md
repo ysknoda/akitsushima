@@ -189,6 +189,23 @@ data.)
    - With in-package ACSF the linear model is a `relax`/`md` engine like
      ELM/NN (decision 6).
 
+10. **Defaults and acceptance criteria after the verification** (decided by
+    the user, 2026-09-25, from the follow-up in the appendix):
+    - `ELMModel` / `QuantizedELMModel`: `direct_link=True` (RVFL) by
+      default; `reg` then acts on the hidden weights only, and
+      `reg_search` picks it on the validation split.
+    - `NNModel`: `activation='softplus'` and `direct_link=True` by
+      default; `deterministic=True` (torch deterministic algorithms, one
+      CPU thread during fit) is available for bit-reproducible training,
+      off by default for speed.
+    - Decision 7's learning criterion is judged on SW-Si data whose test
+      cells lie inside the training strain range (data set v2).  Test
+      cells with strains outside it (data set v1) measure transferability
+      and move to the ADR-0005 comparison, item (e).
+    - LightGBM's T3a criterion is judged with noise-optimal weights
+      (1/sigma^2 per row), the rule used for SW-Si; the template's
+      category weights are a user choice, not part of the test.
+
 ## Evidence: LightGBM ablation (2026-09-25)
 
 Data: T3a shared data set (`example/mlip/shared_{train,test}.csv`, noise
@@ -341,8 +358,10 @@ standardisation.
 | run | E | F | S | wall |
 |---|---|---|---|---|
 | label feature on (default) | 1.59 | 1.41 | 1.43 | 21 min |
-| label feature off | running (4 of 30 trials after 35 min) | | | |
+| label feature off (template weights) | 1.42 | 1.35 | 1.36 | 3.7 h |
+| label feature on, noise-optimal weights (1/sigma^2 per row: equal for T3a) | 1.25 | 1.27 | 1.29 | 43 min |
 
+(Wall times of the later runs overlap other jobs on the same machine.)
 The ablation's best (old weights, no label feature, fixed min_gain 0 and
 lambda in [1e-8, 10]) was 1.45 / 1.40 / 1.42 in 85 min.  With the label
 feature, E misses the 1.5 criterion narrowly while F and S pass.  T3a gives
@@ -351,3 +370,96 @@ every label the same function, so a label split only separates the E rows
 without it tests that.  Without the label feature single trials early-stop
 far later (trial 0: 1066 s against 87 s), so the raised iteration cap makes
 `optuna_timeout` the practical bound on search time.
+
+### Follow-up (2026-09-25): RVFL, NN, activation functions, LightGBM weights
+
+Changes, all opt-in (defaults unchanged, pending the user's decision):
+
+- `ELMModel(direct_link=True)`: random-vector functional link (Pao, Park
+  & Sobajic, Neurocomputing 6, 163 (1994)), E/N = beta . h(d) +
+  gamma . d_n + beta0; the F/S rows stay linear in (beta, gamma, beta0).
+  With the direct solver, `reg` penalises the hidden weights beta only
+  (gamma and beta0 get a 1e-12 relative jitter), so a large reg shrinks
+  the model to the linear model it contains, not to zero.
+- `ELMModel(reg_search=[...])`: reg chosen on the structure-grouped
+  validation split; A^T A is built once and re-solved per candidate.
+  Needed because the scale of reg follows that of the row weights (useful
+  values were 1e4-1e8 with the SW-Si weights of ~1e4 per row).
+- `NNModel(direct_link=True)`: MLP(x) + gamma . x_n.
+- Tests: RVFL rows = finite-difference derivatives (tanh, rff, QELM);
+  RVFL with reg 1e12 equals the linear model; reg_search picks the
+  lowest validation loss; NN direct-link save/load.  46 tests in
+  `tests/test_mlip_chain_rule.py`.
+
+**Two SW-Si data sets.**  v1 (above) trains on 3 cells and tests on a cell
+with an unseen strain, so its test mixes learning SW with extrapolating in
+strain.  v2 trains on 15 cells (unstrained + 14 random strains up to
++/-3%) and tests on 5 new cells from the same strain distribution
+(interpolation); otherwise identical (`sw_si_verify.py --dataset v2`).
+
+v2 (test RMSE / sigma, lattice error, NVE all < 0.02 meV/atom):
+
+| model | E | F | S | a err | verdict |
+|---|---|---|---|---|---|
+| linear / bayes_ridge / ard | 1.02 | 1.01-1.02 | 0.97-0.98 | -0.02% | PASS |
+| ELM tanh (plain) | 1.03 | 1.08 | 1.00 | +0.03% | PASS |
+| RVFL tanh | 1.02 | 1.02 | 0.97 | -0.02% | PASS |
+| NN silu, 3 seeds | 1.16-1.33 | 1.15-1.24 | 1.36-1.44 | -0.36 to +0.14% | 2 of 3 fail the lattice check |
+| NN silu + direct link, 3 seeds | 1.05-1.15 | 1.10-1.13 | 1.03-1.17 | -0.10 to +0.03% | PASS |
+
+So the v1 failures of ELM and NN were extrapolation, not a defect: with
+training data covering the strain range, the plain ELM passes.  The NN
+results are not reproducible run to run even at a fixed seed (test E at
+seed 42: 50.6 then 59.4 sigma on v1), presumably non-deterministic CPU
+reductions in torch; its validation loss, drawn from the training cells,
+cannot see the extrapolation failure, so early stopping cannot guard
+against it.  The same holds for `reg_search` on v1: it selected reg = 100
+and RVFL stayed at 2.6 / 2.1 / 4.9 sigma, while a large reg (1e6-1e8)
+gives the linear model's 1.02.
+
+**Activation functions** (`activation_scan.py`; ELM 400 units with
+reg_search; NN [64, 64], seeds 42/1/2; relu excluded -- forces are its
+first derivative and would jump):
+
+- v2 (interpolation): all ELM activations 1.02-1.09 sigma plain (rff
+  1.07 / 1.16 / 1.07) and 1.02 / 1.02 / 0.97 with the direct link; all NN
+  activations F 1.09-1.15, S 1.0-1.5, E 1.03-1.69 with the spread over
+  seeds larger than that over activations.  The activation hardly matters.
+- v1 (extrapolation): it matters a great deal.  NN ranges over seeds:
+  softplus + direct link 1.07-1.47 / 1.14-1.22 / 1.08-1.27 (the only
+  configuration near the criterion), softplus 1.14-2.11 / 1.24-1.38 /
+  1.25-1.72, tanh 1.17-2.30 / 1.22-1.37 / 1.17-3.95; silu 2.7-12.8 (E),
+  gelu 19-89, mish 18-101, and with the direct link silu 17-132.  Two NN
+  runs relaxed to a lattice constant 28-30% off.  ELM: 1.5-35 sigma for
+  every activation; best mish + direct link (1.51 / 2.38 / 3.82).  A
+  plausible reading (not established): softplus and tanh have monotone,
+  bounded first derivatives, while silu, gelu and mish have a
+  non-monotone dip near zero, so gradients far from the data -- which
+  set the extrapolated forces and stresses -- behave less predictably.
+
+**LightGBM.**  With the template's weights T3a puts 160x more weight on an
+E row than on an F row, although all rows have the same noise.  With
+noise-optimal (equal) weights the fit passes: 1.25 / 1.27 / 1.29 sigma,
+better than the bare library unweighted (1.30 / 1.32 / 1.33).  The E miss
+was the weighting of the test, not the model.
+
+**Verification with the decision-10 defaults** (`sw_si_verify.py`,
+models `elm_def` = ELM 400 units with the direct link and reg_search,
+`nn_def` = NN [64, 64], softplus, direct link, deterministic):
+
+| model | data | E | F | S | a err | verdict |
+|---|---|---|---|---|---|---|
+| ELM default | v2 | 1.02 | 1.02 | 0.97 | -0.02% | PASS |
+| NN default, patience 40 (3 seeds) | v2 | 1.09-1.86 | 1.09-1.10 | 1.00-1.11 | -0.08 to -0.04% | 2 of 3 PASS (E of seed 42) |
+| NN default, patience 150, <= 1500 epochs | v2 | 1.04-1.11 | 1.06-1.07 | 1.00-1.01 | | 3 of 3 PASS |
+| ELM default | v1 | 2.58 | 2.14 | 4.91 | -0.07% | transferability (ADR-0005) |
+| NN default, patience 40 | v1 | 1.12-1.76 | 1.15-1.27 | 1.10-1.50 | -0.07 to +0.07% | transferability |
+| NN default, patience 150, <= 1500 epochs | v1 | 1.04-1.15 | 1.10-1.12 | 1.01-1.08 | | transferability |
+
+The deterministic runs repeat exactly (patience-40 numbers identical in two
+separate runs).  E is the slowest quantity for the NN to converge (one E
+row per 199 rows): an early-stopping patience of 150 epochs brings every
+seed to the noise level on both data sets.  The NN's defaults
+(`early_stopping_patience=30`, `epochs=500`) are unchanged here, pending
+the user's decision; the recommendation is patience 150 with up to 1500
+epochs.

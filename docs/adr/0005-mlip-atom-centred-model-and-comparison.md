@@ -75,7 +75,10 @@ atom-centred ELM, QELM, NN. LightGBM is left out of item (d).
   and reproduction of the reference potential's lattice constant and elastic
   constants;
 - (e) transferability: cells of a size not in training (train 64 atoms, test
-  216 atoms) and surface-containing structures.
+  216 atoms), surface-containing structures, and strains outside the
+  training range -- ADR-0004's SW-Si data set v1, on which the tabular
+  nonlinear models extrapolated poorly (ELM 10 sigma; NN 2-132 sigma
+  depending on seed and activation; linear 1.0 sigma).
 
 **Data**, in this order:
 1. Si labelled with Stillinger-Weber (PRB 31, 5262 (1985)): 64-atom diamond

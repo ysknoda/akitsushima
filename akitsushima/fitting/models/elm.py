@@ -141,7 +141,9 @@ class ELMModel:
                  verbose         : bool  = True,
                  masses          : Optional[np.ndarray] = None,
                  row_independent : bool  = False,
-                 solver          : str   = 'auto'):
+                 solver          : str   = 'auto',
+                 direct_link     : bool  = True,
+                 reg_search      : Optional[list] = None):
         """
         Parameters
         ----------
@@ -194,6 +196,18 @@ class ELMModel:
         row_independent : bool
             False (default): chain-rule training, a force field.
             True: pre-0.2.0a3 per-row regression (not a force field).
+        direct_link : bool
+            (default True since 0.2.0a3; ADR-0004 follow-up.)  Add a direct linear term of the (standardised) descriptor to
+            the output -- the random-vector functional-link (RVFL) form,
+            y = beta . h(x) + gamma . x_n (+ beta0):  Pao, Park & Sobajic,
+            Neurocomputing 6, 163 (1994).  The fit then contains the
+            linear model as a special case; the output stays linear in
+            (beta, gamma, beta0), so the solve is unchanged.
+        reg_search : list of float or None
+            Candidate ``reg`` values; each is solved (direct solver only,
+            reusing A^T A) and the one with the lowest weighted loss on
+            the structure-grouped validation split is kept.  Useful
+            because the scale of ``reg`` follows that of the row weights.
         solver     : str
             ``'direct'``: normal equations (A^T A + reg I) beta = A^T t,
             accumulated chunk by chunk and solved by Cholesky -- the same
@@ -232,6 +246,9 @@ class ELMModel:
                 f"ELMModel: solver must be 'auto', 'direct' or 'lsqr', "
                 f"got {solver!r}.")
         self.solver           = solver
+        self.direct_link      = bool(direct_link)
+        self.reg_search       = ([float(r) for r in reg_search]
+                                 if reg_search else None)
         # Descriptor the model was trained on, when generated in-package
         # (JSON string; empty for external CSV descriptors).  Needed to
         # run the model as a relax/md engine (ADR-0004, decision 6).
@@ -242,6 +259,7 @@ class ELMModel:
         self._b    : Optional[np.ndarray] = None
         self._beta : Optional[np.ndarray] = None
         self._beta0: float                = 0.0
+        self._gamma: Optional[np.ndarray] = None   # direct-link weights
         self._D    : Optional[int]        = None
         self._fitted = False
 
@@ -438,10 +456,8 @@ class ELMModel:
         RAM: O(N_tr x N_h)  (float32 halves it)
         matmul cost per iteration: O(N_tr x N_h)
         """
-        N_tr, N_h = len(w_tr), self.n_hidden if self.activation != 'rff' \
-                    else self._W.shape[1] * 2
-
-        H_tr = self._hidden(X_tr_n)      # (N_tr, N_h)  always float64 here
+        H_tr = self._ri_rows(X_tr_n)     # (N_tr, N_out)  float64 here
+        N_tr, N_h = H_tr.shape
 
         # float32 storage -> matvec cast back to float64
         if self.use_float32:
@@ -502,7 +518,7 @@ class ELMModel:
         A     : LinearOperator  (N_tr, N_h)
         """
         N_tr  = len(w_tr)
-        N_h   = self.n_hidden
+        N_h   = self._n_out()
         chunk = self.chunk_size
         W     = self._W        # (D, N_h)  ---  captured by closure
         b     = self._b        # (N_h,)
@@ -526,7 +542,7 @@ class ELMModel:
             Compute one weighted mini-batch of the hidden matrix.
             Honours use_float32 / activation='rff' via _hidden().
             """
-            H_c = self._hidden(X_chunk)                    # float64
+            H_c = self._ri_rows(X_chunk)                   # float64
             return H_c * w_chunk[:, None]                  # (chunk, N_h)
 
         def matvec(x: np.ndarray) -> np.ndarray:
@@ -571,12 +587,40 @@ class ELMModel:
         """Dense hidden-layer weights actually used by _hidden()."""
         return self._W
 
+    def _n_hid(self) -> int:
+        return (2 * self._W.shape[1] if self.activation == 'rff'
+                else self._W.shape[1])
+
+    def _n_lin(self) -> int:
+        """Number of direct-link weights (0 without direct_link)."""
+        return self._W.shape[0] if self.direct_link else 0
+
     def _n_out(self) -> int:
-        """Number of output weights (hidden units, plus the E-row bias
-        in chain-rule mode)."""
-        n_h = (2 * self._W.shape[1] if self.activation == 'rff'
-               else self._W.shape[1])
-        return n_h if self.row_independent else n_h + 1
+        """Number of output weights: hidden units, direct-link weights,
+        plus the E-row bias in chain-rule mode."""
+        n = self._n_hid() + self._n_lin()
+        return n if self.row_independent else n + 1
+
+    def _ri_rows(self, X_norm: np.ndarray) -> np.ndarray:
+        """Row-independent design rows: h(x_n), then x_n if direct_link."""
+        H = self._hidden(X_norm)
+        return np.hstack([H, X_norm]) if self.direct_link else H
+
+    def _split_coef(self, coef):
+        """(beta, gamma, beta0) from the solved output-weight vector."""
+        nh, nl = self._n_hid(), self._n_lin()
+        beta = coef[:nh]
+        gamma = coef[nh:nh + nl] if self.direct_link else None
+        beta0 = 0.0 if self.row_independent else float(coef[-1])
+        return beta, gamma, beta0
+
+    def _coef(self):
+        parts = [self._beta]
+        if self.direct_link:
+            parts.append(self._gamma)
+        if not self.row_independent:
+            parts.append([self._beta0])
+        return np.concatenate(parts)
 
     def _preact(self, X_norm: np.ndarray) -> np.ndarray:
         """Z = X_norm W (+ b), float64, with the effective weights."""
@@ -603,24 +647,32 @@ class ELMModel:
         Design matrix of the given rows, one column per output weight
         (hidden units, then the E-row bias):
 
-            E row : [ h(z_s),                         1 ]
-            F/S   : [ N_s h'(z_s) (*) ((X / X_std) W), 0 ]
+            E row : [ h(z_s),                          d_n,           1 ]
+            F/S   : [ N_s h'(z_s) (*) ((X / X_std) W), N_s X / X_std,  0 ]
+
+(the middle block only with direct_link; d_n = (d - mean) / X_std).
 
         z_s is the pre-activation of the row's structure descriptor d_s.
         An F row's X is -dd/dr and an S row's X is -(1/V) dd/dT, so these
         rows are exactly N grad f(d) . X for f(d) = beta . h(d) + beta0.
         """
         n = len(lab_rows)
+        nh, nl = self._n_hid(), self._n_lin()
         A = np.zeros((n, self._n_out()), dtype=np.float64)
         isE = lab_rows == 'E'
         if isE.any():
-            A[isE, :-1] = self._hidden_from_Z(Zs[sid_rows[isE]])
+            A[isE, :nh] = self._hidden_from_Z(Zs[sid_rows[isE]])
+            if nl:
+                A[isE, nh:nh + nl] = self._normalise(X_rows[isE])
             A[isE, -1] = 1.0
         isD = ~isE
         if isD.any():
-            V = (X_rows[isD] / self._X_std) @ self._W_eff()
-            A[isD, :-1] = (self._hidden_dir(Zs[sid_rows[isD]], V)
-                           * n_at[sid_rows[isD]][:, None])
+            Xd = X_rows[isD] / self._X_std
+            Nd = n_at[sid_rows[isD]][:, None]
+            V = Xd @ self._W_eff()
+            A[isD, :nh] = self._hidden_dir(Zs[sid_rows[isD]], V) * Nd
+            if nl:
+                A[isD, nh:nh + nl] = Xd * Nd
         return A
 
     def _structure_Z(self, X, e_row) -> np.ndarray:
@@ -808,10 +860,27 @@ class ELMModel:
             print(f'  Operator ready in {t_build*1000:.0f} ms')
             print(f'  Running LSQR (maxiter={self.lsqr_maxiter}) ...')
 
+        def _sub(idx):
+            return dict(labels=labels[idx], X=X[idx],
+                        struct_ids=(None if struct_ids is None
+                                    else np.asarray(struct_ids)[idx]),
+                        n_atoms=(None if n_atoms is None
+                                 else np.asarray(n_atoms)[idx]))
+
         use_direct = (self.solver == 'direct'
                       or (self.solver == 'auto' and N_out <= 6000))
         t_lsqr0 = _time.perf_counter()
-        if use_direct:
+        if use_direct and self.reg_search and n_val:
+            # Choose reg on the structure-grouped validation split; A^T A
+            # is accumulated once and re-solved per candidate.
+            def _val_loss(coef):
+                self._beta, self._gamma, self._beta0 = self._split_coef(coef)
+                self._fitted = True
+                p = self.predict_table(**_sub(idx_val))
+                return float(np.sum(w_row[idx_val] * (p - targets[idx_val]) ** 2))
+            result = self._solve_direct(A, t_vec, regs=self.reg_search,
+                                        val_loss=_val_loss)
+        elif use_direct:
             result = self._solve_direct(A, t_vec)
         else:
             result = self._lsqr(A, t_vec,
@@ -823,10 +892,7 @@ class ELMModel:
         t_lsqr  = _time.perf_counter() - t_lsqr0
 
         coef = result[0]
-        if self.row_independent:
-            self._beta, self._beta0 = coef, 0.0
-        else:
-            self._beta, self._beta0 = coef[:-1], float(coef[-1])
+        self._beta, self._gamma, self._beta0 = self._split_coef(coef)
         flag, itn, rnorm = result[1], result[2], result[3]
         self._fitted = True
 
@@ -840,13 +906,6 @@ class ELMModel:
                 t_ms = t_lsqr / itn * 1000 if itn > 0 else 0.0
                 print(f'  LSQR: flag={flag}  iter={itn}  r={rnorm:.4e}  '
                       f'total={t_lsqr:.1f}s  ({t_ms:.1f} ms/iter)')
-
-        def _sub(idx):
-            return dict(labels=labels[idx], X=X[idx],
-                        struct_ids=(None if struct_ids is None
-                                    else np.asarray(struct_ids)[idx]),
-                        n_atoms=(None if n_atoms is None
-                                 else np.asarray(n_atoms)[idx]))
 
         train_sc = self._score(targets[idx_train],
                                self.predict_table(**_sub(idx_train)),
@@ -862,11 +921,29 @@ class ELMModel:
 
         return self
 
-    def _solve_direct(self, A, t_vec):
+    def _penalty(self, m: int) -> np.ndarray:
+        """
+        Diagonal ridge penalty of the direct solve.  Without direct_link:
+        reg on every output weight (LSQR's damp = sqrt(reg)).  With
+        direct_link, reg acts on the hidden-layer weights beta only; the
+        direct-link weights gamma and the E-row bias get a relative
+        jitter (1e-12 of the mean diagonal) that only keeps the system
+        definite.  So a large reg shrinks the model towards the linear
+        model it contains, not towards zero.
+        """
+        pen = np.full(m, float(self.reg))
+        if self.direct_link:
+            pen[self._n_hid():] = 0.0
+            self._pen_linear_only = True
+        return pen
+
+    def _solve_direct(self, A, t_vec, regs=None, val_loss=None):
         """
         Minimise ||A beta - t||^2 + reg ||beta||^2 through the normal
         equations G = A^T A, accumulated over the operator's row blocks
         (one block in cached mode; chunks in full matrix-free mode).
+        With ``regs`` and ``val_loss``, solves once per candidate reg,
+        keeps the one with the lowest validation loss and sets self.reg.
         Returns an LSQR-shaped tuple (beta, flag, iter, rnorm).
         """
         import scipy.linalg as _sla
@@ -877,11 +954,32 @@ class ELMModel:
             B = np.asarray(B, dtype=np.float64)
             G += B.T @ B
             rhs += B.T @ t_vec[sl]
-        G[np.diag_indices(m)] += self.reg
-        try:
-            beta = _sla.cho_solve(_sla.cho_factor(G, lower=True), rhs)
-        except np.linalg.LinAlgError:
-            beta = _sla.lstsq(G, rhs)[0]
+        G = 0.5 * (G + G.T)
+
+        def _solve(reg):
+            saved, self.reg = self.reg, reg
+            pen = self._penalty(m)
+            self.reg = saved
+            if self.direct_link:
+                pen[self._n_hid():] = 1e-12 * float(np.mean(np.diag(G)))
+            Gp = G.copy()
+            Gp[np.diag_indices(m)] += pen
+            try:
+                return _sla.cho_solve(_sla.cho_factor(Gp, lower=True), rhs)
+            except np.linalg.LinAlgError:
+                return _sla.lstsq(Gp, rhs)[0]
+
+        if regs:
+            res = []
+            for r in regs:
+                res.append((float(r), val_loss(_solve(float(r)))))
+                if self.verbose:
+                    print(f'  reg {r:10.3g}: weighted val loss {res[-1][1]:.6e}')
+            self.reg = min(res, key=lambda x: x[1])[0]
+            self.reg_search_results_ = res
+            if self.verbose:
+                print(f'  selected reg = {self.reg:g}')
+        beta = _solve(self.reg)
         rnorm = float(np.linalg.norm(A.matvec(beta) - t_vec))
         return beta, 0, 0, rnorm
 
@@ -956,7 +1054,7 @@ class ELMModel:
         sid, e_row, n_at = build_structure_index(
             labels, struct_ids, n_atoms, caller='ELMModel.predict_table')
         Zs = self._structure_Z(X, e_row)
-        coef = np.append(self._beta, self._beta0)
+        coef = self._coef()
         out = np.empty(len(labels))
         for s in range(0, len(labels), self.chunk_size):
             e = min(s + self.chunk_size, len(labels))
@@ -981,6 +1079,9 @@ class ELMModel:
         eye = np.eye(Dn) / self._X_std[:, None]             # directions
         V = eye @ self._W_eff()                              # (D, n_w)
         g[:] = self._hidden_dir(np.repeat(z, Dn, axis=0), V) @ self._beta
+        if self.direct_link and self._gamma is not None:
+            f += float(self._normalise(d[None, :])[0] @ self._gamma)
+            g += self._gamma / self._X_std
         return f, g
 
     # ------------------------------------------------------------------
@@ -1050,7 +1151,11 @@ class ELMModel:
         if not self._fitted:
             raise RuntimeError("ELMModel: call fit() or fit_csv() first.")
         X_n = self._normalise(X)
-        return self._hidden(X_n) @ self._beta + self._beta0
+        y = self._hidden(X_n) @ self._beta + self._beta0
+        if self.direct_link and self._gamma is not None:
+            # (None for a model assembled by hand without fit(): no term)
+            y = y + X_n @ self._gamma
+        return y
 
     def compute(self,
                 lattice          : np.ndarray,
@@ -1401,6 +1506,9 @@ class ELMModel:
     def _extra_state(self) -> dict:
         """Arrays added in 0.2.0a3 (chain rule, ADR-0004)."""
         return dict(beta0             = np.array(self._beta0),
+                    direct_link       = np.array(self.direct_link),
+                    gamma             = (self._gamma if self._gamma is not None
+                                         else np.zeros(0)),
                     row_independent   = np.array(self.row_independent),
                     descriptor_config = np.array(self.descriptor_config))
 
@@ -1409,6 +1517,9 @@ class ELMModel:
         self.row_independent = (bool(npz['row_independent'])
                                 if 'row_independent' in npz else True)
         self._beta0 = float(npz['beta0']) if 'beta0' in npz else 0.0
+        self.direct_link = (bool(npz['direct_link'])
+                            if 'direct_link' in npz else False)
+        self._gamma = (npz['gamma'] if self.direct_link else None)
         self.descriptor_config = (str(npz['descriptor_config'])
                                   if 'descriptor_config' in npz else "")
 

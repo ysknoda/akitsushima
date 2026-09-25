@@ -645,3 +645,92 @@ def test_bayesian_linear_converges_with_noise_optimal_weights(method):
     f = lab == "F"
     assert np.sqrt(np.mean((p[f] - y[f]) ** 2)) / sig_F < 1.1
     np.testing.assert_allclose(m.coef_, wt, atol=5e-3)
+
+
+# ---------------------------------------------------------------- RVFL
+
+
+@pytest.mark.parametrize("cls, kw", [
+    (ELMModel, {}), (ELMModel, {"activation": "rff"}), (QuantizedELMModel, {}),
+])
+def test_rvfl_rows_are_derivatives_of_its_energy(cls, kw, tmp_path):
+    y, lab, w, X = _chain_table()
+    m = cls(n_hidden=30, reg=1e-6, verbose=False, direct_link=True, **kw)
+    m.fit(y, lab, X, weights=w)
+    _fd_rows_match(m, lab[:16], X[:16])
+    f, g = m.energy_and_gradient(X[0])
+    assert f == pytest.approx(m.predict(X[:1])[0], rel=1e-12)
+    assert 3 * g @ X[1] == pytest.approx(m.predict_table(lab[:16], X[:16])[1],
+                                         rel=1e-10)
+    p = str(tmp_path / "m.npz")
+    m.save(p)
+    m2 = cls.load(p)
+    assert m2.direct_link
+    np.testing.assert_allclose(m2.predict_table(lab, X), m.predict_table(lab, X))
+
+
+def test_rvfl_with_large_reg_reduces_to_the_linear_model():
+    """reg acts on the hidden weights only, so reg -> infinity leaves the
+    direct-link part: the ridge-free linear model on the same rows."""
+    rng = np.random.default_rng(1)
+    D, N = 6, 4
+    wt, bt = rng.normal(size=D), -4.3
+    y, lab, w, X = [], [], [], []
+    for _ in range(60):
+        d = rng.normal(size=D)
+        y.append(d @ wt + bt); lab.append("E"); w.append(N); X.append(d)
+        for _ in range(3 * N):
+            x = rng.normal(size=D)
+            y.append(N * wt @ x); lab.append("F"); w.append(0.3); X.append(x)
+    y, lab, w, X = map(np.array, (y, lab, w, X))
+    m = ELMModel(n_hidden=50, reg=1e12, direct_link=True, verbose=False)
+    m.fit(y, lab, X, weights=w)
+    assert np.abs(m._beta).max() < 1e-6
+    np.testing.assert_allclose(m._gamma / m._X_std, wt, atol=1e-6)
+
+
+def test_elm_reg_search_picks_from_the_validation_split():
+    y, lab, w, X = _chain_table(n_struct=80, noise=0.05)
+    m = ELMModel(n_hidden=60, verbose=False, direct_link=True,
+                 reg_search=[1e-6, 1e-2, 1e2]).fit(y, lab, X, weights=w)
+    losses = dict(m.reg_search_results_)
+    assert m.reg == min(losses, key=losses.get)
+
+
+def test_nn_direct_link_round_trip(tmp_path):
+    if not HAS_TORCH:
+        pytest.skip("torch not installed")
+    from akitsushima.fitting.models.nn import NNModel
+    y, lab, w, X = _chain_table()
+    m = NNModel(hidden_layers=[8], epochs=5, verbose=False, direct_link=True)
+    m.fit(y, lab, X, weights=w)
+    p = str(tmp_path / "nn.pt")
+    m.save(p)
+    m2 = NNModel.load(p)
+    assert m2.direct_link
+    np.testing.assert_allclose(m2.predict_table(lab, X), m.predict_table(lab, X))
+
+
+def test_nn_deterministic_training_is_bit_reproducible():
+    if not HAS_TORCH:
+        pytest.skip("torch not installed")
+    from akitsushima.fitting.models.nn import NNModel
+    y, lab, w, X = _chain_table(n_struct=40)
+    preds = []
+    for _ in range(2):
+        m = NNModel(hidden_layers=[16, 16], epochs=15, batch_size=64,
+                    verbose=False, deterministic=True)
+        m.fit(y, lab, X, weights=w)
+        preds.append(m.predict_table(lab, X))
+    np.testing.assert_array_equal(preds[0], preds[1])
+
+
+def test_model_defaults_follow_the_adr_0004_follow_up():
+    """ELM/QELM: direct link on; NN: softplus with a direct link."""
+    assert ELMModel(verbose=False).direct_link
+    assert QuantizedELMModel(verbose=False).direct_link
+    if HAS_TORCH:
+        from akitsushima.fitting.models.nn import NNModel
+        m = NNModel(verbose=False)
+        assert m.activation == "softplus" and m.direct_link
+        assert not m.deterministic

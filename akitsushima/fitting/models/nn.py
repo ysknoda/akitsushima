@@ -64,7 +64,10 @@ class NNModel:
     ----------
     hidden_layers  : list of int -- hidden layer sizes, e.g. [128, 64].
                       len(hidden_layers) is the number of hidden layers.
-    activation     : 'tanh' | 'relu' | 'gelu' | 'silu' | 'mish' | 'softplus'.
+    activation     : 'tanh' | 'relu' | 'gelu' | 'silu' | 'mish' | 'softplus'
+                      (default softplus since 0.2.0a3: on SW-Si test cells
+                      outside the training strains it extrapolated best;
+                      relu gives discontinuous forces and is unsuited to MD).
     w_energy       : category weight applied to 'E' rows.
     w_forces       : category weight applied to 'F' rows.
     w_stress       : category weight applied to 'S' rows.
@@ -77,6 +80,14 @@ class NNModel:
     batch_size     : mini-batch size in rows (chain-rule mode batches whole
                       structures, about batch_size rows per batch).
     weight_decay   : L2 regularisation coefficient (Adam's weight_decay).
+    deterministic  : make training bit-reproducible for a given seed:
+                      torch's deterministic algorithms and a single CPU
+                      thread during fit() (multi-threaded reductions sum
+                      in a varying order).  Slower; off by default.
+    direct_link    : (default True) add a linear term of the standardised descriptor to
+                      the output, f(x) = MLP(x) + gamma . x_n (as the ELM's
+                      RVFL option), so the network only has to learn the
+                      nonlinear remainder of a nearly linear energy.
     early_stopping_patience : stop training if validation loss does not
                       improve for this many consecutive epochs (0 disables
                       early stopping, always running the full `epochs`).
@@ -88,7 +99,7 @@ class NNModel:
 
     def __init__(self,
                  hidden_layers  : list  = None,
-                 activation     : str   = 'silu',
+                 activation     : str   = 'softplus',
                  w_energy       : float = 1.0,
                  w_forces       : float = 0.1,
                  w_stress       : float = 10.0,
@@ -102,7 +113,9 @@ class NNModel:
                  device         : str   = 'auto',
                  seed           : int   = 42,
                  verbose        : bool  = True,
-                 row_independent: bool  = False):
+                 row_independent: bool  = False,
+                 direct_link    : bool  = True,
+                 deterministic  : bool  = False):
         if not HAS_TORCH:
             raise ImportError(
                 "NNModel requires PyTorch, which is not installed. "
@@ -123,6 +136,8 @@ class NNModel:
         self.seed           = int(seed)
         self.verbose        = bool(verbose)
         self.row_independent = bool(row_independent)
+        self.direct_link    = bool(direct_link)
+        self.deterministic  = bool(deterministic)
         self.descriptor_config = ""   # see ELMModel.descriptor_config
 
         if device == 'auto':
@@ -161,6 +176,8 @@ class NNModel:
             in_dim = h
         layers.append(_torch_nn.Linear(in_dim, 1))
         net = _torch_nn.Sequential(*layers)
+        if self.direct_link:
+            net = _DirectLink(net, D)
         return net.to(self.device)
 
     # ------------------------------------------------------------------
@@ -198,7 +215,22 @@ class NNModel:
         return torch.where(lab_isE, pred_E, pred_D)
 
     # ------------------------------------------------------------------
-    def fit(self,
+    def fit(self, *args, **kwargs) -> 'NNModel':
+        """Train the network; see :meth:`_fit` for the arguments.  With
+        ``deterministic=True`` the run is bit-reproducible for a seed."""
+        if not self.deterministic:
+            return self._fit(*args, **kwargs)
+        n_thr = torch.get_num_threads()
+        was_det = torch.are_deterministic_algorithms_enabled()
+        torch.set_num_threads(1)
+        torch.use_deterministic_algorithms(True)
+        try:
+            return self._fit(*args, **kwargs)
+        finally:
+            torch.use_deterministic_algorithms(was_det)
+            torch.set_num_threads(n_thr)
+
+    def _fit(self,
             targets      : np.ndarray,
             labels       : np.ndarray,
             X            : np.ndarray,
@@ -517,6 +549,7 @@ class NNModel:
             'X_mean'        : self._X_mean,
             'X_std'         : self._X_std,
             'row_independent'  : self.row_independent,
+            'direct_link'      : self.direct_link,
             'descriptor_config': self.descriptor_config,
         }, p)
         if self.verbose:
@@ -538,6 +571,7 @@ class NNModel:
             r0            = ckpt['r0'],
             eps0          = ckpt['eps0'],
             seed          = ckpt['seed'],
+            direct_link   = bool(ckpt.get('direct_link', False)),
             device        = 'cpu',
             verbose       = verbose,
         )
@@ -551,3 +585,17 @@ class NNModel:
         obj.descriptor_config = str(ckpt.get('descriptor_config', ''))
         obj._fitted = True
         return obj
+
+
+if HAS_TORCH:
+    class _DirectLink(_torch_nn.Module):
+        """MLP(x) + gamma . x (no bias: the MLP's last layer has one)."""
+
+        def __init__(self, mlp, D):
+            super().__init__()
+            self.mlp = mlp
+            self.lin = _torch_nn.Linear(D, 1, bias=False)
+            _torch_nn.init.zeros_(self.lin.weight)
+
+        def forward(self, x):
+            return self.mlp(x) + self.lin(x)

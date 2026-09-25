@@ -49,7 +49,7 @@ def _build_model(model_type, ml, verbose):
 
         return NNModel(
             hidden_layers=ml.get("hidden_layers", [128, 64]),
-            activation=ml.get("activation", "silu"),
+            activation=ml.get("activation", "softplus"),
             r0=ml.get("r0", 1.0),
             eps0=ml.get("eps0", 0.01),
             learning_rate=ml.get("learning_rate", 1.0e-3),
@@ -60,6 +60,8 @@ def _build_model(model_type, ml, verbose):
             device=ml.get("device", "auto"),
             seed=ml.get("seed", 42),
             row_independent=ml.get("row_independent", False),
+            direct_link=ml.get("direct_link", True),
+            deterministic=ml.get("deterministic", False),
             **common,
         )
     if model_type == "lgbm":
@@ -101,10 +103,12 @@ def _build_model(model_type, ml, verbose):
             eps0=ml.get("eps0", 0.01),
             seed=ml.get("seed", 42),
             row_independent=ml.get("row_independent", False),
+            direct_link=ml.get("direct_link", True),
             **common,
         )
         if model_type == "elm":
             kw["solver"] = ml.get("solver", "auto")
+        kw["reg_search"] = ml.get("reg_search", None)
         return cls(**kw)
     raise ValueError(
         f"mlip.model must be one of {sorted(_MODEL_FILE)}, got '{model_type}'."
@@ -174,7 +178,7 @@ def cmd_mlip(args) -> int:
     elif model_type == "nn":
         for k, d in (
             ("hidden_layers", [128, 64]),
-            ("activation", "silu"),
+            ("activation", "softplus"),
             ("learning_rate", 1.0e-3),
             ("epochs", 500),
             ("batch_size", 256),

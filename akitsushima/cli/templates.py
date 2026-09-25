@@ -555,6 +555,10 @@ mlip:
   activation: tanh
   solver:     auto           # auto | direct | lsqr
   row_independent: false     # true = pre-0.2.0a3 per-row form (not a force field)
+  direct_link: true          # RVFL: + linear term in d (reg then acts
+                             # on the hidden weights only)
+  reg_search: null           # e.g. [1.0e2, 1.0e4, 1.0e6, 1.0e8]: pick reg on
+                             # the validation split (direct solver)
   w_energy:   1.0
   w_forces:   0.1
   w_stress:   10.0
@@ -599,8 +603,11 @@ mlip:
 #   # Number of hidden layers = length of this list; each entry is that
 #   # layer's width. [128, 64] -> 2 hidden layers; [64] -> 1; etc.
 #   hidden_layers: [128, 64]
-#   activation:    silu       # tanh | relu | gelu | silu | mish | softplus
+#   activation:    softplus   # softplus | tanh | gelu | silu | mish (relu: not
+#                             # for MD -- its forces are discontinuous)
 #   row_independent: false
+#   direct_link:   true       # + linear term in d (see ELM above)
+#   deterministic: false      # true = bit-reproducible training (1 thread)
 #   w_energy:      1.0
 #   w_forces:      0.1
 #   w_stress:      10.0

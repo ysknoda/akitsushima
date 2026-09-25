@@ -20,8 +20,9 @@
 > true` restores the old per-row form), all models weight the squared
 > residual by w_cat x w_unit^2 x w_user (the ELM Uncertainty Weighting is
 > gone), and LightGBM uses the row label as a feature, standardises each
-> label and searches a new space. LightGBM files from earlier versions
-> must be refitted.
+> label and searches a new space. ELM / QELM now add a direct linear term
+> by default (`direct_link`), and NN defaults to softplus with a direct
+> linear term. LightGBM files from earlier versions must be refitted.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

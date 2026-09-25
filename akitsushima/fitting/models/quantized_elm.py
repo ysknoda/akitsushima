@@ -59,7 +59,9 @@ class QuantizedELMModel(ELMModel):
                  p_zero          : float = 0.5,
                  use_sparse_w    : bool  = True,
                  verbose         : bool  = True,
-                 row_independent : bool  = False):
+                 row_independent : bool  = False,
+                 direct_link     : bool  = True,
+                 reg_search      : Optional[list] = None):
 
         super().__init__(
             n_hidden         = n_hidden,
@@ -81,6 +83,8 @@ class QuantizedELMModel(ELMModel):
             w_init_scale     = w_init_scale,
             verbose          = verbose,
             row_independent  = row_independent,
+            direct_link      = direct_link,
+            reg_search       = reg_search,
         )
         if not (0 <= p_zero < 1):
             raise ValueError(f"p_zero must be in [0, 1), got {p_zero}")
