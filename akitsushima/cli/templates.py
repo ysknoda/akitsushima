@@ -753,13 +753,14 @@ osmc:
   thermo_every:            1
   seed:                    42
   verbose:                 true
-  # CFCMC (ADR-0009): one fractional atom, U = (1-lambda) U_N + lambda U_N+1
+  # CFCMC (ADR-0009): one fractional atom, U = U_N + g(lambda, U_N+1 - U_N)
   max_disp:          0.2    # displacement amplitude [A]
   lambda_move_ratio: 0.5    # fraction of MC moves that change lambda
   max_dlambda:       0.2    # lambda step uniform in [-max_dlambda, +max_dlambda]
   n_lambda_bins:     10     # bias w(lambda) and estimator bins
   equil_cycles:      200    # discarded; w(lambda) adapted during them
   adapt_weights:     true
+  softcore_kT:       10.0   # E_c / kT of the energy-space soft core (0 = linear)
 """
 
 _YAML_ESM_DEFAULT = """\

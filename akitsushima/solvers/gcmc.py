@@ -1010,13 +1010,17 @@ class CFCMCSimulation(GCMCMDSimulation):
     Grand-canonical MC/MD with a continuous fractional atom (CFCMC, muVT).
 
     One atom of the exchanged species is *fractional*: its coupling
-    ``lambda`` in [0, 1] enters the energy linearly,
+    ``lambda`` in [0, 1] enters the energy through a soft core in energy
+    space (ADR-0009, Q18),
 
-        U(lambda) = (1 - lambda) U_N + lambda U_{N+1},
+        U(lambda) = U_N + g(lambda, dU),   dU = U_{N+1} - U_N,
+        g = lambda dU / (1 + (1 - lambda) max(dU, 0) / E_c),
 
     U_N without the fractional atom, U_{N+1} with it as a full atom, so any
     force function works unchanged (engines, Ewald / PPPM / ESM, an
-    atom-centred MLIP).  Each cycle runs an NVT-MD segment at fixed N and
+    atom-centred MLIP).  g is exact at both ends; an overlap costs at most
+    lambda E_c / (1 - lambda), which keeps the lambda = 0 end regular
+    (linear coupling, E_c -> infinity, biases mu_ex there).  Each cycle runs an NVT-MD segment at fixed N and
     lambda (the fractional atom included) and then
     ``gcmc_attempts_per_cycle`` MC moves: lambda changes (probability
     ``lambda_move_ratio``) or displacements.  A lambda change past 1 makes
@@ -1046,6 +1050,8 @@ class CFCMCSimulation(GCMCMDSimulation):
                         Default n_cycles // 5.
     adapt_weights     : Wang-Landau adaptation of w(lambda) during the
                         equilibration.  Default True.
+    softcore_kT       : E_c in units of k_B T.  Default 10.  0 gives
+                        linear coupling (not recommended, ADR-0009).
 
     ``mu`` is the FULL chemical potential, as in GCMCMDSimulation.  Atoms of
     other species are a fixed framework; atoms of ``species`` may not be
@@ -1065,6 +1071,7 @@ class CFCMCSimulation(GCMCMDSimulation):
         n_lambda_bins: int = 10,
         equil_cycles: Optional[int] = None,
         adapt_weights: bool = True,
+        softcore_kT: float = 10.0,
         **kwargs,
     ):
         kwargs.setdefault("cavity_bias", False)
@@ -1100,6 +1107,11 @@ class CFCMCSimulation(GCMCMDSimulation):
             self.n_cycles // 5 if equil_cycles is None else int(equil_cycles)
         )
         self.adapt_weights = bool(adapt_weights)
+        if softcore_kT < 0:
+            raise ValueError("CFCMCSimulation: softcore_kT must be >= 0.")
+        self.softcore_kT = float(softcore_kT)
+        # 1 / E_c [1/eV]; 0 = linear coupling
+        self._inv_Ec = self._beta / self.softcore_kT if self.softcore_kT > 0 else 0.0
         self._w = np.zeros(self.n_lambda_bins)
         self._wl_f = 1.0
         self._wl_hist = np.zeros(self.n_lambda_bins)
@@ -1140,14 +1152,27 @@ class CFCMCSimulation(GCMCMDSimulation):
         r1 = self._eval(self.positions, self.atom_types, forces)
         if forces:
             (self._E0, F0), (self._E1, F1) = r0, r1
-            F = self._lam * F1
-            F[:-1] += (1.0 - self._lam) * F0
+            gam = self._dg_ddU(self._lam, self._E1 - self._E0)
+            F = gam * F1
+            F[:-1] += (1.0 - gam) * F0
             return F
         self._E0, self._E1 = r0, r1
         return None
 
+    def _g(self, lam, dU):
+        """Soft-core coupling g(lambda, dU) (scalar or array)."""
+        a = (1.0 - lam) * self._inv_Ec
+        return lam * dU / (1.0 + a * np.maximum(dU, 0.0))
+
+    def _dg_ddU(self, lam: float, dU: float) -> float:
+        a = (1.0 - lam) * self._inv_Ec
+        return lam / (1.0 + a * max(dU, 0.0)) ** 2
+
+    def _U_at(self, lam: float, E0: float, E1: float) -> float:
+        return E0 + self._g(lam, E1 - E0)
+
     def _U(self) -> float:
-        return (1.0 - self._lam) * self._E0 + self._lam * self._E1
+        return self._U_at(self._lam, self._E0, self._E1)
 
     def _get_energy(self) -> float:
         return self._U()
@@ -1213,7 +1238,7 @@ class CFCMCSimulation(GCMCMDSimulation):
         self._n_lam_try += 1
 
         if 0.0 <= new <= 1.0:
-            dU = (new - lam) * (self._E1 - self._E0)
+            dU = self._U_at(new, self._E0, self._E1) - U_old
             if self._accept(-beta * dU + self._w[self._bin(new)] - w_old):
                 self._lam = new
                 self._n_lam_acc += 1
@@ -1227,7 +1252,7 @@ class CFCMCSimulation(GCMCMDSimulation):
             pos2 = np.vstack([self.positions, x_new[None, :]])
             types2 = self.atom_types + [self.species]
             E0n, E1n = self._E1, self._eval(pos2, types2)
-            dU = (1.0 - lam2) * E0n + lam2 * E1n - U_old
+            dU = self._U_at(lam2, E0n, E1n) - U_old
             ln_acc = (
                 np.log(V / (Lam3 * (n_sp + 1)))
                 + beta * self.mu
@@ -1261,7 +1286,7 @@ class CFCMCSimulation(GCMCMDSimulation):
             order = keep + [j]  # old fractional row (index N) dropped
             E1n = self._E0  # same atoms, j now fractional
             E0n = self._eval(self.positions[keep], [self.atom_types[i] for i in keep])
-            dU = (1.0 - lam2) * E0n + lam2 * E1n - U_old
+            dU = self._U_at(lam2, E0n, E1n) - U_old
             ln_acc = (
                 np.log(Lam3 * n_sp / V)
                 - beta * self.mu
@@ -1343,8 +1368,9 @@ class CFCMCSimulation(GCMCMDSimulation):
             "N1": np.nan,
             "beta_mu_ex": np.nan,
         }
-        la0 = self._beta * lam[bot] * dU[bot]
-        la1 = -self._beta * (1.0 - lam[top]) * dU[top]
+        # pi(0) / pi(lam) = exp(beta g), pi(1) / pi(lam) = exp(-beta (dU - g))
+        la0 = self._beta * self._g(lam[bot], dU[bot])
+        la1 = -self._beta * (dU[top] - self._g(lam[top], dU[top]))
         c = max(
             la0.max() if bot.any() else -np.inf, la1.max() if top.any() else -np.inf
         )

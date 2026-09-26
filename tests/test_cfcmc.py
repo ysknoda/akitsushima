@@ -1,6 +1,8 @@
 """CFCMC (osmc rebuilt, ADR-0009).
 
-- Forces of U(lambda) = (1 - lambda) U_N + lambda U_N+1 are its gradient.
+- Forces of U(lambda) = U_N + g(lambda, U_N+1 - U_N) (energy-space soft
+  core, ADR-0009 Q18) are its gradient, on both branches of g; g is exact
+  at lambda = 0 and 1 and bounded for overlaps.
 - Exactly solvable muVT system: non-interacting atoms in an external field
   u(x) = c cos(2 pi x / L), so <N> = z I0(beta c) and beta mu_ex =
   -ln I0(beta c) (z = V exp(beta mu) / Lambda^3).  This checks the
@@ -71,7 +73,17 @@ def test_exactly_solvable_field_gives_the_muvt_averages(beta_c, tmp_path):
     assert r["acc_ins"] > 0.1 and r["acc_del"] > 0.1
 
 
-def test_forces_are_the_gradient_of_the_coupled_energy(tmp_path):
+@pytest.mark.parametrize(
+    "x_frac,soft",
+    [
+        ([6.0, 6.0, 2.0], 10.0),  # dU = -0.016 eV: linear branch of g
+        ([4.0, 4.0, 5.0], 10.0),  # dU = 5.7 eV (~550 kT): soft branch
+        ([2.6, 2.4, 2.3], 10.0),  # dU = 1.9e6 eV: deep overlap, g bounded
+        ([4.0, 4.0, 5.0], 0.0),  # linear coupling
+    ],
+    ids=["attractive", "overlap", "deep-overlap", "linear"],
+)
+def test_forces_are_the_gradient_of_the_coupled_energy(x_frac, soft, tmp_path):
     lj = PotentialEngine().add(
         LennardJonesPotential(
             {frozenset({"Ar"}): {"epsilon": 0.0103, "sigma": 3.405}},
@@ -84,22 +96,16 @@ def test_forces_are_the_gradient_of_the_coupled_energy(tmp_path):
         [[2, 2, 2], [5.6, 2.3, 2.1], [2.4, 5.8, 2.2], [5.5, 5.4, 5.9]], float
     )
     sim = CFCMCSimulation(
-        np.eye(3) * 15.0,
-        pos,
-        ["Ar"] * 4,
-        fn,
-        temperature=120.0,
-        mu=-0.2,
-        species="Ar",
-        verbose=False,
-        output_dir=str(tmp_path),
+        np.eye(3) * 15.0, pos, ["Ar"] * 4, fn, temperature=120.0, mu=-0.2,
+        species="Ar", verbose=False, output_dir=str(tmp_path), softcore_kT=soft,
     )
-    sim.positions[-1] = [4.0, 4.0, 5.0]  # fractional atom near the others
+    sim.positions[-1] = x_frac
     sim._lam = 0.37
     U, F, _ = sim._get_forces()
+    assert (sim._E1 - sim._E0 > 0) == (x_frac[0] != 6.0)
     assert F.shape == (5, 3)
-    assert np.abs(F.sum(axis=0)).max() < 1e-10
-    h = 1e-5
+    assert np.abs(F.sum(axis=0)).max() < 1e-9 * max(1.0, np.abs(F).max())
+    h = 1e-6
     for k in range(5):
         for a in range(3):
             sim.positions[k, a] += h
@@ -109,8 +115,23 @@ def test_forces_are_the_gradient_of_the_coupled_energy(tmp_path):
             sim._refresh_energies()
             Um = sim._U()
             sim.positions[k, a] += h
-            assert F[k, a] == pytest.approx(-(Up - Um) / (2 * h), abs=1e-7)
-    assert abs(F[-1]).max() > 1e-3  # the fractional atom is coupled
+            fd = -(Up - Um) / (2 * h)
+            assert F[k, a] == pytest.approx(fd, rel=1e-5, abs=1e-7)
+    if x_frac[0] != 2.6:
+        assert abs(F[-1]).max() > 1e-3  # the fractional atom is coupled
+    else:  # the soft core all but switches off a deep overlap's force
+        assert abs(F[-1]).max() < 1e-6
+
+
+def test_softcore_is_exact_at_the_ends_and_bounded_between(tmp_path):
+    sim = _sim(_field_fn(0.0), tmp_path)
+    kT = K_B * T
+    for dU in (-3 * kT, 0.5 * kT, 1e6 * kT):
+        assert sim._g(0.0, dU) == 0.0
+        assert sim._g(1.0, dU) == pytest.approx(dU)
+    # an overlap costs at most lambda E_c / (1 - lambda)
+    for lam in (0.01, 0.3, 0.9):
+        assert sim._g(lam, 1e12 * kT) <= lam * 10 * kT / (1 - lam) * (1 + 1e-9)
 
 
 def test_crossings_keep_arrays_and_cached_energies_consistent(tmp_path):

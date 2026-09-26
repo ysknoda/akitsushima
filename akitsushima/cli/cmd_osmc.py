@@ -103,6 +103,7 @@ def cmd_osmc(args) -> int:
         n_lambda_bins=os_cfg.get("n_lambda_bins", 10),
         equil_cycles=os_cfg.get("equil_cycles"),
         adapt_weights=os_cfg.get("adapt_weights", True),
+        softcore_kT=os_cfg.get("softcore_kT", 10.0),
     )
 
     t0 = _time.perf_counter()

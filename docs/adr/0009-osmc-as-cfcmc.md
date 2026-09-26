@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # osmc rebuilt as continuous fractional component MC (CFCMC)
@@ -152,3 +152,28 @@ U(lambda) = U_N + g(lambda, dU), dU = U_N+1 - U_N,
 g = lambda dU / (1 + (1 - lambda) max(dU, 0) / E_c): exact end points, the
 same acceptance rules, an overlap costs at most lambda E_c / (1 - lambda),
 forces by the chain rule, still a black-box force function.
+
+## Results with the soft core (2026-09-27, softcore_kT = 10)
+
+Same runs as above (example/gcmc/check_cfcmc.py, 20000 cycles, first
+4000 discarded, 10-block SE):
+
+| stage | quantity | CFCMC | reference | verdict |
+|---|---|---|---|---|
+| ideal gas | <N>_0 / <N>_1 | 39.60 +/- 0.89 / 39.57 +/- 0.91 | 40 | PASS |
+| ideal gas | beta mu_ex | 0.001 +/- 0.027 | 0 | PASS |
+| NIST vapour | <N>_0 / <N>_1 | 45.32 +/- 1.98 / 45.40 +/- 1.99 | 41.90 | PASS (1.7 SE) |
+| NIST vapour | beta mu_ex | -0.700 +/- 0.046 | -0.623 | PASS (1.7 SE) |
+| NIST vapour | <N>_0 vs gcmc | 45.32 vs 42.88 +/- 1.41 | -- | PASS (1.0 SE) |
+
+The identity beta mu - ln(Lambda^3 <N>_0 / V) = -0.702 now matches the
+estimated -0.700 (linear coupling: -0.722 vs -0.882).  Acceptance: lambda
+0.97, insertion 0.88, deletion 0.98.
+
+Exactly solvable field (beta c = 5, exact <N> = 136.2, beta mu_ex =
+-3.305), 30000 cycles from N = 136: with MD 132.6 +/- 1.7 / -3.298 +/-
+0.011; MC only 140.0 +/- 1.6 / -3.326 +/- 0.013 -- the two bracket the
+exact <N> at ~2 SE each, so the 10-block SE of N is somewhat optimistic
+(slow N fluctuations); no MD-specific bias.  The density of this vapour
+point fluctuates strongly (block means 35-58), which is what limits the
+NIST comparison.
