@@ -777,6 +777,9 @@ potential:
 
 esm:
   output_dir:     ./esm_output
+  # bc1 vacuum|slab|vacuum, bc2 metal|slab|metal (external_field applies),
+  # bc3 vacuum|slab|metal -- Otani-Sugino / Quantum ESPRESSO naming
+  # (bc2 and bc3 were swapped in akitsushima before 2026-09-26)
   bc:             bc1
   sigma:          0.5
   n_grid_xy:      64

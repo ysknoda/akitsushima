@@ -113,8 +113,10 @@ class ESMCalculator:
     bc         : boundary condition -- ``'bc1'``, ``'bc2'``, or ``'bc3'``.
 
                  ``'bc1'`` vacuum | slab | vacuum  (neutral slab required)
-                 ``'bc2'`` vacuum | slab | metal   (right wall at +Lz/2)
-                 ``'bc3'`` metal  | slab | metal   (both walls, field OK)
+                 ``'bc2'`` metal  | slab | metal   (both walls, field OK)
+                 ``'bc3'`` vacuum | slab | metal   (right wall at +Lz/2)
+                 -- the naming of Otani & Sugino (2006) and Quantum
+                 ESPRESSO; swapped in akitsushima before 2026-09-26.
 
     sigma      : Gaussian smearing width [A].  Default 0.5.
     n_grid_xy  : FFT grid size per xy direction.  Default 64.
@@ -156,6 +158,18 @@ class ESMCalculator:
         self.positions = np.asarray(positions, dtype=float).copy()
         self.atom_types = list(atom_types)
         self.bc = bc
+        # ADR-0003 T6 / ADR-0008: the names follow Otani & Sugino, PRB 73,
+        # 115407 (2006) and Quantum ESPRESSO's esm_bc -- bc2 metal | slab |
+        # metal, bc3 vacuum | slab | metal.  Until 2026-09-26 this class
+        # had bc2 and bc3 the other way round.
+        self._bc = {"bc1": "_vv", "bc2": "_mm", "bc3": "_vm"}[bc]
+        if bc in ("bc2", "bc3"):
+            warnings.warn(
+                f"ESMCalculator: bc='{bc}' now means "
+                + ("metal | slab | metal" if bc == "bc2" else "vacuum | slab | metal")
+                + " (Otani-Sugino / Quantum ESPRESSO); before 2026-09-26 "
+                "bc2 and bc3 were swapped in akitsushima.",
+                UserWarning, stacklevel=2)
         self.sigma = float(sigma)
         self.n_grid_xy = int(n_grid_xy)
         self.n_grid_z = int(n_grid_z)
@@ -556,7 +570,7 @@ class ESMCalculator:
         """
         Nx, Ny, Nz = rho_Gz.shape
         V_Gz = np.zeros((Nx, Ny, Nz), dtype=complex)
-        bc = self.bc
+        bc = self._bc
         K = _ESM_EV_PER_E2_ANG
         Lz_h = Lz / 2.0
 
@@ -622,7 +636,7 @@ class ESMCalculator:
         Gpar    : G|| [A^-1]  (scalar, > 0)
         z_row   : (Nz, 1) field-point z coordinates [A]
         z_col   : (1, Nz) source-point z coordinates [A]
-        bc      : 'bc1', 'bc2', or 'bc3'
+        bc      : internal code '_vv', '_mm' or '_vm' (bc1 / bc2 / bc3)
         Lz_half : Lz/2 [A]
 
         Returns
@@ -633,16 +647,16 @@ class ESMCalculator:
         absz = np.abs(z_row - z_col)        # (Nz, Nz)
         gpLz = Gpar * Lz
 
-        if bc == 'bc1':
+        if bc == '_vv':
             # Open boundaries: no images (Otani, Review of Polarography 64,
             # 79 (2018), eq. 5: G = (4 pi / 2 g) exp(-g |z - z'|)).  Bug-fix
             # note (E3): two negative image terms at Lz +/- (z + z') were
             # included -- the images of grounded walls, not of vacuum.
             G_mat = np.exp(-Gpar * absz)
-        elif bc == 'bc2':
+        elif bc == '_vm':
             G_mat = (np.exp(-Gpar * absz)
                       - np.exp(-Gpar * (Lz - z_row - z_col)))
-        elif bc == 'bc3':
+        elif bc == '_mm':
             # Grounded plates at z = +/- Lz/2 (image method):
             #   G = 2 sinh(g(Lz/2 - z_>)) sinh(g(Lz/2 + z_<)) / sinh(g Lz)
             #     = [cosh(g(Lz - |dz|)) - cosh(g(z + z'))] / sinh(g Lz),
@@ -674,10 +688,11 @@ class ESMCalculator:
 
         Boundary conditions
         --------------------
-        BC1: dV/dz = 0 at z = +/-Lz/2  (no electric field at boundaries).
+        bc1 (_vv): E = 0 at z = -Lz/2 (and at +Lz/2 for a neutral slab).
              Requires int rho dz = 0  (charge neutrality).
-        BC2: V = 0 at z = +Lz/2 (metal ground).  Supports net charge.
-        BC3: V = 0 at z = +/-Lz/2 (metal at both ends).
+        bc3 (_vm): E = 0 at z = -Lz/2 (vacuum), V = 0 at z = +Lz/2 (metal
+             ground).  Supports net charge.
+        bc2 (_mm): V equal at z = +/-Lz/2 (metal at both ends).
              External field E_ext added as linear potential.
 
         Parameters
@@ -722,7 +737,7 @@ class ESMCalculator:
         # the dipole length (1.68 eV for a +-1 pair 3 A apart along z).
         E_field = 4.0 * np.pi * cumulative_trapezoid(rho_z, dx=dz, initial=0.0)   # (Nz,)
 
-        if bc == 'bc1':
+        if bc == '_vv':
             # BC1: open at both ends (C1 = 0, see below)
             Q_total = float(np.sum(rho_z) * dz)
             if abs(Q_total) > 1e-4:
@@ -735,7 +750,7 @@ class ESMCalculator:
             # 4 pi Q = 0 for a neutral slab.  (Was: minus the cell mean of
             # E, a spurious uniform field proportional to the dipole.)
 
-        elif bc == 'bc2':
+        elif bc == '_vm':
             # vacuum | slab | metal at +Lz/2: no field at the vacuum end,
             # E(z_min) = 0, which the integral from z_min already gives; the
             # metal takes whatever field the net charge needs.  (Was: the
@@ -743,7 +758,7 @@ class ESMCalculator:
             # wrong at the metal, where a charged slab induces a field.)
             E_field += E_ext
 
-        elif bc == 'bc3':
+        elif bc == '_mm':
             # metal | slab | metal: both plates at the same potential, i.e.
             # int E dz = 0 over the cell, plus the applied field.  (Was:
             # the fields averaged over the two outer 1/8 of the cell.)
@@ -754,13 +769,13 @@ class ESMCalculator:
         V_z = -cumulative_trapezoid(E_field, dx=dz, initial=0.0)
 
         # Fix integration constant C2 based on BC
-        if bc == 'bc1':
+        if bc == '_vv':
             # Zero-mean potential (arbitrary gauge)
             V_z -= float(np.mean(V_z))
-        elif bc == 'bc2':
+        elif bc == '_vm':
             # V = 0 at right boundary (metal)
             V_z -= V_z[-1]
-        elif bc == 'bc3':
+        elif bc == '_mm':
             # V = 0 at both metal walls -> set to average of endpoints
             V_z -= (V_z[0] + V_z[-1]) / 2.0
 
@@ -1023,7 +1038,7 @@ class ESMCalculator:
                 stress[b, a] = val
 
         # For BC1: z components are not well-defined (open boundary)
-        if self.bc == 'bc1':
+        if self._bc == '_vv':
             stress[2, :] = 0.0
             stress[:, 2] = 0.0
 
@@ -1162,7 +1177,7 @@ class ESMCalculator:
         Nz = len(V_mac)
         n_win = max(Nz // 10, 1)
 
-        if self.bc == 'bc2':
+        if self._bc == '_vm':
             # Vacuum is on the left side (z ~= -Lz/2); fit linear trend
             V_left = V_mac[:n_win]
             z_left = self._z_grid[:n_win]
@@ -1173,7 +1188,7 @@ class ESMCalculator:
             else:
                 V_vac = float(np.mean(V_left))
 
-        elif self.bc == 'bc3':
+        elif self._bc == '_mm':
             # Both walls are metal at V = 0 by construction
             V_vac = 0.0
 
@@ -1206,7 +1221,7 @@ class ESMCalculator:
         For BC2 and BC3, the metal boundaries naturally screen the dipole;
         this correction is only needed for BC1.
         """
-        if self.bc != 'bc1':
+        if self._bc != '_vv':
             return 0.0
         if self._V_z is None:
             raise RuntimeError(
@@ -1308,7 +1323,7 @@ class ESMCalculator:
         print(f"    V(z) range    = [{V_z.min():.3f}, {V_z.max():.3f}] eV")
         print(f"    V_macro range = [{V_mac.min():.3f}, {V_mac.max():.3f}] eV")
         print(f"    rho_i(z) integral = {float(np.sum(rho_z) * self._dz):.3f} e/A^2")
-        if self.bc in ('bc2', 'bc3'):
+        if self._bc in ('_vm', '_mm'):
             print(f"    Work function = {self.work_function():.3f} eV")
-        if self.bc == 'bc1':
+        if self._bc == '_vv':
             print(f"    Dipole corr.  = {self.surface_dipole_correction():.4f} eV")

@@ -410,9 +410,10 @@ passed.
   two grounded plates; (d) the G|| = 0 constants of bc1 / bc2 / bc3 came
   from averages (the cell mean of E; E over the outer 1/8 of the cell)
   instead of E(z_min) = 0 (bc1, bc2) and equal plate potentials (bc3).
-  Still open: bc2 / bc3 are named the other way round from Otani-Sugino
-  and Quantum ESPRESSO (esm_bc: bc2 metal-slab-metal, bc3 vacuum-slab-metal);
-  and the `relax:` section still relaxes on electrostatics alone.
+  bc2 / bc3 were named the other way round from Otani-Sugino and Quantum
+  ESPRESSO; since 2026-09-26 bc2 is metal-slab-metal and bc3 vacuum-slab-
+  metal, as there, and using either warns of the change.  Still open: the
+  `relax:` section relaxes on electrostatics alone.
   Original text: E1 the Gaussian self-energy is divided by the cell area
   (dimensionally wrong; ~8 eV per unit charge left in); E2 the external field
   enters 14.40x too strongly (e^2/4 pi eps0); E3 after correcting E1 the pair
