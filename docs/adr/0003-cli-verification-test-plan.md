@@ -142,6 +142,12 @@ minus one; perpendicular width 10.86 A > 2 x (3.77 + 0.5) = 8.54 A), plus
 215 atoms (3x3x3 minus one) for a size check.
 
 Pass (all internal consistency):
+0. (added 2026-09-26) The relaxed initial state is a minimum (no negative
+   mode of an independent Hessian beyond the translations) and E_IS = E_FS.
+   Relaxing the vacancy from ideal sites keeps its Td symmetry; with SW's own
+   three-body term that Td vacancy is a local minimum 1.5-1.6 eV above the
+   C3v one, and a NEB between two Td endpoints falls into the lower basin.
+   The hop atom now starts 40% of the way along the hop.
 1. `neb`: energy profile symmetric about the midpoint to 1 meV; climbing-image
    max force < fmax.
 2. `tsa` on the climbing image: exactly one imaginary mode.
@@ -340,7 +346,7 @@ passed.
 | T3a mlip | ELM 1.23-1.26, QELM 1.23-1.31, NN 0.98-1.04 x sigma: PASS. LightGBM 1.72-1.92: FAIL; raw lightgbm with the same row weights reaches 1.48-1.58, unweighted 1.24-1.33 | `example/mlip/check_mlip.py` |
 | T3b mlip (info) | NN 1.0-1.4; ELM E 201x, QELM E 130x (finding M1) | |
 | T4 phonon | PASS after fixes P1-P7: frequencies within 1e-3 THz of phonopy on every path point (Si and AlN), F_vib within 0.06 meV/atom, theta_D within 0.1% | `example/phonon/check_phonon.py`, `tests/test_phonon_regressions.py` |
-| T5 neb/tsa | (SW before ADR-0006, three-body doubled; re-run FAILS with the corrected SW, see ADR-0006) PASS all 7 checks, 63 and 215 atoms. Barrier 0.949 / 0.909 eV; imaginary mode -179.27 vs -179.30 cm^-1 (independent Hessian) | `example/neb/check_neb_tsa.py` |
+| T5 neb/tsa | PASS all 8 checks (criterion 0 added: endpoint a minimum), 63 and 215 atoms, with the corrected SW (ADR-0006) and endpoints rebuilt 2026-09-26 (C3v vacancy, E_f 2.835 / 2.694 eV). Barrier 0.517 / 0.513 eV; imaginary mode -178.09 vs -178.10 and -171.80 vs -171.81 cm^-1 (independent Hessian); IRC ends within 0.004 A of the endpoints. Literature, for information: 0.43 eV for SW from vacancy vs split-vacancy formation energies (Maroudas & Brown, PRB 47, 15562 (1993), as quoted by El-Mellouhi et al., arXiv cond-mat/0308289, sec. IV.2.1; the original not re-read). Before ADR-0006 (three-body doubled): 0.949 / 0.909 eV | `example/neb/check_neb_tsa.py` |
 | T6 esm | FAIL (findings E1-E3) | `example/esm/check_esm.py`; reference Ewald self-tested on the rock-salt Madelung constant (1.747565) |
 | T7 gcmc | PASS after fix G1 (5000 cycles, last 80%): ideal gas <N> = 39.57 +/- 0.25 (exact 40), Var(N)/<N> = 0.984; NIST TMMC vapour (T* = 0.90, p/p_sat = 0.80, LFS 2.5 sigma, V = 512 sigma^3) <N> = 42.88 +/- 1.41 vs 41.90 (ideal gas at the same z: 22.5). Before G1: 18.8 | `example/gcmc/check_gcmc.py`; NIST table cached in `references/nist_srsw/vaporEOS_rc25LFS.csv` (all 100 rows x 6 temperatures; the page quotes no uncertainties) |
 | T7 osmc | FAIL: <N> = 0.74 +/- 0.63 against 41.90; gcmc vs osmc differ by 42.1 +/- 1.5 (findings O1-O2) | |
