@@ -90,6 +90,11 @@ _ESM_EPS0_SI = 8.8541878128e-12          # F/m
 _ESM_EV_PER_E2_ANG = 14.3996455              # e^2/A -> eV  (= 1/(4pi epsilon0) in eV.A/e^2)
 
 
+def _trapz_mean(f, dx):
+    """Trapezoid-rule mean of samples f spaced dx over their full span."""
+    return float(np.trapezoid(f, dx=dx) / (dx * (len(f) - 1)))
+
+
 class ESMCalculator:
     """
     Effective Screening Medium electrostatics for slab geometries.
@@ -629,33 +634,27 @@ class ESMCalculator:
         gpLz = Gpar * Lz
 
         if bc == 'bc1':
-            G_mat = (np.exp(-Gpar * absz)
-                      - np.exp(-Gpar * (Lz + z_row + z_col))
-                      - np.exp(-Gpar * (Lz - z_row - z_col)))
+            # Open boundaries: no images (Otani, Review of Polarography 64,
+            # 79 (2018), eq. 5: G = (4 pi / 2 g) exp(-g |z - z'|)).  Bug-fix
+            # note (E3): two negative image terms at Lz +/- (z + z') were
+            # included -- the images of grounded walls, not of vacuum.
+            G_mat = np.exp(-Gpar * absz)
         elif bc == 'bc2':
             G_mat = (np.exp(-Gpar * absz)
                       - np.exp(-Gpar * (Lz - z_row - z_col)))
         elif bc == 'bc3':
-            if gpLz < 1e-30:
-                G_mat = np.zeros_like(absz)
-            else:
-                # Numerically stable rewrite of cosh(Gpar*(absz-Lz))/sinh(Gpar*Lz).
-                # Bug-fix note: the direct formula overflows in double precision
-                # once Gpar*Lz exceeds ~700 (sinh/cosh grow as exp(Gpar*Lz)),
-                # which routinely happens for realistic n_grid_xy/Lz combinations
-                # (large-|G|| modes) -- confirmed by a RuntimeWarning
-                # ("overflow encountered in sinh"/"cosh") followed by silent NaN
-                # propagation through the whole energy/force/stress result.
-                # Factoring cosh(y)/sinh(x) = [exp(y-x)+exp(-y-x)]/(1-exp(-2x))
-                # with y=Gpar*(absz-Lz), x=Gpar*Lz makes every exponent <= 0
-                # for the physically valid range 0 <= absz <= Lz (so every
-                # exp(...) term is bounded in [0, 1]), for any Gpar*Lz -- this
-                # is mathematically identical to the original formula, not an
-                # approximation, just organised to avoid intermediate overflow.
-                y_minus_x = Gpar * (absz - 2.0 * Lz)
-                neg_y_minus_x = -Gpar * absz
-                G_mat = ((np.exp(y_minus_x) + np.exp(neg_y_minus_x))
-                          / (1.0 - np.exp(-2.0 * gpLz))) / Gpar
+            # Grounded plates at z = +/- Lz/2 (image method):
+            #   G = 2 sinh(g(Lz/2 - z_>)) sinh(g(Lz/2 + z_<)) / sinh(g Lz)
+            #     = [cosh(g(Lz - |dz|)) - cosh(g(z + z'))] / sinh(g Lz),
+            # written with every exponent <= 0 (|z + z'| <= Lz), and
+            # -> exp(-g |dz|) as Lz -> infinity.  Bug-fix note (ADR-0003 T6,
+            # E3): this used [exp(g(|dz| - 2Lz)) + exp(-g|dz|)] / (1 -
+            # exp(-2 g Lz)) / g -- an extra 1/g on top of the 2 pi / g
+            # prefactor, and without the z + z' (image) terms.
+            zs = z_row + z_col
+            G_mat = ((np.exp(-Gpar * absz) + np.exp(-Gpar * (2.0 * Lz - absz))
+                      - np.exp(-Gpar * (Lz - zs)) - np.exp(-Gpar * (Lz + zs)))
+                     / (1.0 - np.exp(-2.0 * gpLz)))
         else:
             raise ValueError(f"Unknown bc '{bc}'.")
 
@@ -709,13 +708,22 @@ class ESMCalculator:
         through this cumulative integration and were not affected.
         """
         Nz = len(rho_z)
-        E_ext = self.external_field    # [V/A]
+        # The field here is in the Gaussian units of V_z (e/A^2, multiplied
+        # by K = e^2/(4 pi eps0) = 14.40 eV A later); the user's field is
+        # in V/A.  Bug-fix note (ADR-0003 T6, E2): it was added unconverted,
+        # so the applied field came out K = 14.40 times too strong.
+        E_ext = self.external_field / _ESM_EV_PER_E2_ANG    # [e/A^2]
 
-        # First integration: E_z(z) = -4pi int_{z_min}^{z} rho dz' + C1
-        E_field = -4.0 * np.pi * cumulative_trapezoid(rho_z, dx=dz, initial=0.0)   # (Nz,)
+        # First integration: E_z(z) = 4 pi int_{z_min}^{z} rho dz' + C1
+        # E = -dV/dz and d2V/dz2 = -4 pi rho give dE/dz = +4 pi rho.
+        # Bug-fix note (ADR-0003 T6, E3): the sign was negative, which
+        # reversed the whole planar-average (G|| = 0) energy -- the pair
+        # energies were off by twice their capacitor term, growing with
+        # the dipole length (1.68 eV for a +-1 pair 3 A apart along z).
+        E_field = 4.0 * np.pi * cumulative_trapezoid(rho_z, dx=dz, initial=0.0)   # (Nz,)
 
         if bc == 'bc1':
-            # BC1: <E_z> = 0  ->  C1 = -mean(E_field)
+            # BC1: open at both ends (C1 = 0, see below)
             Q_total = float(np.sum(rho_z) * dz)
             if abs(Q_total) > 1e-4:
                 warnings.warn(
@@ -723,25 +731,23 @@ class ESMCalculator:
                     f"(int rho dz = {Q_total:.3f} e/A^2).  "
                     "BC1 requires int rho dz = 0; consider using BC2 or BC3.",
                     UserWarning, stacklevel=3)
-            C1 = -float(np.mean(E_field))
-            E_field += C1
+            # open boundary: E(z_min) = 0 by construction, and E(z_max) =
+            # 4 pi Q = 0 for a neutral slab.  (Was: minus the cell mean of
+            # E, a spurious uniform field proportional to the dipole.)
 
         elif bc == 'bc2':
-            # BC2: E = 0 far to the right of the metal -> fix at right boundary
-            # Use a macroscopic average: average E in vacuum region near +Lz/2
-            # (right 1/8 of the cell assumed vacuum)
-            n_vac = max(Nz // 8, 1)
-            C1 = -float(np.mean(E_field[-n_vac:]))
-            E_field += C1
-            # Add external field
+            # vacuum | slab | metal at +Lz/2: no field at the vacuum end,
+            # E(z_min) = 0, which the integral from z_min already gives; the
+            # metal takes whatever field the net charge needs.  (Was: the
+            # field averaged over the right 1/8 of the cell set to zero --
+            # wrong at the metal, where a charged slab induces a field.)
             E_field += E_ext
 
         elif bc == 'bc3':
-            # BC3: symmetric; add external field directly
-            n_vac = max(Nz // 8, 1)
-            C1 = -(float(np.mean(E_field[:n_vac]))
-                   + float(np.mean(E_field[-n_vac:]))) / 2.0
-            E_field += C1
+            # metal | slab | metal: both plates at the same potential, i.e.
+            # int E dz = 0 over the cell, plus the applied field.  (Was:
+            # the fields averaged over the two outer 1/8 of the cell.)
+            E_field -= _trapz_mean(E_field, dz)
             E_field += E_ext
 
         # Second integration: V(z) = -int E_z dz + C2
@@ -789,10 +795,15 @@ class ESMCalculator:
         integrand = (np.conj(rho_Gz) * V_Gz).real   # (Nx, Ny, Nz)
         E_int = 0.5 * area * float(np.sum(integrand)) * dz
 
-        # Subtract Gaussian self-energy: E_self = sum_I q_I^2 / (2 sigma sqrt(pi) x Lx Ly)
+        # Subtract the Gaussian self-energy E_self = K sum_I q_I^2 / (2 sqrt(pi)
+        # sigma) of a normalised Gaussian with standard deviation sigma per
+        # axis (_build_charge_density_2d).  Bug-fix note (ADR-0003 T6, E1):
+        # it was also divided by the cell area Lx Ly, which has no place in
+        # it (it made the term 1/area too small: ~8 eV per unit charge was
+        # left in the energy of a 16 x 16 A cell).
         sig = self.sigma
         E_self = float(np.sum(self._charges**2)) / (
-            2.0 * sig * np.sqrt(np.pi)) * _ESM_EV_PER_E2_ANG / area
+            2.0 * sig * np.sqrt(np.pi)) * _ESM_EV_PER_E2_ANG
 
         return E_int - E_self
 

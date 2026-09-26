@@ -347,7 +347,7 @@ passed.
 | T3b mlip (info) | NN 1.0-1.4; ELM E 201x, QELM E 130x (finding M1) | |
 | T4 phonon | PASS after fixes P1-P7: frequencies within 1e-3 THz of phonopy on every path point (Si and AlN), F_vib within 0.06 meV/atom, theta_D within 0.1% | `example/phonon/check_phonon.py`, `tests/test_phonon_regressions.py` |
 | T5 neb/tsa | PASS all 8 checks (criterion 0 added: endpoint a minimum), 63 and 215 atoms, with the corrected SW (ADR-0006) and endpoints rebuilt 2026-09-26 (C3v vacancy, E_f 2.835 / 2.694 eV). Barrier 0.517 / 0.513 eV; imaginary mode -178.09 vs -178.10 and -171.80 vs -171.81 cm^-1 (independent Hessian); IRC ends within 0.004 A of the endpoints. Literature, for information: 0.43 eV for SW from vacancy vs split-vacancy formation energies (Maroudas & Brown, PRB 47, 15562 (1993), as quoted by El-Mellouhi et al., arXiv cond-mat/0308289, sec. IV.2.1; the original not re-read). Before ADR-0006 (three-body doubled): 0.949 / 0.909 eV | `example/neb/check_neb_tsa.py` |
-| T6 esm | FAIL (findings E1-E3) | `example/esm/check_esm.py`; reference Ewald self-tested on the rock-salt Madelung constant (1.747565) |
+| T6 esm | FAIL (findings E1-E3).  After fixing E1-E3 (2026-09-26): PASS -- +-1 pair (d = 3, 5 A) in bc1 / bc2 / bc3 within 1.1-1.3 meV per ion of the image-Ewald references, forces within 8.7e-4 eV/A of central differences, MgO(001) slab 4.4 meV per ion, field slope 0.100 V/A for 0.1 V/A; all at n_grid_z = 1024 -- the residual is the z-grid sampling of the Gaussians, O(dz^2) and proportional to q^2 (+-1 pair: 20 / 5.1 / 1.3 meV per ion at n_grid_z 256 / 512 / 1024) | `example/esm/check_esm.py`, `check_esm_mgo_nz1024.json`; reference Ewald self-tested on the rock-salt Madelung constant (1.747565) |
 | T7 gcmc | PASS after fix G1 (5000 cycles, last 80%): ideal gas <N> = 39.57 +/- 0.25 (exact 40), Var(N)/<N> = 0.984; NIST TMMC vapour (T* = 0.90, p/p_sat = 0.80, LFS 2.5 sigma, V = 512 sigma^3) <N> = 42.88 +/- 1.41 vs 41.90 (ideal gas at the same z: 22.5). Before G1: 18.8 | `example/gcmc/check_gcmc.py`; NIST table cached in `references/nist_srsw/vaporEOS_rc25LFS.csv` (all 100 rows x 6 temperatures; the page quotes no uncertainties) |
 | T7 osmc | FAIL: <N> = 0.74 +/- 0.63 against 41.90; gcmc vs osmc differ by 42.1 +/- 1.5 (findings O1-O2).  After fixing O1 (2026-09-26) it fails the other way: N climbs without bound -- NIST point 30 -> 82 -> 138 over 1500 cycles (NIST 41.9); ideal gas 30 -> 710 in 713 cycles, one insertion per cycle and no deletion (exact 40).  O2 confirmed | `example/gcmc/check_osmc_o1.py` |
 | T8 fit | LJ, Morse, Born-Mayer, Buckingham PASS (V0, B0, E0 within 6e-4; Buckingham after fix F5); Tersoff FAIL (finding FT1). Tersoff re-judged 2026-09-26 with the Nelder-Mead default (ADR-0006): the local step alone from +10% reaches loss 1.5e-4 and E0 / V0 / B0 within 3e-6 / 3e-6 / 1.6e-4: PASS (beta, c, d stay off by 59-98% -- the (beta zeta)^n and c/d degeneracy E, F, S cannot resolve; the other six parameters within 0.5%).  With the template's DE first (as check_fit_others runs it) DE settles in another basin (loss 210, beta at its 1e-10 bound) and the fit ends at 19.8, B0 -2.0%: FAIL -- the global search, not the local one, is what fails | `example/fit/others/check_fit_others.py`, `example/fit/others/tersoff_nm_local/` |
@@ -396,7 +396,24 @@ passed.
   ~1e17 on the squared residual; the LSQR does not converge (flag 7) and E is
   fitted to 200x its noise. A formula change alters every ELM fit.
   -> Decided in ADR-0004 (chain-rule training and one weighting rule).
-- **E1-E3** esm: E1 the Gaussian self-energy is divided by the cell area
+- **E1-E3** esm (FIXED 2026-09-26; regression tests in
+  `tests/test_esm_electrostatics.py`, all of which fail on the old code).
+  Root causes found without the original paper, from the electrostatics
+  and the independent references: E1 the self-energy's division by the
+  area; E2 the field added in V/A to a field in e/A^2 units (x 1/K now);
+  E3 (a) the G|| = 0 field integrated with the wrong sign, E = -4 pi int
+  rho instead of +4 pi int rho, reversing the planar-average energy --
+  twice the capacitor term of the pair, hence growing with the dipole
+  length; (b) bc1's kernel carried the images of grounded walls (open
+  boundaries have none: Otani, Review of Polarography 64, 79 (2018), eq. 5);
+  (c) bc3's kernel had an extra 1/G|| and lacked the z + z' image terms of
+  two grounded plates; (d) the G|| = 0 constants of bc1 / bc2 / bc3 came
+  from averages (the cell mean of E; E over the outer 1/8 of the cell)
+  instead of E(z_min) = 0 (bc1, bc2) and equal plate potentials (bc3).
+  Still open: bc2 / bc3 are named the other way round from Otani-Sugino
+  and Quantum ESPRESSO (esm_bc: bc2 metal-slab-metal, bc3 vacuum-slab-metal);
+  and the `relax:` section still relaxes on electrostatics alone.
+  Original text: E1 the Gaussian self-energy is divided by the cell area
   (dimensionally wrong; ~8 eV per unit charge left in); E2 the external field
   enters 14.40x too strongly (e^2/4 pi eps0); E3 after correcting E1 the pair
   energies still differ from the Ewald reference by 0.5-3 eV, growing with the
