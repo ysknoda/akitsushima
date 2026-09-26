@@ -9,8 +9,8 @@ Two kinds of training data (ADR-0004):
   list in the classical ``fit`` layout (``target,label,weight,struct_idx``
   with ``<poscar_dir>/<k>/POSCAR``), and the descriptor table is computed
   in-package.  The descriptor config is stored in the model file, so the
-  model can then run ``relax``/``md`` as ``potential: {type: MLIP,
-  model: ...}``.
+  model can then drive the solvers as ``potential: {type: MLIP,
+  model: ...}`` (which ones: ADR-0007, README).
 
 ``mlip.form: atom_centred`` (ADR-0005) trains E = sum_i eps_s(G_i) on the
 per-atom ACSF vectors instead (models elm, qelm, nn), from the same
@@ -396,7 +396,7 @@ def cmd_mlip(args) -> int:
         and not getattr(model, "row_independent", True)
     )
     print(
-        f"  Usable as relax/md engine : {'yes' if engine else 'no'}"
+        f"  Usable as a force field   : {'yes' if engine else 'no'}"
         + ("  (potential: {type: MLIP, model: " + model_path + "})" if engine else "")
     )
     summary = {"model": model_path, "engine": engine, "form": form}

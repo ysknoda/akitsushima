@@ -167,4 +167,11 @@ def main() -> int:
     if handler is None:
         print(f"ERROR: Unknown command '{args.command}'.")
         return 1
-    return handler(args)
+    try:
+        return handler(args)
+    except ValueError as exc:
+        # Configuration errors raised past the command's own checks (e.g.
+        # an MLIP a solver cannot use, ADR-0007) end as a message, not a
+        # traceback.
+        print(f"ERROR: {exc}")
+        return 1

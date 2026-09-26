@@ -11,6 +11,7 @@ import numpy as np
 
 from ..constants import ATOMIC_MASS, EV_ANG_TO_AMU_ANG_FS2, K_B
 from ..engine.neighborlist import NeighbourList
+from ..fitting.mlip_engine import check_mlip_for_solver
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame
 from ..utils.mpi import _mpi_rank
@@ -223,6 +224,10 @@ class GCMCMDSimulation(_BaseMDSimulation):
     # sharing this class's run() method via super().run().
     _xdatcar_task_name = "gcmc"
 
+    # A reason this solver takes no MLIP at all (None: it does, if
+    # atom-centred).  See check_mlip_for_solver.
+    _MLIP_REFUSAL = None
+
     def __init__(self,
                  lattice         : np.ndarray,
                  positions       : np.ndarray,
@@ -285,6 +290,10 @@ class GCMCMDSimulation(_BaseMDSimulation):
         self.temperature  = float(temperature)
         self.mu           = float(mu)
         self.species      = species
+        check_mlip_for_solver(force_fn, type(self).__name__,
+                              need_site_energies=True,
+                              species=[species] if species else [],
+                              refuse=self._MLIP_REFUSAL)
         self.mass         = float(mass) if mass is not None \
                             else float(ATOMIC_MASS.get(species, 1.0))
         self.dt           = float(timestep)
@@ -1138,6 +1147,14 @@ class OSMMCSimulation(GCMCMDSimulation):
 
     # Overrides GCMCMDSimulation._xdatcar_task_name -> XDATCAR_osmc
     _xdatcar_task_name = "osmc"
+
+    # ADR-0007: the ghost particle couples through a soft-core LJ taken
+    # from the engine's pair parameters (_get_lj_params), which an MLIP
+    # does not have, and osmc fails its own muVT check (ADR-0003 T7,
+    # findings O1-O2).  Refused until those are settled.
+    _MLIP_REFUSAL = ("its ghost particle couples through soft-core LJ "
+                     "parameters an MLIP does not have, and osmc fails the "
+                     "muVT check (ADR-0003 T7, O1-O2)")
 
     def __init__(self,
                  *args,

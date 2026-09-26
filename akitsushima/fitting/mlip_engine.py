@@ -1,5 +1,5 @@
-"""A trained tabular MLIP as a relax / md force function (ADR-0004,
-decision 6).
+"""A trained MLIP as a solver force function (ADR-0004 decision 6;
+every solver: ADR-0007).
 
 YAML::
 
@@ -84,7 +84,7 @@ class MLIPForceField:
         name = type(model).__name__
         if name == "LightGBMModel":
             raise ValueError(
-                "MLIP engine: a LightGBM model cannot drive relax/md -- trees "
+                "MLIP engine: a LightGBM model cannot drive a solver -- trees "
                 "are piecewise constant, so -dE/dr is zero almost everywhere "
                 "and the model gives no conservative force (ADR-0004, "
                 "decision 3)."
@@ -113,6 +113,11 @@ class MLIPForceField:
     @classmethod
     def from_file(cls, path: str) -> "MLIPForceField":
         return cls(load_mlip_model(path))
+
+    @property
+    def species(self) -> list:
+        """Elements the model was trained on."""
+        return list(self.descriptor.species)
 
     @property
     def per_atom_energy(self) -> bool:
@@ -151,3 +156,30 @@ class MLIPForceField:
         stress = N * (XS @ g)
         stress = 0.5 * (stress + stress.T)
         return float(energy), forces, stress
+
+
+def check_mlip_for_solver(force_fn, solver, *, need_site_energies=False,
+                          species=(), refuse=None):
+    """Refuse, at construction, an MLIP a solver cannot use (ADR-0007).
+
+    No-op for any other force function.  ``refuse``: a reason this solver
+    takes no MLIP at all.  ``need_site_energies``: the solver needs a sum of
+    site energies (a changing atom count, or the exact heat flux), which a
+    tabular model does not have.  ``species``: elements the solver will
+    place, which must be among the model's.
+    """
+    if getattr(force_fn, "kind", None) != "mlip":
+        return
+    if refuse:
+        raise ValueError(f"{solver}: an MLIP cannot drive it -- {refuse}")
+    if need_site_energies and not getattr(force_fn, "per_atom_energy", False):
+        raise ValueError(
+            f"{solver}: needs a sum of per-atom energies (it changes the atom "
+            f"count or needs the exact heat flux); this tabular MLIP (E = N "
+            f"f(d) of a structure descriptor) has none.  Train an atom-centred "
+            f"model (mlip.form: atom_centred).")
+    missing = sorted(set(species) - set(force_fn.species))
+    if missing:
+        raise ValueError(
+            f"{solver}: element(s) {missing} are not among the MLIP's "
+            f"trained elements {force_fn.species}.")

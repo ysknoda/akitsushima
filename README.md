@@ -267,6 +267,22 @@ a sum of local terms, so a model trained on one cell size runs on others;
 the model file (`atomic_<model>_model.npz` / `.pt`) records the form and
 is used with the same `potential: {type: MLIP, model: ...}` entry.
 
+Which solvers take an MLIP (ADR-0007):
+
+| command | tabular | atom-centred | note |
+|---|---|---|---|
+| `relax`, `md`, `neb`, `tsa`, `phonon` | yes | yes | need E, F, S only |
+| `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
+| `kappa` | refused | yes | exact heat flux from the site terms |
+| `osmc` | refused | refused | ghost coupling is soft-core LJ; osmc fails its muVT check (ADR-0003 T7) |
+| `esm` | refused | refused | electrostatics only |
+
+A refusal is an error at start-up, not a silent approximation.  The heat
+flux of `kappa` is exact for every potential with a site-energy
+decomposition -- pair potentials, Stillinger-Weber, Tersoff, EAM and an
+atom-centred MLIP (`akitsushima/engine/site_terms.py`); only a Coulomb
+term still uses the centre-of-mass approximation, with a warning.
+
 ## Project layout
 
 ```

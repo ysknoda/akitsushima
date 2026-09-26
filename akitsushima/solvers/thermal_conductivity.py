@@ -92,6 +92,10 @@ class ThermalConductivityCalculator:
         self.force_fn   = force_fn
         self.temperature = float(temperature)
         self.N = len(atom_types)
+        from ..fitting.mlip_engine import check_mlip_for_solver
+        check_mlip_for_solver(force_fn, "ThermalConductivityCalculator",
+                              need_site_energies=True,
+                              species=set(self.atom_types))
 
         if masses is not None:
             self.masses = np.asarray(masses, dtype=float)

@@ -49,6 +49,14 @@ def cmd_esm(args) -> int:
     os.makedirs(output_dir, exist_ok=True)
     t_sections = []
 
+    if str(pot_cfg.get("type", "")).strip().lower() == "mlip":
+        # ADR-0007: esm computes electrostatics only; it has no short-range
+        # term to add an MLIP to, and an MLIP trained on total energies
+        # would count the electrostatics twice.
+        print("ERROR: esm cannot use an MLIP (potential.type: MLIP): it "
+              "computes electrostatics only (ADR-0007).")
+        return 1
+
     charges = pot_cfg.get("charges")
     if charges is None:
         pot_json = pot_cfg.get("potential_json")
