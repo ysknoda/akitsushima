@@ -990,7 +990,7 @@ def test_tersoff_multi_species_numba_matches_numpy():
 def test_eam_force_stress_match_finite_difference():
     from akitsushima.engine import EAMPotential
 
-    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    struct = randomly_perturbed(fcc_al_dict(3), magnitude=0.1, seed=3)
 
     # Simple analytic callables (no spline needed): a Gaussian-decaying
     # density and a soft-core embedding function, generic enough that
@@ -1029,7 +1029,7 @@ def test_eam_tabulated_spline_matches_callable():
     error."""
     from akitsushima.engine import EAMPotential
 
-    struct = randomly_perturbed(fcc_al_dict(), magnitude=0.1, seed=3)
+    struct = randomly_perturbed(fcc_al_dict(3), magnitude=0.1, seed=3)
 
     def rho_fn(r):
         return np.exp(-r / 1.5)
@@ -1043,7 +1043,12 @@ def test_eam_tabulated_spline_matches_callable():
     pot_callable = EAMPotential(F_fn, rho_fn, phi_fn, r_cut=6.0, species=["Al"])
 
     r_grid = np.linspace(0.05, 6.5, 400)
-    rho_grid = np.linspace(1e-6, rho_fn(r_grid.min()), 400)
+    # rho_bar in this 108-atom cell is ~3.3 (12 x e^{-2.86/1.5} + 6 x
+    # e^{-4.05/1.5} + 24 x e^{-4.96/1.5} + 12 x e^{-5.73/1.5}); the grid
+    # must cover it or the spline extrapolates.  The former grid ended at
+    # rho(0.05) = 0.97 and passed only because the 4-atom cell, too small
+    # for r_cut = 6, dropped most neighbour images.
+    rho_grid = np.linspace(1e-6, 5.0, 400)
     pot_tab = EAMPotential(F_fn(rho_grid), rho_fn(r_grid), phi_fn(r_grid),
                            rho_grid=rho_grid, r_grid=r_grid, r_cut=6.0, species=["Al"])
 

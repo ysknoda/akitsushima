@@ -28,11 +28,19 @@ def _structure(lattice, frac_positions, atom_types, charges=None) -> dict:
     }
 
 
-def fcc_al_dict() -> dict:
-    """Conventional cubic FCC aluminium, a = 4.05 A, 4 atoms."""
+def fcc_al_dict(n: int = 1) -> dict:
+    """Conventional cubic FCC aluminium, a = 4.05 A, an n x n x n
+    supercell of the 4-atom cell.
+
+    n = 3 (108 atoms, half-width 6.075 A) is the smallest that hosts a
+    6.0 A cutoff under the minimum-image convention.
+    """
     a = 4.05
-    frac = [(0.0, 0.0, 0.0), (0.5, 0.5, 0.0), (0.5, 0.0, 0.5), (0.0, 0.5, 0.5)]
-    return _structure(_cubic(a), frac, ["Al"] * 4)
+    cell = np.array([(0.0, 0.0, 0.0), (0.5, 0.5, 0.0), (0.5, 0.0, 0.5),
+                     (0.0, 0.5, 0.5)])
+    frac = np.concatenate([(cell + [i, j, k]) / n for i in range(n)
+                           for j in range(n) for k in range(n)])
+    return _structure(_cubic(n * a), frac, ["Al"] * (4 * n ** 3))
 
 
 def rocksalt_nacl_dict(n: int = 1) -> dict:

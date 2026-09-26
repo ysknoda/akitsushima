@@ -1,4 +1,4 @@
-"""SW and Tersoff refuse a cell that cannot host their cutoff.
+"""SW, Tersoff and EAM refuse a cell that cannot host their cutoff.
 
 Without a neighbour list both engines take minimum-image displacements
 (`s -= np.round(s)`), which keep one image per pair: once the cutoff
@@ -11,9 +11,9 @@ SW and Tersoff did not, and a differential-evolution SW fit
 
 import numpy as np
 import pytest
-from conftest import diamond_si_dict, randomly_perturbed
+from conftest import diamond_si_dict, fcc_al_dict, randomly_perturbed
 
-from akitsushima.engine import StillingerWeberPotential, TersoffPotential
+from akitsushima.engine import EAMPotential, StillingerWeberPotential, TersoffPotential
 from akitsushima.engine.neighborlist import allow_minimum_image_violation
 
 # Stillinger & Weber, PRB 31, 5262 (1985): a * sigma = 3.771 A
@@ -121,3 +121,44 @@ def test_fit_loss_treats_the_refusal_as_a_failed_evaluation():
     )
     assert np.isfinite(ok) and bad > 1e3 * ok
 
+
+# ---------------------------------------------------------------- EAM
+
+
+def _eam(r_cut=6.0):
+    """Analytic alloy-EAM callables (as in test_engine_forces)."""
+    return EAMPotential(lambda rho: -0.5 * np.sqrt(np.maximum(rho, 1e-12)),
+                        lambda r: np.exp(-r / 1.5),
+                        lambda r: 500.0 * np.exp(-r / 0.4),
+                        r_cut=r_cut, species=["Al"])
+
+
+def _al(n):
+    s = randomly_perturbed(fcc_al_dict(n), magnitude=0.05, seed=0)
+    return s["lattice"], s["positions"], s["atom_types"]
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_eam_too_small_cell_raises(n):
+    # FCC Al half-widths 2.025 / 4.05 A, both below r_cut = 6.0 A.
+    with pytest.raises(ValueError, match="EAMPotential.compute"):
+        _eam().compute(*_al(n))
+
+
+def test_eam_large_enough_cell_runs_and_counts_every_image():
+    """3x3x3 (half-width 6.075 A) runs, and a 4x4x4 cell of the same
+    crystal gives the same energy per atom: every image inside the
+    cutoff is counted once.  The bare cell, allowed explicitly, does not
+    (it drops images), which is what the check exists to prevent."""
+    _, F3, S3 = _eam().compute(*_al(3))
+    assert np.all(np.isfinite(F3)) and np.all(np.isfinite(S3))
+    lat3, pos3, t3 = (fcc_al_dict(3)[k] for k in ("lattice", "positions", "atom_types"))
+    lat4, pos4, t4 = (fcc_al_dict(4)[k] for k in ("lattice", "positions", "atom_types"))
+    e3 = _eam().compute(lat3, pos3, t3)[0] / len(t3)
+    e4 = _eam().compute(lat4, pos4, t4)[0] / len(t4)
+    assert e3 == pytest.approx(e4, rel=1e-12)
+    lat1, pos1, t1 = (fcc_al_dict(1)[k] for k in ("lattice", "positions", "atom_types"))
+    with allow_minimum_image_violation():
+        e1 = _eam().compute(lat1, pos1, t1)[0] / len(t1)
+    # Measured: 0.250 eV/atom in the bare cell, 1.507 in 3x3x3 and 4x4x4.
+    assert abs(e1 - e3) > 1.0

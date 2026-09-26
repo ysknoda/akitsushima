@@ -26,11 +26,12 @@ def _supercell(lattice, frac, types, n):
     return lattice, frac @ lattice, list(types) * n ** 3
 
 
-def _fcc_al(a=4.05):
+def _fcc_al(a=4.05, n=3):
+    # n = 3: half-width 6.075 A hosts the 6.0 A EAM and LJ cutoffs under
+    # the minimum-image convention; the 4-atom cell (2.025 A) does not.
     frac = np.array([(0.0, 0.0, 0.0), (0.5, 0.5, 0.0),
                      (0.5, 0.0, 0.5), (0.0, 0.5, 0.5)])
-    lattice = np.eye(3) * a
-    return lattice, frac @ lattice, ["Al"] * 4
+    return _supercell(np.eye(3) * a, frac, ["Al"] * 4, n)
 
 
 def _diamond_si(a=5.43, n=2):
@@ -149,7 +150,7 @@ def main():
             "lattice": lat_al, "positions": p, "atom_types": types_al,
             "natoms": len(types_al),
             "volume": float(abs(np.linalg.det(lat_al))),
-            "ref_energy": -0.4, "ref_forces": np.zeros((4, 3)),
+            "ref_energy": -0.4, "ref_forces": np.zeros((len(types_al), 3)),
             "ref_stress": np.zeros((3, 3)),
         })
     weights = {"energy": 1.0, "forces": 1.0, "stress": 0.1,
