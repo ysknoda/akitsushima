@@ -966,6 +966,13 @@ class TersoffPotential:
         return dz_dposj, dz_dposk
 
     # ------------------------------------------------------------------
+    def site_terms(self, lattice, positions, atom_types):
+        """Per-atom energies and per-neighbour gradients (ADR-0007); see
+        akitsushima.engine.site_terms."""
+        from .site_terms import tersoff_site_terms
+        return tersoff_site_terms(self, np.asarray(lattice, float),
+                   np.asarray(positions, float), list(atom_types))
+
     def compute(self,
                 lattice: np.ndarray,
                 positions: np.ndarray,

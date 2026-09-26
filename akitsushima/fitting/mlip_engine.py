@@ -114,6 +114,29 @@ class MLIPForceField:
     def from_file(cls, path: str) -> "MLIPForceField":
         return cls(load_mlip_model(path))
 
+    @property
+    def per_atom_energy(self) -> bool:
+        """True when the model is a sum of site energies (atom-centred):
+        it then supports a changing atom count (gcmc) and the exact heat
+        flux (kappa).  A tabular model's E = N f(d) has no site split."""
+        return self.atom_centred
+
+    def site_terms(self, lattice, positions, atom_types):
+        """Per-atom energies and per-neighbour gradients (ADR-0007)."""
+        if not self.atom_centred:
+            raise ValueError(
+                "MLIP engine: a tabular model (E = N f(d) of a structure "
+                "descriptor) has no per-atom energies; the exact heat flux "
+                "and a changing atom count need an atom-centred model "
+                "(mlip.form: atom_centred).")
+        from ..engine.site_terms import SiteTerms
+        J = self.descriptor.atomic_jacobian(lattice, positions, atom_types)
+        eps, g = self.model.atomic_energy_and_gradient(J.G, J.sp)
+        centre = J.centre
+        dUdv = np.einsum("mak,mk->ma", J.dGdv, g[centre])
+        return SiteTerms(np.asarray(eps, float), centre, J.nbj.astype(np.int64),
+                         np.asarray(J.vec, float), dUdv)
+
     def __call__(self, lattice, positions, atom_types, neigh_list=None):
         if self.atom_centred:
             J = self.descriptor.atomic_jacobian(lattice, positions, atom_types)

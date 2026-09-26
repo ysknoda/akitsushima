@@ -123,6 +123,13 @@ class EAMPotential:
             return func(x), (func(x + h) - func(x - h)) / (2.0 * h)
         return func(x), dfunc(x)
 
+    def site_terms(self, lattice, positions, atom_types):
+        """Per-atom energies and per-neighbour gradients (ADR-0007); see
+        akitsushima.engine.site_terms."""
+        from .site_terms import eam_site_terms
+        return eam_site_terms(self, np.asarray(lattice, float),
+                   np.asarray(positions, float), list(atom_types))
+
     def compute(self,
                 lattice: np.ndarray,
                 positions: np.ndarray,

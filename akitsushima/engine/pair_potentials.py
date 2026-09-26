@@ -263,6 +263,12 @@ class BasePairPotential(ABC):
         stress /= volume
         return energy, forces, stress
 
+    def site_terms(self, lattice, positions, atom_types):
+        """Per-atom energies and per-neighbour gradients (ADR-0007): each
+        pair energy split equally between its atoms."""
+        from .site_terms import pair_site_terms
+        return pair_site_terms(self, lattice, positions, atom_types)
+
     def compute_pairs(self,
                       lattice: np.ndarray,
                       positions: np.ndarray,

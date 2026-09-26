@@ -748,6 +748,13 @@ class StillingerWeberPotential:
         return tri
 
     # ------------------------------------------------------------------
+    def site_terms(self, lattice, positions, atom_types):
+        """Per-atom energies and per-neighbour gradients (ADR-0007); see
+        akitsushima.engine.site_terms."""
+        from .site_terms import sw_site_terms
+        return sw_site_terms(self, np.asarray(lattice, float),
+                   np.asarray(positions, float), list(atom_types))
+
     def compute(self,
                 lattice: np.ndarray,
                 positions: np.ndarray,

@@ -37,8 +37,6 @@ from typing import Callable, List, Optional
 import numpy as np
 
 from ..constants import ATOMIC_MASS, EV_ANG3_TO_GPA, EV_ANG_TO_AMU_ANG_FS2, K_B
-from ..engine.pair_potentials import BasePairPotential
-from ..utils.mpi import _mpi_allreduce_sum, _mpi_allreduce_sum_scalar
 from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
 from .molecular_dynamics import NVTSimulation
 from .phonon import PhononCalculator
@@ -124,33 +122,34 @@ class ThermalConductivityCalculator:
                 UserWarning, stacklevel=3)
             self._warned_virial_fallback = True
 
-    def _gather_pair_data(self, positions: np.ndarray) -> Optional[list]:
+    def _gather_pair_data(self, positions: np.ndarray):
         """
-        Return, for every pair-decomposable potential
-        (:class:`~akitsushima.engine.pair_potentials.BasePairPotential`
-        subclass -- LJ/Morse/BornMayer/Buckingham) registered in
-        ``force_fn``'s :class:`~akitsushima.engine.potential_engine.
-        PotentialEngine` (if any), the raw per-pair
-        ``(idx_i, idx_j, rij, fij, V_pair)`` arrays from
-        :meth:`~akitsushima.engine.pair_potentials.BasePairPotential.
-        compute_pairs`.
+        Site-energy decomposition (ADR-0007) of every term of ``force_fn``
+        that has one, combined: pair potentials (each pair split equally),
+        Stillinger-Weber, Tersoff, EAM, and an atom-centred MLIP.  See
+        :mod:`akitsushima.engine.site_terms`.
 
-        Returns ``None`` when ``force_fn`` exposes no ``.engine`` at all
-        (e.g. an ML model or :class:`ExternalFileEngine`) -- there is then
-        no pair-decomposable structure to exploit, and callers fall back
-        entirely to the coarser, approximate method.
+        Returns ``None`` when nothing decomposes (an ``ExternalFileEngine``,
+        a tabular MLIP -- which ``run_md`` refuses up front -- or an engine
+        of Coulomb terms only).  Whatever is left undecomposed (Coulomb) is
+        found by subtraction in :meth:`_pair_virial_flux`.
 
         Computed once per heat-flux recording step and shared between
-        :meth:`_pair_virial_flux` and :meth:`_per_atom_energy` so the
-        (potentially many) registered pair potentials are not each
-        re-evaluated twice.
+        :meth:`_pair_virial_flux` and :meth:`_per_atom_energy`.  Every rank
+        holds the whole decomposition (no reduction needed).
         """
+        from ..engine.site_terms import SiteTerms
         engine = getattr(self.force_fn, "engine", None)
         if engine is None:
+            fn_site = getattr(self.force_fn, "site_terms", None)
+            if fn_site is None or not getattr(self.force_fn, "per_atom_energy", True):
+                return None
+            return fn_site(self.lattice, positions, self.atom_types)
+        parts = [pot.site_terms(self.lattice, positions, self.atom_types)
+                 for pot in engine._potentials if hasattr(pot, "site_terms")]
+        if not parts:
             return None
-        return [pot.compute_pairs(self.lattice, positions, self.atom_types)
-                for pot in engine._potentials
-                if isinstance(pot, BasePairPotential)]
+        return SiteTerms.combine(parts, self.N)
 
     def _compute_heat_flux(self,
                            positions : np.ndarray,
@@ -241,24 +240,17 @@ class ThermalConductivityCalculator:
         discarding the per-pair velocity-weighting the exact formula
         needs.
 
-        Fix: for every pair-decomposable potential
-        (:class:`BasePairPotential` subclass: LJ/Morse/BornMayer/
-        Buckingham) registered in the engine, the exact per-pair
-        ``f_ij``/``r_ij`` are obtained via ``compute_pairs()`` and the
-        formula above is evaluated directly. Any remaining part of the
-        total stress NOT accounted for by those pair potentials --
-        many-body potentials (Stillinger-Weber/Tersoff/EAM) and/or a
-        Coulomb (Ewald/PPPM) contribution baked into ``force_fn``'s
-        total stress -- is isolated by subtraction
-        (``stress_full - stress_pair``) and still uses the original
-        approximate centre-of-mass method, with a one-time warning. This
-        is exact whenever the engine contains ONLY pair-decomposable
-        potentials (the common case for simple solids: LJ/Morse
-        clusters, Buckingham-only ionic crystals without their Coulomb
-        part), and honestly approximate only for the genuinely
-        difficult-to-decompose remainder -- scoped this way per the
-        project plan rather than attempting a fully general many-body
-        pair decomposition, which is a substantially larger undertaking.
+        Fix (S4), generalised to many-body potentials (ADR-0007): the
+        virial term is evaluated per neighbour entry from the site-energy
+        decomposition of :meth:`_gather_pair_data`,
+        ``J_vir = -sum_m v_m (dU_centre/dv_m . vel_nbr)`` (Fan et al., Phys.
+        Rev. B 92, 094301 (2015), eq. 21).  For pair potentials it reduces
+        to the per-pair formula above; for Stillinger-Weber, Tersoff, EAM
+        and an atom-centred MLIP it is exact too, where the S4 version
+        handed their whole contribution to the centre-of-mass method.
+        What still has no decomposition (a Coulomb term) is isolated by
+        subtraction (``stress_full - stress_site``) and keeps the
+        approximate centre-of-mass method, with a one-time warning.
 
         Returns
         -------
@@ -268,8 +260,7 @@ class ThermalConductivityCalculator:
 
         if pair_data is None:
             self._warn_virial_fallback_once(
-                "force_fn exposes no .engine (not built via "
-                "make_force_fn()/PotentialEngine -- e.g. an ML model or "
+                "force_fn has no site-energy decomposition (e.g. an "
                 "ExternalFileEngine); the heat-flux virial term uses the "
                 "approximate centre-of-mass method for its ENTIRE "
                 "contribution, which is ~0 in a momentum-conserving NVE "
@@ -277,37 +268,21 @@ class ThermalConductivityCalculator:
             v_mean = velocities.mean(axis=0)
             return -V * stress_full @ v_mean * 0.5
 
-        J_vir_exact = np.zeros(3)
-        stress_pair = np.zeros((3, 3))
-        for idx_i, idx_j, rij, fij, _V_pair in pair_data:
-            if len(idx_i) == 0:
-                continue
-            vi = velocities[idx_i]
-            vj = velocities[idx_j]
-            coeff = np.einsum('ka,ka->k', fij, vi + vj)
-            # Bug-fix note: compute_pairs() returns rij = r_j - r_i with
-            # fij the force on i, while the formula above uses
-            # r_ij = r_i - r_j.  The term carried the wrong sign: checked
-            # against J V = d/dt sum_i r_i E_i by central differences on an
-            # isolated LJ cluster, the old sign was off by 230% and the
-            # corrected one agrees to 1e-8.
-            J_vir_exact -= 0.5 * np.einsum('k,ka->a', coeff, rij)
-            stress_pair -= np.einsum('ki,kj->ij', fij, rij)
-
-        J_vir_exact = _mpi_allreduce_sum(J_vir_exact)
-        stress_pair = _mpi_allreduce_sum(stress_pair) / V
+        if isinstance(pair_data, list):     # parts, e.g. [] = none
+            from ..engine.site_terms import SiteTerms
+            pair_data = SiteTerms.combine(pair_data, self.N)
+        J_vir_exact = pair_data.virial_flux(velocities)
+        stress_pair = pair_data.stress(V)
 
         stress_remainder = stress_full - stress_pair
         scale = max(float(np.max(np.abs(stress_full))), 1e-12)
         if float(np.max(np.abs(stress_remainder))) > 1e-6 * scale:
             self._warn_virial_fallback_once(
-                "the engine's stress has a component beyond its "
-                "pair-decomposable potentials (many-body Stillinger-"
-                "Weber/Tersoff/EAM and/or a Coulomb contribution); that "
-                "remainder's share of the heat-flux virial term still "
-                "uses the approximate centre-of-mass method (exact only "
-                "for the pair-decomposable part), which underestimates "
-                "its contribution to kappa.")
+                "the engine's stress has a component without a site-energy "
+                "decomposition (a Coulomb term); that remainder's share of "
+                "the heat-flux virial term uses the approximate "
+                "centre-of-mass method, which underestimates its "
+                "contribution to kappa.")
         v_mean = velocities.mean(axis=0)
         J_vir_remainder = -V * stress_remainder @ v_mean * 0.5
 
@@ -336,13 +311,11 @@ class ThermalConductivityCalculator:
         and its velocity, a real physical contribution to the heat flux
         that an accurate per-atom decomposition should retain.
 
-        Fix: for pair-decomposable potentials, each pair's energy is
-        split equally between its two atoms (the standard convention),
-        using the same ``compute_pairs()`` data as
-        :meth:`_pair_virial_flux`. Any energy not covered by a
-        pair-decomposable potential (many-body / Coulomb) is still split
-        uniformly over the remainder -- consistent with the same
-        honest-approximation scope as :meth:`_pair_virial_flux`.
+        Fix: the site energies U_i of :meth:`_gather_pair_data` (pair
+        energies split equally; the many-body potentials' and an
+        atom-centred MLIP's own site energies, ADR-0007).  Energy with no
+        decomposition (Coulomb) is still split uniformly -- the same scope
+        as :meth:`_pair_virial_flux`.
 
         Parameters
         ----------
@@ -358,20 +331,11 @@ class ThermalConductivityCalculator:
         if pair_data is None:
             return np.full(self.N, E_tot / self.N)
 
-        e_pair = np.zeros(self.N)
-        e_pair_total = 0.0
-        for idx_i, idx_j, _rij, _fij, V_pair in pair_data:
-            if len(idx_i) == 0:
-                continue
-            np.add.at(e_pair, idx_i, 0.5 * V_pair)
-            np.add.at(e_pair, idx_j, 0.5 * V_pair)
-            e_pair_total += float(V_pair.sum())
-
-        e_pair = _mpi_allreduce_sum(e_pair)
-        e_pair_total = _mpi_allreduce_sum_scalar(e_pair_total)
-
-        e_remainder = E_tot - e_pair_total
-        return e_pair + e_remainder / self.N
+        if isinstance(pair_data, list):
+            from ..engine.site_terms import SiteTerms
+            pair_data = SiteTerms.combine(pair_data, self.N)
+        e_remainder = E_tot - pair_data.energy
+        return pair_data.e_site + e_remainder / self.N
 
     # ------------------------------------------------------------------ #
     #  1. Run MD with heat-flux recording                                  #
