@@ -1,12 +1,11 @@
-"""``akitsushima osmc`` -- OS-MC (continuous soft-core lambda-dynamics
-grand-canonical MC/MD) from a YAML config.
+"""``akitsushima osmc`` -- grand-canonical MC/MD with a continuous fractional
+atom (CFCMC, ADR-0009) from a YAML config.
 """
+
 import os
 import time as _time
 
-import numpy as np
-
-from ..solvers import OSMMCSimulation
+from ..solvers import CFCMCSimulation
 from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..utils.mpi import _mpi_rank
 from .common import (
@@ -21,58 +20,90 @@ from .common import (
 
 __all__ = ["cmd_osmc"]
 
+# keys of the old lambda-dynamics osmc (removed with ADR-0009)
+_OLD_KEYS = (
+    "m_lam",
+    "sc_alpha",
+    "sc_n",
+    "lam_dt_frac",
+    "insertion_mode",
+    "n_probe",
+    "lambda_probe",
+    "species_params",
+)
+
 
 def cmd_osmc(args) -> int:
-    """OS-MC (OSMMCSimulation) from YAML input."""
+    """CFCMC (CFCMCSimulation) from YAML input."""
     cfg = _check_yaml(args.yaml)
     if cfg is None:
         return 1
 
-    struct_cfg = cfg.get("structure",{})
-    pot_cfg    = cfg.get("potential",{})
-    os_cfg     = cfg.get("osmc",     {})
+    struct_cfg = cfg.get("structure", {})
+    pot_cfg = cfg.get("potential", {})
+    os_cfg = cfg.get("osmc", {})
     # Only rank 0 prints; see the identical guard/rationale in cmd_md.
-    is_root    = (_mpi_rank == 0)
-    verbose    = (os_cfg.get("verbose",True) and not getattr(args,"quiet",False)
-                 and is_root)
+    is_root = _mpi_rank == 0
+    verbose = (
+        os_cfg.get("verbose", True) and not getattr(args, "quiet", False) and is_root
+    )
 
-    poscar = struct_cfg.get("poscar","POSCAR")
+    old = [k for k in _OLD_KEYS if k in os_cfg]
+    if old:
+        raise ValueError(
+            f"osmc: {old} belonged to the old lambda-dynamics osmc, which did "
+            f"not sample the muVT ensemble; osmc is now CFCMC (ADR-0009).  "
+            f"Remove them (see `akitsushima --write-config osmc`)."
+        )
+
+    poscar = struct_cfg.get("poscar", "POSCAR")
     pos_data = _check_poscar(poscar)
     if pos_data is None:
         return 1
 
     force_fn, r_cut, _, _ = _build_force_fn_from_yaml(pot_cfg)
     mu = _resolve_mu_from_cfg(os_cfg, default=-0.1, section_name="osmc")
+    n_cycles = int(os_cfg.get("n_cycles", 1000))
     if is_root:
-        _print_header("OS-MC (soft-core lambda GCMC)", cfg, poscar, pot_cfg)
-        print(f"\n[Settings]")
-        print(f"  Species   : {os_cfg.get('species','?')}")
-        print(f"  mu        : {mu} eV")
-        print(f"  T         : {os_cfg.get('temperature',300.0)} K")
-        print(f"  n_cycles  : {os_cfg.get('n_cycles',1000)}")
-        print(f"  m_lam     : {os_cfg.get('m_lam',50.0)}")
-        print(f"  sc_alpha  : {os_cfg.get('sc_alpha',0.5)}")
+        _print_header("osmc (CFCMC, continuous fractional atom)", cfg, poscar, pot_cfg)
+        print("\n[Settings]")
+        print(f"  Species      : {os_cfg.get('species', '?')}")
+        print(f"  mu           : {mu} eV")
+        print(f"  T            : {os_cfg.get('temperature', 300.0)} K")
+        print(f"  n_cycles     : {n_cycles}")
+        print(f"  equil_cycles : {os_cfg.get('equil_cycles', n_cycles // 5)}")
+        print(f"  max_dlambda  : {os_cfg.get('max_dlambda', 0.2)}")
 
-    output_dir = os_cfg.get("output_dir","./osmc_output")
+    output_dir = os_cfg.get("output_dir", "./osmc_output")
     os.makedirs(output_dir, exist_ok=True)
 
-    sim = OSMMCSimulation(
-        lattice=pos_data["lattice"], positions=pos_data["positions"],
-        atom_types=pos_data["atom_types"], fix_atoms=pos_data.get("fix_atoms"),
+    sim = CFCMCSimulation(
+        lattice=pos_data["lattice"],
+        positions=pos_data["positions"],
+        atom_types=pos_data["atom_types"],
+        fix_atoms=pos_data.get("fix_atoms"),
         force_fn=force_fn,
-        temperature=os_cfg.get("temperature",300.0), mu=mu,
-        species=os_cfg.get("species","Ar"), timestep=os_cfg.get("timestep",1.0),
-        n_cycles=os_cfg.get("n_cycles",1000),
-        md_steps_per_cycle=os_cfg.get("md_steps_per_cycle",20),
-        gcmc_attempts_per_cycle=os_cfg.get("gcmc_attempts_per_cycle",50),
-        tau_nhc=os_cfg.get("tau_nhc",100.0),
-        traj_every=os_cfg.get("traj_every",10), thermo_every=os_cfg.get("thermo_every",1),
-        output_dir=output_dir, skin_width=os_cfg.get("skin_width",0.5),
-        seed=os_cfg.get("seed",42), verbose=verbose,
-        m_lam=os_cfg.get("m_lam",50.0), sc_alpha=os_cfg.get("sc_alpha",0.5),
-        sc_n=os_cfg.get("sc_n",4), lam_dt_frac=os_cfg.get("lam_dt_frac",1.0),
-        insertion_mode=os_cfg.get("insertion_mode","random"),
-        n_probe=os_cfg.get("n_probe",20), lambda_probe=os_cfg.get("lambda_probe",0.1))
+        temperature=os_cfg.get("temperature", 300.0),
+        mu=mu,
+        species=os_cfg.get("species", "Ar"),
+        timestep=os_cfg.get("timestep", 1.0),
+        n_cycles=n_cycles,
+        md_steps_per_cycle=os_cfg.get("md_steps_per_cycle", 20),
+        gcmc_attempts_per_cycle=os_cfg.get("gcmc_attempts_per_cycle", 50),
+        max_disp=os_cfg.get("max_disp", 0.2),
+        tau_nhc=os_cfg.get("tau_nhc", 100.0),
+        traj_every=os_cfg.get("traj_every", 10),
+        thermo_every=os_cfg.get("thermo_every", 1),
+        output_dir=output_dir,
+        skin_width=os_cfg.get("skin_width", 0.5),
+        seed=os_cfg.get("seed", 42),
+        verbose=verbose,
+        lambda_move_ratio=os_cfg.get("lambda_move_ratio", 0.5),
+        max_dlambda=os_cfg.get("max_dlambda", 0.2),
+        n_lambda_bins=os_cfg.get("n_lambda_bins", 10),
+        equil_cycles=os_cfg.get("equil_cycles"),
+        adapt_weights=os_cfg.get("adapt_weights", True),
+    )
 
     t0 = _time.perf_counter()
     result = sim.run()
@@ -82,28 +113,23 @@ def cmd_osmc(args) -> int:
         return 0
 
     _print_results_header("osmc")
-    # Bug-fix note (S7): the original read thermo-row key "N_guest" (the
-    # actual key is "N") and a top-level "lambda_integral" key that
-    # OSMMCSimulation.run() has never returned -- its actual extra keys
-    # (beyond GCMCMDSimulation.run()) are n_insertions/n_deletions/
-    # insertion_mode/species_stats/multi_species, used below instead.
-    thermo = result.get("thermo_log",[])
-    if thermo:
-        N_v = [r.get("N", float("nan")) for r in thermo]
-        print(f"\n[OSMC statistics  ({len(thermo)} frames)]")
-        print(f"  <N_guest>    : {np.nanmean(N_v):.3f}")
-        print(f"  n_insertions : {result.get('n_insertions','?')}")
-        print(f"  n_deletions  : {result.get('n_deletions','?')}")
-
-    species_stats = result.get("species_stats", {})
-    if species_stats:
-        print(f"\n[Per-species statistics]"
-              + ("  (multi-species)" if result.get("multi_species") else ""))
-        for sp, st in species_stats.items():
-            print(f"  {sp:<4s}: mu={st['mu']:.4f} eV  "
-                  f"n_ins={st['n_ins']}  n_del={st['n_del']}  "
-                  f"N_current={st.get('N_current','?')}")
+    est = result["cfcmc"]
+    print(
+        f"\n[CFCMC estimators  ({est['n_samples']} samples after "
+        f"{sim.equil_cycles} equilibration cycles)]"
+    )
+    print(f"  <N> (lambda = 0) : {result['N_mean']:.3f} +/- {result['N_mean_se']:.3f}")
+    print(
+        f"  <N> (lambda = 1) : {result['N_mean_lambda1']:.3f} +/- "
+        f"{result['N_mean_lambda1_se']:.3f}"
+    )
+    print(f"  mu_ex            : {result['mu_ex']:.5f} +/- {result['mu_ex_se']:.5f} eV")
+    print(
+        f"  acc (lambda / ins / del) : {result['acc_lambda']:.3f} / "
+        f"{result['acc_ins']:.3f} / {result['acc_del']:.3f}"
+    )
+    print(f"  lambda histogram : {est['lambda_hist']}")
 
     _print_output_files(output_dir)
-    _print_timing_summary([(f"OS-MC run ({os_cfg.get('n_cycles',1000)} cycles)", t_run)], t_run)
+    _print_timing_summary([(f"CFCMC run ({n_cycles} cycles)", t_run)], t_run)
     return 0

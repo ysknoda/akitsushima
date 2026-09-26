@@ -1,6 +1,6 @@
 from .dynamics_analysis import DiffusionAnalyzer
 from .elastic import ElasticConstantsCalculator, fit_equation_of_state
-from .gcmc import GCMCMDSimulation, OSMMCSimulation, SpeciesParams
+from .gcmc import CFCMCSimulation, GCMCMDSimulation
 from .geometry_optimiser import GeometryOptimiser
 from .molecular_dynamics import NPTSimulation, NVESimulation, NVTSimulation
 from .neb import NEBChain, NEBOptimiser
@@ -15,8 +15,7 @@ __all__ = [
     "NVESimulation",
     "NPTSimulation",
     "GCMCMDSimulation",
-    "OSMMCSimulation",
-    "SpeciesParams",
+    "CFCMCSimulation",
     "NEBChain",
     "NEBOptimiser",
     "TransitionStateAnalyser",

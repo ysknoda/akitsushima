@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  gcmc      Grand-Canonical MD     (muVT)\n"
             "  neb       Climbing-Image NEB transition-state search\n"
             "  tsa       Transition State Analysis (Hessian / IRC / TST rate)\n"
-            "  osmc      OS-MC soft-core lambda-integration GCMC\n"
+            "  osmc      CFCMC grand-canonical MC/MD (fractional atom)\n"
             "  esm       Effective Screening Medium\n"
             "  phonon    Phonon band structure, DOS, Debye T, free energy\n"
             "  kappa     Thermal conductivity (Green-Kubo + Slack-Debye)\n"
@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("gcmc",   "Grand-Canonical Monte Carlo MD (muVT)")
     _add("neb",    "Climbing-Image NEB transition-state search")
     _add("tsa",    "Transition State Analysis (Hessian / IRC / TST rate)")
-    _add("osmc",   "OS-MC soft-core lambda-integration GCMC")
+    _add("osmc",   "CFCMC grand-canonical MC/MD (fractional atom)")
     _add("esm",    "Effective Screening Medium")
     _add("phonon", "Phonon band structure, DOS, Debye temperature, free energy")
     _add("kappa",  "Thermal conductivity (Green-Kubo + optional Slack-Debye)")

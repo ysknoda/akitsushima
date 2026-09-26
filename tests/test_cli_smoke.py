@@ -359,54 +359,51 @@ def test_cmd_tsa_smoke(tmp_path):
     assert cmd_tsa(_ns(yaml_path)) == 0
 
 
-def test_cmd_osmc_is_disabled(tmp_path):
-    """osmc refuses to run until redesigned (ADR-0003 T7, O2): its lambda
-    dynamics does not sample the muVT ensemble.  (Was the S7 smoke test.)"""
+def _osmc_cfg(tmp_path, **sec):
     rng = np.random.default_rng(0)
     positions = rng.uniform(0, 15.0, size=(6, 3))
     poscar = tmp_path / "POSCAR"
     write_poscar(str(poscar), np.eye(3) * 15.0, positions, ["Ar"] * 6)
-
-    cfg = {
+    osmc = {"output_dir": str(tmp_path / "osmc_out"), "species": "Ar",
+            "mu": -0.05, "temperature": 120.0, "n_cycles": 10,
+            "equil_cycles": 2, "md_steps_per_cycle": 5,
+            "gcmc_attempts_per_cycle": 8, "seed": 1, "verbose": False}
+    osmc.update(sec)
+    return {
         "structure": {"poscar": str(poscar)},
         "potential": {"type": "LJ", "species": ["Ar"],
                      "params": {"epsilon": 0.0103, "sigma": 3.405}, "r_cut": 6.0},
-        "osmc": {"output_dir": str(tmp_path / "osmc_out"), "species": "Ar",
-                "mu": -0.05, "temperature": 120.0, "n_cycles": 10,
-                "md_steps_per_cycle": 5, "gcmc_attempts_per_cycle": 8,
-                "m_lam": 50.0, "sc_alpha": 0.5, "sc_n": 4, "seed": 1,
-                "verbose": False},
+        "osmc": osmc,
     }
+
+
+def test_cmd_osmc_smoke(tmp_path):
+    """osmc runs CFCMC (ADR-0009) and writes its estimators."""
     yaml_path = tmp_path / "osmc.yaml"
-    _write_yaml(yaml_path, cfg)
-    with pytest.raises(ValueError, match="disabled"):
+    _write_yaml(yaml_path, _osmc_cfg(tmp_path))
+    assert cmd_osmc(_ns(yaml_path)) == 0
+    out = tmp_path / "osmc_out"
+    for f in ("cfcmc_estimates.json", "lambda_vs_cycle.dat",
+              "POSCAR_gcmc_final", "N_vs_cycle.dat"):
+        assert (out / f).is_file()
+
+
+def test_cmd_osmc_refuses_old_lambda_dynamics_keys(tmp_path):
+    yaml_path = tmp_path / "osmc.yaml"
+    _write_yaml(yaml_path, _osmc_cfg(tmp_path, m_lam=50.0, sc_alpha=0.5))
+    with pytest.raises(ValueError, match="ADR-0009"):
         cmd_osmc(_ns(yaml_path))
 
 
 def test_cmd_osmc_smoke_accepts_deprecated_mu_ex_yaml_key(tmp_path):
     """Backward compatibility counterpart of the gcmc test above, for the
     'osmc' YAML section."""
-    rng = np.random.default_rng(0)
-    positions = rng.uniform(0, 15.0, size=(6, 3))
-    poscar = tmp_path / "POSCAR"
-    write_poscar(str(poscar), np.eye(3) * 15.0, positions, ["Ar"] * 6)
-
-    cfg = {
-        "structure": {"poscar": str(poscar)},
-        "potential": {"type": "LJ", "species": ["Ar"],
-                     "params": {"epsilon": 0.0103, "sigma": 3.405}, "r_cut": 6.0},
-        "osmc": {"output_dir": str(tmp_path / "osmc_out"), "species": "Ar",
-                "mu_ex": -0.234, "temperature": 120.0, "n_cycles": 10,
-                "md_steps_per_cycle": 5, "gcmc_attempts_per_cycle": 8,
-                "m_lam": 50.0, "sc_alpha": 0.5, "sc_n": 4, "seed": 1,
-                "verbose": False},
-    }
+    cfg = _osmc_cfg(tmp_path)
+    cfg["osmc"]["mu_ex"] = cfg["osmc"].pop("mu")
     yaml_path = tmp_path / "osmc.yaml"
     _write_yaml(yaml_path, cfg)
-    # the key is still read (and warned about) before osmc refuses to run
     with pytest.warns(UserWarning, match="mu_ex"):
-        with pytest.raises(ValueError, match="disabled"):
-            cmd_osmc(_ns(yaml_path))
+        assert cmd_osmc(_ns(yaml_path)) == 0
 
 
 def test_cmd_esm_smoke(tmp_path):

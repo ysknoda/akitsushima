@@ -3,7 +3,7 @@
 relax and md were covered by ADR-0004/0005.  Here: neb, tsa, phonon, kappa
 and gcmc run end to end through the CLI on ``potential: {type: MLIP}``
 with an atom-centred model; the solvers that need per-atom energies (gcmc,
-kappa) refuse a tabular model; osmc and esm refuse an MLIP outright; a
+kappa, osmc) refuse a tabular model; esm refuses an MLIP outright; a
 solver asked to place an element the model was not trained on refuses it.
 The physics of the MLIP-driven results against the reference potential is
 checked in example/mlip/adr0007 (ADR-0007), not here.
@@ -219,12 +219,19 @@ def test_gcmc_refuses_a_tabular_mlip_and_untrained_elements(
         _run(tmp_path, "gcmc", _gcmc_cfg(models["atomic"], species="Ge"))
 
 
-def test_osmc_refuses_an_mlip(models, tmp_path, monkeypatch):
+def test_osmc_takes_an_atom_centred_mlip_not_a_tabular_one(
+    models, tmp_path, monkeypatch
+):
+    """osmc is CFCMC (ADR-0009): the fractional atom couples through total
+    energies, so it takes what gcmc takes."""
     monkeypatch.chdir(tmp_path)
     lat, pos = _diamond(2)
     write_poscar("POSCAR", lat, pos[1:], ["Si"] * 63)
-    with pytest.raises(ValueError, match="osmc|OSMMC"):
-        _run(tmp_path, "osmc", _gcmc_cfg(models["atomic"], cmd="osmc"))
+    cfg = _gcmc_cfg(models["atomic"], cmd="osmc")
+    cfg["osmc"]["equil_cycles"] = 1
+    assert _run(tmp_path, "osmc", cfg) == 0
+    with pytest.raises(ValueError, match="per-atom energies"):
+        _run(tmp_path, "osmc", _gcmc_cfg(models["tabular"], cmd="osmc"))
 
 
 def test_esm_refuses_an_mlip(models, tmp_path, monkeypatch, capsys):
@@ -256,7 +263,7 @@ def test_cli_main_turns_a_refusal_into_a_message(models, tmp_path, monkeypatch, 
     lat, pos = _diamond(2)
     write_poscar("POSCAR", lat, pos[1:], ["Si"] * 63)
     (tmp_path / "osmc.yaml").write_text(
-        yaml.safe_dump(_gcmc_cfg(models["atomic"], cmd="osmc"))
+        yaml.safe_dump(_gcmc_cfg(models["tabular"], cmd="osmc"))
     )
     monkeypatch.setattr(sys, "argv", ["akitsushima", "osmc", "osmc.yaml"])
     assert main() == 1

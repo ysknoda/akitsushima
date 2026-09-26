@@ -90,7 +90,7 @@ O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 | `fit`   | Fit classical or ML potential parameters against DFT reference data (POSCAR geometry + CSV energy/force/stress). |
 | `relax` | Geometry optimisation: FIRE, L-BFGS, DIIS, RMM-DIIS, RFO — ionic or variable-cell, with transition-state refinement. |
 | `md`    | Molecular dynamics: NVE, NVT (Nosé-Hoover chain), NPT. |
-| `gcmc` / `osmc` | Grand-canonical (μVT) MD, including soft-core lambda-dynamics insertion/deletion. |
+| `gcmc` / `osmc` | Grand-canonical (μVT) MC/MD: discrete insertion/deletion (`gcmc`) or a continuous fractional atom, CFCMC (`osmc`, ADR-0009). |
 
 ### Post-processing
 
@@ -186,7 +186,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `gcmc`   | Grand-canonical Monte Carlo MD (μVT) |
 | `neb`    | Climbing-image NEB transition-state search |
 | `tsa`    | Transition-state analysis (Hessian / IRC / TST rate) |
-| `osmc`   | OS-MC soft-core lambda-integration GCMC |
+| `osmc`   | CFCMC grand-canonical MC/MD (fractional atom) |
 | `esm`    | Effective screening medium |
 | `phonon` | Phonon band structure, DOS, Debye temperature, free energy |
 | `kappa`  | Thermal conductivity (Green-Kubo + optional Slack-Debye) |
@@ -300,7 +300,7 @@ Which solvers take an MLIP (ADR-0007):
 | `relax`, `md`, `neb`, `tsa`, `phonon` | yes | yes | need E, F, S only |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
 | `kappa` | refused | yes | exact heat flux from the site terms |
-| `osmc` | refused | refused | osmc is disabled for every potential: its lambda dynamics does not sample the muVT ensemble (ADR-0003 T7, O2); use `gcmc` |
+| `osmc` | refused | yes | CFCMC couples the fractional atom through total energies (ADR-0009): as `gcmc` |
 | `esm` | refused | refused | electrostatics only |
 
 A refusal is an error at start-up, not a silent approximation.  The heat

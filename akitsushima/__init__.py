@@ -40,7 +40,7 @@ Simulation capabilities
   relax  -- Geometry optimisation: FIRE, L-BFGS, DIIS, RMM-DIIS, RFO
            (ionic or variable-cell; RFO supports TS refinement).
   md     -- Molecular dynamics: NVE, NVT (Nose-Hoover chain), NPT.
-  gcmc/osmc -- Grand-canonical (muVT) MD, including soft-core lambda-dynamics.
+  gcmc/osmc -- Grand-canonical (muVT) MD: discrete moves / CFCMC.
 
 Post-processing
 ---------------
@@ -138,6 +138,7 @@ from .fitting import (
 )
 from .io import parse_poscar, write_poscar
 from .solvers import (
+    CFCMCSimulation,
     DiffusionAnalyzer,
     ElasticConstantsCalculator,
     GCMCMDSimulation,
@@ -147,10 +148,8 @@ from .solvers import (
     NPTSimulation,
     NVESimulation,
     NVTSimulation,
-    OSMMCSimulation,
     PhononCalculator,
     RadialDistributionFunction,
-    SpeciesParams,
     ThermalConductivityCalculator,
     TransitionStateAnalyser,
     fit_equation_of_state,
@@ -181,7 +180,7 @@ __all__ = [
     "AtomicELMModel", "AtomicQELMModel", "AtomicNNModel",
     # solvers
     "GeometryOptimiser", "NVTSimulation", "NVESimulation", "NPTSimulation",
-    "GCMCMDSimulation", "OSMMCSimulation", "SpeciesParams",
+    "GCMCMDSimulation", "CFCMCSimulation",
     "NEBChain", "NEBOptimiser", "TransitionStateAnalyser",
     "PhononCalculator", "ThermalConductivityCalculator",
     "RadialDistributionFunction",

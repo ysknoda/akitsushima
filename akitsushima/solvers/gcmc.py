@@ -1,11 +1,10 @@
 """Grand-canonical Monte Carlo + MD hybrid simulations (muVT ensemble):
 GCMCMDSimulation (discrete insertion/deletion/displacement moves) and
-OSMMCSimulation (continuous lambda-dynamics / soft-core insertion,
-single- or multi-species).
+CFCMCSimulation (a continuous fractional atom, ADR-0009).
 """
 import os
 import warnings
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -19,97 +18,7 @@ from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
 from ..utils.timing import TimingCollector
 from .molecular_dynamics import _BaseMDSimulation
 
-__all__ = ["SpeciesParams", "GCMCMDSimulation", "OSMMCSimulation"]
-
-
-class _SpeciesParamsFields(NamedTuple):
-    """Plain field/default declaration for :class:`SpeciesParams`, split
-    into its own base class because ``typing.NamedTuple`` refuses to let
-    a subclass override ``__new__`` in the SAME class body that declares
-    the fields (``AttributeError: Cannot overwrite NamedTuple attribute
-    __new__``, confirmed directly against this Python version).
-    Subclassing a step further, as :class:`SpeciesParams` below does, is
-    unaffected by that restriction and is the standard workaround."""
-    mu        : float
-    mass      : Optional[float] = None
-    m_lam     : Optional[float] = None
-    sc_alpha  : float = 0.5
-    sc_n      : int = 4
-    lambda_dB : Optional[float] = None
-    weight    : Optional[float] = None
-
-
-class SpeciesParams(_SpeciesParamsFields):
-    """
-    Per-species lambda-dynamics parameters for :class:`OSMMCSimulation`'s
-    multi-species mode (``species_params={symbol: SpeciesParams(...)}``).
-
-    Bug-fix note (S14): this type was referenced throughout the original
-    ``OSMMCSimulation.__init__`` (``isinstance(sp, SpeciesParams)``, the
-    class docstring's own multi-species example, error messages) but was
-    never actually defined anywhere in the file -- so passing
-    ``species_params=`` to construct a multi-species OSMMC simulation
-    raised ``NameError: name 'SpeciesParams' is not defined`` on the very
-    first ``isinstance`` check, making the documented multi-species
-    feature entirely unusable. Field names, the one mandatory field
-    (``mu``), and the defaults for ``sc_alpha``/``sc_n`` (matching
-    the single-species shorthand constructor defaults) are all inferred
-    directly from how ``sp.<field>`` is actually accessed in
-    ``OSMMCSimulation.__init__``.
-
-    Rename note (``mu_ex`` -> ``mu``): the field was originally named
-    ``mu_ex`` and documented as the *excess* chemical potential, which
-    was wrong -- it was always the FULL chemical potential fed straight
-    into the standard grand-canonical acceptance rule (see
-    :class:`GCMCMDSimulation`'s own ``mu`` parameter note for the
-    derivation and the ideal-gas calculation that settled it). The field
-    is renamed to ``mu`` so the name states what the value actually is.
-    ``mu_ex=`` is kept as a deprecated constructor alias (mutually
-    exclusive with ``mu=``, warns via :class:`UserWarning`), and
-    ``.mu_ex`` is kept as a deprecated read-only property returning
-    ``.mu`` (also warns), so existing code keeps working unchanged.
-
-    Parameters
-    ----------
-    mu        : FULL chemical potential mu [eV].  Required.
-    mass      : atomic mass [amu].  None -> ATOMIC_MASS lookup.
-    m_lam     : lambda virtual mass [amu.A^2].  None -> scaled from Ar=39.948 reference.
-    sc_alpha  : soft-core alpha (void size at lambda=0).
-    sc_n      : soft-core exponent n.
-    lambda_dB : thermal de Broglie wavelength [A].  None -> computed from mass/T.
-    weight    : relative sampling weight for species selection.  None -> 1.0.
-    """
-    __slots__ = ()
-
-    def __new__(cls, mu=None, mass=None, m_lam=None, sc_alpha=0.5, sc_n=4,
-                lambda_dB=None, weight=None, mu_ex=None):
-        if mu_ex is not None:
-            if mu is not None:
-                raise TypeError(
-                    "SpeciesParams: pass either 'mu' or the deprecated "
-                    "'mu_ex' alias, not both.")
-            warnings.warn(
-                "SpeciesParams: the 'mu_ex' argument is deprecated; use "
-                "'mu' instead (it was always the full chemical "
-                "potential, not the excess -- see the class docstring).",
-                UserWarning, stacklevel=2)
-            mu = mu_ex
-        if mu is None:
-            raise TypeError(
-                "SpeciesParams: 'mu' (the full chemical potential [eV]) "
-                "is required.")
-        return super().__new__(cls, float(mu), mass, m_lam, sc_alpha,
-                               sc_n, lambda_dB, weight)
-
-    @property
-    def mu_ex(self):
-        """Deprecated alias for :attr:`mu`.  See the class docstring's
-        rename note."""
-        warnings.warn(
-            "SpeciesParams.mu_ex is deprecated; use .mu instead (it is "
-            "the full chemical potential, not the excess).",
-            UserWarning, stacklevel=2)
-        return self.mu
+__all__ = ["GCMCMDSimulation", "CFCMCSimulation"]
 
 
 class GCMCMDSimulation(_BaseMDSimulation):
@@ -200,8 +109,7 @@ class GCMCMDSimulation(_BaseMDSimulation):
     ``exp(+beta u_i)`` (local energy) rather than uniformly.  The bias
     correction  ``exp(-beta u_i) / Z``  is applied to the acceptance criterion.
 
-    Both extensions are placeholders for the planned OSMMC implementation
-    and can be combined independently.
+    Both extensions can be combined independently.
 
     Example
     -------
@@ -219,7 +127,7 @@ class GCMCMDSimulation(_BaseMDSimulation):
     """
 
     # Task name used to build the XDATCAR output filename
-    # (XDATCAR_<_xdatcar_task_name>).  Subclasses (e.g. OSMMCSimulation)
+    # (XDATCAR_<_xdatcar_task_name>).  Subclasses (e.g. CFCMCSimulation)
     # override this to get their own distinct filename while still
     # sharing this class's run() method via super().run().
     _xdatcar_task_name = "gcmc"
@@ -250,7 +158,7 @@ class GCMCMDSimulation(_BaseMDSimulation):
                  skin_width      : float = 0.5,
                  seed            : int   = 42,
                  verbose         : bool  = True,
-                 # Extension hooks (used by OSMMCSimulation subclass)
+                 # Extension hooks (biased insertion / deletion)
                  cavity_bias     : bool  = False,
                  energy_bias_del : bool  = False,
                  fix_atoms       : Optional[np.ndarray] = None,
@@ -1093,760 +1001,462 @@ class GCMCMDSimulation(_BaseMDSimulation):
         print(f"  Plot: {path}")
 
 
-#  SECTION 6.5: Open System Molecular Dynamics (OSMMC, lambda-dynamics, muVT)
+#  SECTION 6.5: Continuous fractional component MC (CFCMC, muVT) -- ADR-0009
 # ============================================================================
 
-class OSMMCSimulation(GCMCMDSimulation):
+
+class CFCMCSimulation(GCMCMDSimulation):
     """
-    Open System Molecular Dynamics via continuous lambda-dynamics (muVT ensemble).
+    Grand-canonical MC/MD with a continuous fractional atom (CFCMC, muVT).
 
-    Supports **single-species** (backward-compatible) and **multi-species**
-    grand-canonical MD via the ``species_params`` dict interface.
+    One atom of the exchanged species is *fractional*: its coupling
+    ``lambda`` in [0, 1] enters the energy linearly,
 
-    Parameters
+        U(lambda) = (1 - lambda) U_N + lambda U_{N+1},
+
+    U_N without the fractional atom, U_{N+1} with it as a full atom, so any
+    force function works unchanged (engines, Ewald / PPPM / ESM, an
+    atom-centred MLIP).  Each cycle runs an NVT-MD segment at fixed N and
+    lambda (the fractional atom included) and then
+    ``gcmc_attempts_per_cycle`` MC moves: lambda changes (probability
+    ``lambda_move_ratio``) or displacements.  A lambda change past 1 makes
+    the fractional atom whole and places a new one at random (insertion);
+    past 0 it removes the fractional atom and makes a random whole atom
+    fractional (deletion).  The acceptance rules and the estimators are
+    derived in docs/adr/0009-osmc-as-cfcmc.md:
+
+        insertion: min(1, V e^{beta mu} / (Lambda^3 (N+1)) e^{-beta dU + dw})
+        deletion : min(1, Lambda^3 N e^{-beta mu} / V     e^{-beta dU + dw})
+
+    Method: Shi & Maginn, J. Chem. Theory Comput. 3, 1451 (2007); the rules
+    here were derived independently and verified against the ideal gas,
+    the NIST SRSW LJ vapour and ``GCMCMDSimulation``
+    (example/gcmc/check_cfcmc.py).
+
+    Parameters (beyond :class:`GCMCMDSimulation`'s)
     ----------
-    lattice, positions, atom_types, force_fn, temperature, timestep,
-    n_cycles, md_steps_per_cycle, gcmc_attempts_per_cycle, tau_nhc,
-    traj_every, thermo_every, output_dir, skin_width, seed, verbose
-        Inherited from :class:`GCMCMDSimulation`.
+    lambda_move_ratio : fraction of MC moves that change lambda (rest are
+                        displacements).  Default 0.5.
+    max_dlambda       : lambda step d is uniform in [-max_dlambda,
+                        max_dlambda].  Default 0.2.
+    n_lambda_bins     : bins of the bias w(lambda) and of the estimators.
+                        Default 10.
+    equil_cycles      : cycles discarded from the estimators; the bias is
+                        adapted during them when ``adapt_weights``.
+                        Default n_cycles // 5.
+    adapt_weights     : Wang-Landau adaptation of w(lambda) during the
+                        equilibration.  Default True.
 
-    species_params : dict {symbol: SpeciesParams} -- **multi-species mode**.
-        When supplied, the single-species shorthand parameters below are
-        ignored.  Each key is an element symbol; the value is a
-        :class:`SpeciesParams` namedtuple.
-
-    species  : str   -- single-species symbol.  Ignored when species_params given.
-    mu       : float -- single-species FULL chemical potential mu [eV]
-               (see GCMCMDSimulation's ``mu`` parameter note).  The
-               deprecated ``mu_ex=`` alias is also accepted here (it is
-               forwarded to :class:`GCMCMDSimulation` via ``**kwargs``).
-    mass     : float -- single-species atomic mass [amu].  Default: ATOMIC_MASS.
-    m_lam    : float -- single-species lambda virtual mass [amu.A^2].  Default 50.
-    sc_alpha : float -- single-species soft-core alpha.  Default 0.5.
-    sc_n     : int   -- single-species soft-core exponent n.  Default 4.
-
-    lam_dt_frac    : float -- lambda integrator timestep as fraction of dt. Default 1.0.
-    insertion_mode : str   -- ``'random'`` or ``'biased'``.  Default ``'random'``.
-    n_probe        : int   -- candidate positions for biased insertion.  Default 20.
-    lambda_probe   : float -- lambda used to score probe positions.  Default 0.1.
-
-    Examples
-    --------
-    **Single-species (Ar, backward-compatible):**
-
-    >>> sim = OSMMCSimulation(
-    ...     lat, pos, ['Ar']*N, fn,
-    ...     temperature=120., mu=-0.05, species='Ar',
-    ...     m_lam=50., sc_alpha=0.5, sc_n=4,
-    ...     insertion_mode='biased', n_probe=20)
-
-    **Multi-species (Li2O, stoichiometric weighting):**
-
-    >>> sim = OSMMCSimulation(
-    ...     lat, pos, types, fn,
-    ...     temperature=1000.,
-    ...     species_params={
-    ...         'Li': SpeciesParams(mu=-0.12, mass=6.941,
-    ...                             m_lam=7.0, sc_alpha=0.55,
-    ...                             sc_n=4, weight=2.0),
-    ...         'O' : SpeciesParams(mu=-0.35, mass=15.999,
-    ...                             m_lam=16.0, sc_alpha=0.40,
-    ...                             sc_n=4, weight=1.0),
-    ...     },
-    ...     n_cycles=5000, md_steps_per_cycle=20,
-    ...     insertion_mode='biased')
+    ``mu`` is the FULL chemical potential, as in GCMCMDSimulation.  Atoms of
+    other species are a fixed framework; atoms of ``species`` may not be
+    fixed.  ``N_history`` / ``N_vs_cycle.dat`` count whole atoms; the muVT
+    averages are the lambda-end estimators ``N_mean`` (lambda = 0) and
+    ``N_mean_lambda1`` (lambda = 1), which must agree, and ``mu_ex``.
     """
 
-    # Overrides GCMCMDSimulation._xdatcar_task_name -> XDATCAR_osmc
     _xdatcar_task_name = "osmc"
+    _MLIP_REFUSAL = None
 
-    # ADR-0007: the ghost particle couples through a soft-core LJ taken
-    # from the engine's pair parameters (_get_lj_params), which an MLIP
-    # does not have, and osmc fails its own muVT check (ADR-0003 T7,
-    # findings O1-O2).  Refused until those are settled.
-    _MLIP_REFUSAL = ("its ghost particle couples through soft-core LJ "
-                     "parameters an MLIP does not have, and osmc fails the "
-                     "muVT check (ADR-0003 T7, O1-O2)")
-
-    def __init__(self,
-                 *args,
-                 # -- multi-species -------------------------------------
-                 species_params  : Optional[Dict[str, object]] = None,
-                 # -- single-species shorthand (backward-compatible) ----
-                 m_lam          : float = 50.0,
-                 sc_alpha       : float = 0.5,
-                 sc_n           : int   = 4,
-                 # -- lambda integrator ---------------------------------
-                 lam_dt_frac    : float = 1.0,
-                 # -- placement strategy --------------------------------
-                 insertion_mode : str   = 'random',
-                 n_probe        : int   = 20,
-                 lambda_probe   : float = 0.1,
-                 _allow_unverified: bool = False,
-                 **kwargs):
-
-        # Refused until redesigned (ADR-0003 T7, O2; decided 2026-09-26):
-        # the lambda dynamics does not sample the muVT ensemble -- a
-        # deletion removes a random atom with no energy criterion and the
-        # lambda force has no translational term, so with O1 fixed N grows
-        # without bound (ideal gas: 30 -> 710 in 713 cycles, exact 40).
-        # The planned replacement is CFCMC (Shi & Maginn, J. Chem. Theory
-        # Comput. 3, 1451 (2007)).  _allow_unverified is for tests of the
-        # present code only.
-        if not _allow_unverified:
+    def __init__(
+        self,
+        *args,
+        lambda_move_ratio: float = 0.5,
+        max_dlambda: float = 0.2,
+        n_lambda_bins: int = 10,
+        equil_cycles: Optional[int] = None,
+        adapt_weights: bool = True,
+        **kwargs,
+    ):
+        kwargs.setdefault("cavity_bias", False)
+        kwargs.setdefault("energy_bias_del", False)
+        if kwargs["cavity_bias"] or kwargs["energy_bias_del"]:
             raise ValueError(
-                "OSMMCSimulation (osmc) is disabled: its lambda dynamics does "
-                "not sample the muVT ensemble (ADR-0003 T7, finding O2; N "
-                "grows without bound).  Use gcmc, which passes the NIST check.")
-
-        kwargs.setdefault('cavity_bias',     False)
-        kwargs.setdefault('energy_bias_del', False)
+                "CFCMCSimulation: cavity_bias / energy_bias_del "
+                "belong to gcmc's discrete moves."
+            )
         super().__init__(*args, **kwargs)
-
-        if insertion_mode not in ('random', 'biased'):
+        if getattr(self._force_fn, "kind", None) == "esm":
             raise ValueError(
-                f"OSMMCSimulation: insertion_mode must be 'random' or "
-                f"'biased', got '{insertion_mode}'.")
+                "CFCMCSimulation: a bare ESMCalculator holds per-geometry "
+                "state; use potential.coulomb_method: esm (ADR-0008)."
+            )
+        if not 0.0 <= lambda_move_ratio <= 1.0:
+            raise ValueError("CFCMCSimulation: lambda_move_ratio must be in [0, 1].")
+        if not 0.0 < max_dlambda <= 1.0:
+            raise ValueError("CFCMCSimulation: max_dlambda must be in (0, 1].")
+        if int(n_lambda_bins) < 2:
+            raise ValueError("CFCMCSimulation: n_lambda_bins must be >= 2.")
+        sp_rows = [i for i, s in enumerate(self.atom_types) if s == self.species]
+        if self._fix_mask[sp_rows].any():
+            raise ValueError(
+                f"CFCMCSimulation: atoms of the exchanged species "
+                f"'{self.species}' may not be fixed (they are inserted and "
+                f"deleted); fix only the framework."
+            )
+        self.lambda_move_ratio = float(lambda_move_ratio)
+        self.max_dlambda = float(max_dlambda)
+        self.n_lambda_bins = int(n_lambda_bins)
+        self.equil_cycles = (
+            self.n_cycles // 5 if equil_cycles is None else int(equil_cycles)
+        )
+        self.adapt_weights = bool(adapt_weights)
+        self._w = np.zeros(self.n_lambda_bins)
+        self._wl_f = 1.0
+        self._wl_hist = np.zeros(self.n_lambda_bins)
 
-        self.lam_dt_frac    = float(lam_dt_frac)
-        self.insertion_mode = insertion_mode
-        self.n_probe        = int(n_probe)
-        self.lambda_probe   = float(lambda_probe)
+        # The fractional atom is the LAST row of every per-atom array;
+        # self.N counts whole atoms only.  It starts decoupled.
+        self._lam = 0.0
+        x_f = self.rng.uniform(0.0, 1.0, 3) @ self.lattice
+        self.positions = np.vstack([self.positions, x_f[None, :]])
+        self.atom_types.append(self.species)
+        self._masses = np.append(self._masses, self.mass)
+        self.velocities = np.vstack(
+            [self.velocities, self._new_particle_velocity()[None, :]]
+        )
+        self._fix_mask = np.vstack([self._fix_mask, np.zeros((1, 3), bool)])
+        self._update_nhc_dof()
+        self._refresh_energies()
 
-        # -- Build internal species parameter table ------------
-        T = self.temperature
-        h_J = 6.62607015e-34; kB_J = 1.380649e-23; amu_kg = 1.66053906660e-27
-
-        def _ldb(m_amu: float) -> float:
-            return (h_J / np.sqrt(2.0 * np.pi * m_amu * amu_kg * kB_J * T)
-                    ) * 1e10   # -> A
-
-        def _mlam_default(m_amu: float) -> float:
-            """Virtual mass scales with atomic mass (reference: Ar = 39.948)."""
-            return 50.0 * m_amu / 39.948
-
-        if species_params is not None:
-            # -- Multi-species mode --------------------------------
-            if not isinstance(species_params, dict) or not species_params:
-                raise ValueError(
-                    "OSMMCSimulation: species_params must be a non-empty "
-                    "dict {symbol: SpeciesParams(mu=..., ...)}.")
-            for sym, sp in species_params.items():
-                if not isinstance(sp, SpeciesParams):
-                    raise TypeError(
-                        f"species_params['{sym}'] must be a SpeciesParams "
-                        f"namedtuple, got {type(sp).__name__}.")
-                # sp.mu is never None here: SpeciesParams.__new__ already
-                # requires it (or the deprecated mu_ex= alias) and raises
-                # TypeError otherwise, so this is a defensive re-check,
-                # not the primary validation path.
-                if sp.mu is None:
-                    raise ValueError(
-                        f"species_params['{sym}'].mu is required "
-                        "(the full chemical potential mu [eV]).")
-
-            self._multi_species = True
-            self._sp_table: Dict[str, dict] = {}
-
-            for sym, sp in species_params.items():
-                mass  = float(sp.mass)    if sp.mass    is not None \
-                        else float(ATOMIC_MASS.get(sym, 1.0))
-                m_l   = float(sp.m_lam)   if sp.m_lam   is not None \
-                        else _mlam_default(mass)
-                ldb   = float(sp.lambda_dB) if sp.lambda_dB is not None \
-                        else _ldb(mass)
-                self._sp_table[sym] = {
-                    'mu'       : float(sp.mu),
-                    'mass'     : mass,
-                    'm_lam'    : m_l,
-                    'sc_alpha' : float(sp.sc_alpha),
-                    'sc_n'     : int(sp.sc_n),
-                    'lambda_dB': ldb,
-                    'weight'   : float(sp.weight) if sp.weight is not None
-                                 else 1.0,
-                }
-
-            syms    = list(self._sp_table.keys())
-            wts     = np.array([self._sp_table[s]['weight'] for s in syms],
-                               dtype=float)
-            wts    /= wts.sum()
-            self._sp_symbols = syms
-            self._sp_weights = wts
-
-            # Seed parent attrs with first species (overwritten each cycle)
-            first = syms[0]
-            self.species      = first
-            self.mu           = self._sp_table[first]['mu']
-            self.mass         = self._sp_table[first]['mass']
-            self._lambda_dB   = self._sp_table[first]['lambda_dB']
-
-        else:
-            # -- Single-species mode (backward-compatible) ---------
-            self._multi_species = False
-            self._sp_table = {}
-            self._sp_symbols = [self.species]
-            self._sp_weights = np.array([1.0])
-            self._sp_table[self.species] = {
-                'mu'       : self.mu,
-                'mass'     : self.mass,
-                'm_lam'    : float(m_lam),
-                'sc_alpha' : float(sc_alpha),
-                'sc_n'     : int(sc_n),
-                'lambda_dB': self._lambda_dB,
-                'weight'   : 1.0,
-            }
-
-        # Active species for the current cycle (set by _choose_active_species)
-        self._active_sp : str = self.species
-        self._apply_species_params(self._active_sp)   # load live attrs
-
-        # Ghost-particle state
-        self._lam        : float      = 0.0
-        self._lam_dot    : float      = 0.0
-        self._ghost_pos  : np.ndarray = self._new_ghost_position()
-        self._ghost_vel  : np.ndarray = self._new_particle_velocity()
-        self._del_candidate : int     = -1
-
-        # Bias corrections (per-cycle)
-        self._ins_bias_dmu : float = 0.0
-        self._del_bias_dmu : float = 0.0
-
-        # Diagnostics
-        self._n_ins_complete = 0
-        self._n_del_complete = 0
-        self._n_lam_reflect  = 0
-        # Per-species insertion/deletion counters
-        self._sp_ins_count : Dict[str, int] = {s: 0 for s in self._sp_symbols}
-        self._sp_del_count : Dict[str, int] = {s: 0 for s in self._sp_symbols}
+        self._cycle = 0
+        self._samples: List[Tuple[int, float, float]] = []  # (N_sp, lam, dU_f)
+        self._lam_log: List[float] = []
+        self._n_lam_try = 0
+        self._n_lam_acc = 0
 
     # ------------------------------------------------------------------ #
-    #  Active species management                                           #
+    #  Energies of the two end states                                     #
     # ------------------------------------------------------------------ #
 
-    def _choose_active_species(self) -> str:
-        """
-        Select which species to use for the current lambda-dynamics cycle.
+    def _eval(self, pos: np.ndarray, types: list, forces: bool = False):
+        if len(types) == 0:
+            return (0.0, np.empty((0, 3))) if forces else 0.0
+        e, f, _ = self._force_fn(self.lattice, pos, types)
+        return (float(e), np.asarray(f)) if forces else float(e)
 
-        Single-species: always returns the one registered species.
-        Multi-species : samples proportionally to ``_sp_weights``.
-
-        Calls :meth:`_apply_species_params` to propagate the chosen
-        species' parameters into all live instance attributes.
-        """
-        if len(self._sp_symbols) == 1:
-            sp = self._sp_symbols[0]
-        else:
-            sp = str(self.rng.choice(self._sp_symbols, p=self._sp_weights))
-        self._active_sp = sp
-        self._apply_species_params(sp)
-        return sp
-
-    def _apply_species_params(self, sp: str) -> None:
-        """
-        Load the per-species lambda-dynamics parameters for species ``sp``
-        into the live instance attributes used by all downstream methods.
-
-        Updated attributes
-        ------------------
-        ``species``     -- element symbol of the active ghost
-        ``mass``        -- atomic mass [amu]  -> used for ghost Verlet
-        ``mu``          -- full chemical potential mu [eV]  -> lambda
-                           driving force
-        ``_lambda_dB``  -- thermal de Broglie wavelength [A]  -> lambda^3 in acceptance
-        ``_m_lam``      -- virtual mass [amu.A^2]  -> lambda equation of motion
-        ``_sc_alpha``   -- soft-core alpha  -> void size at lambda = 0
-        ``_sc_n``       -- soft-core exponent n
-
-        This is the single place where element-dependent parameters are
-        committed; all other methods read from these attributes.
-        """
-        p = self._sp_table[sp]
-        self._active_sp  = sp      # <- must be set before any method reads it
-        self.species     = sp
-        self.mass        = p['mass']
-        self.mu          = p['mu']
-        self._lambda_dB  = p['lambda_dB']
-        self._m_lam      = p['m_lam']
-        self._sc_alpha   = p['sc_alpha']
-        self._sc_n       = p['sc_n']
-
-    # ------------------------------------------------------------------ #
-    #  Ghost-particle placement                                            #
-    # ------------------------------------------------------------------ #
-
-    def _new_ghost_position(self) -> np.ndarray:
-        """
-        Sample the initial Cartesian position for a new ghost particle.
-
-        Uses the **active species'** soft-core parameters when scoring
-        candidate positions in ``'biased'`` mode.
-
-        Random mode
-        -----------
-        Uniform random in the unit cell.  At lambda = 0 the soft-core potential
-        is exactly zero, so any position is equally valid energetically.
-
-        Biased mode (cavity-biased)
-        ---------------------------
-        ``n_probe`` candidates are scored with the soft-core at
-        ``lambda_probe``.  The lowest-energy position (deepest void) is
-        selected.  A Boltzmann-weight bias correction is stored in
-        ``_ins_bias_dmu`` and subtracted from the effective mu in the lambda
-        equation of motion to preserve detailed balance.
-        """
-        if self.insertion_mode == 'random' or self.N == 0:
-            self._ins_bias_dmu = 0.0
-            return self.rng.uniform(0, 1, 3) @ self.lattice
-
-        probes  = self.rng.uniform(0, 1, (self.n_probe, 3)) @ self.lattice
-        e_probe = np.array([
-            self._softcore_energy_at(p, self.lambda_probe)
-            for p in probes
-        ])
-        log_w  = -self._beta * e_probe
-        log_w -= log_w.max()
-        w      = np.exp(log_w); w_norm = w / w.sum()
-        idx_b  = int(np.argmin(e_probe))
-        # Bias correction: deltamu = -kT ln(w_best / (1/n_probe))
-        self._ins_bias_dmu = -(1.0 / self._beta) * (
-            float(np.log(w_norm[idx_b] + 1e-300)) + np.log(self.n_probe))
-        return probes[idx_b]
-
-    def _select_deletion_candidate(self) -> int:
-        """
-        Choose which real atom begins a lambda: 1 -> 0 deletion transition
-        for the **active species**.
-
-        Random mode
-        -----------
-        Uniform random selection among atoms of the active species.
-
-        Biased mode (energy-biased)
-        ---------------------------
-        Candidate selected with probability proportional to exp(+beta u_i), where u_i is
-        the local energy of atom i.  High-energy (unstable) atoms are
-        preferred.  The log-bias correction is stored in ``_del_bias_dmu``
-        and added to the effective mu to preserve detailed balance.
-        """
-        sp_idx = [i for i, s in enumerate(self.atom_types)
-                  if s == self._active_sp]
-        if not sp_idx:
-            return -1
-
-        self._del_bias_dmu = 0.0
-
-        if self.insertion_mode == 'random' or len(sp_idx) == 1:
-            return int(self.rng.choice(sp_idx))
-
-        u_local = np.array([self._local_energy(i) for i in sp_idx])
-        log_w   = self._beta * u_local
-        log_w  -= log_w.max()
-        w       = np.exp(log_w); w_sum = w.sum()
-        w_norm  = w / w_sum if w_sum > 0 else np.ones(len(w)) / len(w)
-        cl      = int(self.rng.choice(len(sp_idx), p=w_norm))
-        idx     = sp_idx[cl]
-        # Bias correction: deltamu = +kT ln(w_i x n)
-        self._del_bias_dmu = (1.0 / self._beta) * (
-            float(np.log(w_norm[cl] + 1e-300)) + np.log(len(sp_idx)))
-        return idx
-
-    # ------------------------------------------------------------------ #
-    #  Soft-core potential  (element-dependent epsilon, sigma, alpha, n)               #
-    # ------------------------------------------------------------------ #
-
-    def _softcore_energy_at(self,
-                             r_ghost : np.ndarray,
-                             lam     : float,
-                             ) -> float:
-        """
-        Soft-core interaction energy of the ghost at ``r_ghost`` with all
-        real atoms of the **active species**, using the active species'
-        epsilon, sigma, alpha, and n.
-
-        At lambda = 0 returns exactly 0.0.
-        """
-        if self.N == 0 or lam < 1e-12:
-            return 0.0
-        lj = self._get_lj_params()
-        if lj is None:
-            return self._gaussian_repulsion(r_ghost, lam)
-        eps, sig  = lj
-        inv_lat   = np.linalg.inv(self.lattice)
-        da        = self._sc_alpha * (1.0 - lam) ** 2
-        lam_n     = lam ** self._sc_n
-        E = 0.0
-        for i in range(self.N):
-            if self.atom_types[i] != self._active_sp:
-                continue
-            rij = self.positions[i] - r_ghost
-            s   = rij @ inv_lat;  s -= np.round(s)
-            rij = s @ self.lattice
-            r6  = (np.dot(rij, rij) / sig**2) ** 3
-            d   = da + r6
-            if d < 1e-30:
-                continue
-            E += 4.0 * eps * lam_n * (1.0 / d**2 - 1.0 / d)
-        return float(E)
-
-    def _softcore_force_dlam(self,
-                              r_ghost : np.ndarray,
-                              lam     : float,
-                              ) -> Tuple[np.ndarray, np.ndarray, float]:
-        """
-        Soft-core forces on ghost + real atoms and dV_sc/dlambda, using the
-        **active species'** element-dependent parameters (epsilon, sigma, alpha, n).
-
-        Returns
-        -------
-        f_ghost : (3,)    force on ghost [eV/A]
-        f_real  : (N, 3)  forces on real atoms [eV/A]
-        dVdlam  : float   dV_sc/dlambda [eV]
-        """
-        f_ghost = np.zeros(3)
-        f_real  = np.zeros((self.N, 3))
-        dVdlam  = 0.0
-        if self.N == 0 or lam < 1e-12:
-            return f_ghost, f_real, dVdlam
-        lj = self._get_lj_params()
-        if lj is None:
-            return f_ghost, f_real, dVdlam
-        eps, sig  = lj
-        inv_lat   = np.linalg.inv(self.lattice)
-        n_sc      = self._sc_n
-        lam_n     = lam ** n_sc
-        lam_n1    = lam ** max(n_sc - 1, 0)
-        da_dlam   = -2.0 * self._sc_alpha * (1.0 - lam)
-        for i in range(self.N):
-            if self.atom_types[i] != self._active_sp:
-                continue
-            rij  = self.positions[i] - r_ghost
-            s    = rij @ inv_lat;  s -= np.round(s)
-            rij  = s @ self.lattice
-            r2   = np.dot(rij, rij)
-            r6   = (r2 / sig**2) ** 3
-            d    = self._sc_alpha * (1.0 - lam)**2 + r6
-            if d < 1e-30:
-                continue
-            d2, d3 = d**2, d**3
-            # dV/dlambda = 4epsilon { n lambda^{n-1} [1/d^2-1/d] + lambda^n (dalpha/dlambda) [-2/d^3+1/d^2] }
-            dVdlam += 4.0 * eps * (
-                n_sc * lam_n1 * (1.0/d2 - 1.0/d)
-                + lam_n * da_dlam * (-2.0/d3 + 1.0/d2))
-            dVdr6   = 4.0 * eps * lam_n * (-2.0/d3 + 1.0/d2)
-            fg_i    = -dVdr6 * (-6.0 * r6 / (r2 + 1e-30) * rij)
-            f_ghost += fg_i
-            f_real[i] -= fg_i
-        return f_ghost, f_real, float(dVdlam)
-
-    def _gaussian_repulsion(self, r_ghost: np.ndarray, lam: float) -> float:
-        """Fallback soft-core when LJ parameters are unavailable."""
-        if self.N == 0:
-            return 0.0
-        inv_lat = np.linalg.inv(self.lattice)
-        E = 0.0
-        for i in range(self.N):
-            if self.atom_types[i] != self._active_sp:
-                continue
-            rij = self.positions[i] - r_ghost
-            s   = rij @ inv_lat;  s -= np.round(s)
-            rij = s @ self.lattice
-            E  += lam * np.exp(-np.dot(rij, rij))
-        return float(E)
-
-    def _get_lj_params(self) -> Optional[Tuple[float, float]]:
-        """
-        Extract (epsilon, sigma) for the **active species** self-pair from force_fn.
-
-        Bug-fix note (S12): the original inspected ``force_fn.__closure__``
-        cell-by-cell looking for a captured ``PotentialEngine`` instance --
-        a brittle, implementation-dependent trick that silently stops
-        working the moment the closure's captured-variable order or count
-        changes (which is exactly what happened when make_force_fn was
-        rewritten to always build a real PotentialEngine rather than
-        inlining a bare closure -- see fitting/force_fn.py). force_fn
-        objects now carry an explicit ``.engine`` attribute when one
-        exists, so this can read it directly with no introspection and
-        no dependency on PotentialEngine's import at all.
-
-        Returns None when not found (triggers Gaussian fallback).
-        """
-        sp = self._active_sp
-        engine = getattr(self._force_fn, 'engine', None)
-        if engine is None:
-            return None
-        for pot in getattr(engine, '_potentials', []):
-            try:
-                p = pot._get_params(sp, sp)
-            except Exception:
-                p = None
-            if p is not None:
-                eps = p.get('epsilon') or p.get('D_e') or p.get('De', 0.0)
-                sig = p.get('sigma')   or p.get('r0',  0.0)
-                if eps and eps > 0 and sig and sig > 0:
-                    return float(eps), float(sig)
+    def _refresh_energies(self, forces: bool = False):
+        """Cache U_N (whole atoms) and U_{N+1} (fractional atom as whole)."""
+        r0 = self._eval(self.positions[:-1], self.atom_types[:-1], forces)
+        r1 = self._eval(self.positions, self.atom_types, forces)
+        if forces:
+            (self._E0, F0), (self._E1, F1) = r0, r1
+            F = self._lam * F1
+            F[:-1] += (1.0 - self._lam) * F0
+            return F
+        self._E0, self._E1 = r0, r1
         return None
 
-    def _local_energy(self, atom_idx: int) -> float:
-        """
-        Local interaction energy of atom ``atom_idx`` [eV].
+    def _U(self) -> float:
+        return (1.0 - self._lam) * self._E0 + self._lam * self._E1
 
-        Bug-fix note (S3): delegates to the shared, correctly-implemented
-        _local_energy_of_atom (see GCMCMDSimulation) instead of the
-        original's ``-_probe_energy(self.positions[atom_idx])``, which
-        placed a ghost particle exactly on top of the still-present real
-        atom (an r=0 self-overlap divergence) -- see
-        GCMCMDSimulation._local_energy_of_atom's docstring for the full
-        explanation.
-        """
-        return self._local_energy_of_atom(atom_idx)
+    def _get_energy(self) -> float:
+        return self._U()
+
+    def _get_forces(self):
+        F = self._refresh_energies(forces=True)
+        return self._U(), F, np.zeros((3, 3))
+
+    def _update_nhc_dof(self) -> None:
+        # whole atoms plus the fractional one
+        n_dof = self._compute_n_dof(self.N + 1, self._fix_mask)
+        self._nhc["Q1"] = n_dof * K_B * self.temperature * self.tau_nhc**2
+        self._nhc["Q2"] = K_B * self.temperature * self.tau_nhc**2
+        self._nhc["n_dof"] = n_dof
+
+    def _n_species(self) -> int:
+        return sum(1 for s in self.atom_types[:-1] if s == self.species)
+
+    def _bin(self, lam: float) -> int:
+        return min(int(lam * self.n_lambda_bins), self.n_lambda_bins - 1)
 
     # ------------------------------------------------------------------ #
-    #  lambda dynamics                                                          #
+    #  MD segment: all N + 1 rows, fixed lambda                            #
     # ------------------------------------------------------------------ #
 
-    def _lambda_step(self) -> None:
-        """
-        Integrate the ghost particle and lambda for one MD cycle using the
-        **active species'** element-dependent m_lam, sc_alpha, sc_n, mu.
-
-        The effective mu driving lambda is:
-            mu_eff = mu  +  deltamu_ins  +  deltamu_del
-        where deltamu_ins and deltamu_del are bias corrections that preserve
-        detailed balance when biased placement is enabled.
-        """
-        dt    = self.dt * self.lam_dt_frac
-        m_l   = self._m_lam
-        mu_eff = self.mu + self._ins_bias_dmu + self._del_bias_dmu
+    def _md_segment(self) -> float:
+        if self.md_steps == 0:
+            return self._U()
+        free = ~self._fix_mask
+        _, F, _ = self._get_forces()
+        acc = F * EV_ANG_TO_AMU_ANG_FS2 / self._masses[:, None]
         inv_lat = np.linalg.inv(self.lattice)
-
         for _ in range(self.md_steps):
-            f_ghost, f_real_sc, dVdlam = self._softcore_force_dlam(
-                self._ghost_pos, self._lam)
-
-            # -- Ghost Velocity Verlet -----------------------------
-            a_ghost = f_ghost * EV_ANG_TO_AMU_ANG_FS2 / self.mass
-            self._ghost_vel  += 0.5 * dt * a_ghost
-            self._ghost_pos  += dt * self._ghost_vel
-            frac = self._ghost_pos @ inv_lat
-            # `frac -= np.floor(frac)` alone maps a tiny negative frac to
-            # exactly 1.0 in float64, which scipy's cKDTree rejects; see
-            # wrap_positions_into_cell.
+            self._nhc_step(self._kinetic_energy())
+            self.velocities += 0.5 * self.dt * acc
+            self.velocities *= free
+            self.positions += self.dt * self.velocities
+            frac = self.positions @ inv_lat
             frac -= np.floor(frac)
             frac[frac >= 1.0] = 0.0
-            self._ghost_pos = frac @ self.lattice
-
-            # Soft-core force on real atoms (half-step)
-            if self.N > 0:
-                self.velocities += (0.5 * dt * f_real_sc
-                                    * EV_ANG_TO_AMU_ANG_FS2
-                                    / self._masses[:, None])
-
-            # -- lambda Velocity Verlet ----------------------------
-            lam_acc = (-dVdlam - mu_eff) * EV_ANG_TO_AMU_ANG_FS2 / m_l
-            self._lam_dot += 0.5 * dt * lam_acc
-            self._lam     += dt * self._lam_dot
-
-            event = self._handle_lambda_boundary()
-            if event in ('inserted', 'deleted'):
-                break   # ghost state reset; restart cycle
-
-            f_ghost2, f_real_sc2, dVdlam2 = self._softcore_force_dlam(
-                self._ghost_pos, self._lam)
-
-            a_ghost2 = f_ghost2 * EV_ANG_TO_AMU_ANG_FS2 / self.mass
-            self._ghost_vel += 0.5 * dt * a_ghost2
-
-            if self.N > 0:
-                self.velocities += (0.5 * dt * f_real_sc2
-                                    * EV_ANG_TO_AMU_ANG_FS2
-                                    / self._masses[:, None])
-
-            lam_acc2 = (-dVdlam2 - mu_eff) * EV_ANG_TO_AMU_ANG_FS2 / m_l
-            self._lam_dot += 0.5 * dt * lam_acc2
-
-    def _handle_lambda_boundary(self) -> str:
-        """
-        Handle lambda boundary events.
-
-        lambda >= 1 -> insertion complete: graduate ghost to real atom,
-                choose next active species, place new ghost at lambda = 0.
-        lambda <= 0 -> deletion complete (if candidate active): remove candidate,
-                choose next active species, place new ghost.
-
-        In both cases the per-species counters are updated and the new
-        active species' parameters are loaded via ``_choose_active_species``.
-        """
-        if self._lam >= 1.0:
-            self._lam     = 0.0
-            self._lam_dot = abs(self._lam_dot)   # elastic wall
-            self._n_lam_reflect += 1
-
-            self._accept_insertion(self._ghost_pos.copy())
-            self._n_ins_complete += 1
-            self._sp_ins_count[self._active_sp] = (
-                self._sp_ins_count.get(self._active_sp, 0) + 1)
-
-            # Next cycle: pick active species, place new ghost
-            self._choose_active_species()
-            self._ghost_pos    = self._new_ghost_position()
-            self._ghost_vel    = self._new_particle_velocity()
-            self._ins_bias_dmu = 0.0
-            return 'inserted'
-
-        elif self._lam <= 0.0:
-            self._lam     = 0.0
-            # Elastic wall, upward.  Bug-fix note (ADR-0003 T7, O1): this
-            # was -abs(), which kept lambda moving down, so it stayed at 0,
-            # hit this branch every step and deleted the candidate each
-            # time (N -> 0.74 against the NIST 41.9).
-            self._lam_dot = abs(self._lam_dot)
-            self._n_lam_reflect += 1
-
-            if self._del_candidate >= 0:
-                self._accept_deletion(self._del_candidate)
-                self._del_candidate = -1
-                self._n_del_complete += 1
-                self._sp_del_count[self._active_sp] = (
-                    self._sp_del_count.get(self._active_sp, 0) + 1)
-                self._del_bias_dmu = 0.0
-
-            self._choose_active_species()
-            self._ghost_pos = self._new_ghost_position()
-            self._ghost_vel = self._new_particle_velocity()
-            return 'deleted'
-
-        return ''
+            self.positions = frac @ self.lattice
+            _, F, _ = self._get_forces()
+            acc = F * EV_ANG_TO_AMU_ANG_FS2 / self._masses[:, None]
+            self.velocities += 0.5 * self.dt * acc
+            self.velocities *= free
+            self._nhc_step(self._kinetic_energy())
+        return self._U()
 
     # ------------------------------------------------------------------ #
-    #  Override: _gcmc_cycle -> lambda-dynamics step                           #
+    #  MC moves                                                            #
     # ------------------------------------------------------------------ #
+
+    def _accept(self, ln_acc: float) -> bool:
+        return ln_acc >= 0.0 or np.log(self.rng.random()) < ln_acc
+
+    def _lambda_move(self) -> None:
+        beta = self._beta
+        V = abs(np.linalg.det(self.lattice))
+        Lam3 = self._lambda_dB**3
+        lam = self._lam
+        new = lam + self.rng.uniform(-self.max_dlambda, self.max_dlambda)
+        U_old, w_old = self._U(), self._w[self._bin(lam)]
+        self._n_lam_try += 1
+
+        if 0.0 <= new <= 1.0:
+            dU = (new - lam) * (self._E1 - self._E0)
+            if self._accept(-beta * dU + self._w[self._bin(new)] - w_old):
+                self._lam = new
+                self._n_lam_acc += 1
+
+        elif new > 1.0:
+            # insertion: the fractional atom becomes whole, a new one appears
+            self._n_ins_try += 1
+            lam2 = new - 1.0
+            n_sp = self._n_species()
+            x_new = self.rng.uniform(0.0, 1.0, 3) @ self.lattice
+            pos2 = np.vstack([self.positions, x_new[None, :]])
+            types2 = self.atom_types + [self.species]
+            E0n, E1n = self._E1, self._eval(pos2, types2)
+            dU = (1.0 - lam2) * E0n + lam2 * E1n - U_old
+            ln_acc = (
+                np.log(V / (Lam3 * (n_sp + 1)))
+                + beta * self.mu
+                - beta * dU
+                + self._w[self._bin(lam2)]
+                - w_old
+            )
+            if self._accept(ln_acc):
+                self._n_ins_acc += 1
+                self._n_lam_acc += 1
+                self.positions, self.atom_types = pos2, types2
+                self._masses = np.append(self._masses, self.mass)
+                self.velocities = np.vstack(
+                    [self.velocities, self._new_particle_velocity()[None, :]]
+                )
+                self._fix_mask = np.vstack([self._fix_mask, np.zeros((1, 3), bool)])
+                self.N += 1
+                self._lam, self._E0, self._E1 = lam2, E0n, E1n
+                self._update_nhc_dof()
+
+        else:
+            # deletion: the fractional atom goes, a random whole one takes over
+            n_sp = self._n_species()
+            if n_sp == 0:
+                return
+            self._n_del_try += 1
+            lam2 = new + 1.0
+            cand = [i for i, s in enumerate(self.atom_types[:-1]) if s == self.species]
+            j = int(self.rng.choice(cand))
+            keep = [i for i in range(self.N) if i != j]
+            order = keep + [j]  # old fractional row (index N) dropped
+            E1n = self._E0  # same atoms, j now fractional
+            E0n = self._eval(self.positions[keep], [self.atom_types[i] for i in keep])
+            dU = (1.0 - lam2) * E0n + lam2 * E1n - U_old
+            ln_acc = (
+                np.log(Lam3 * n_sp / V)
+                - beta * self.mu
+                - beta * dU
+                + self._w[self._bin(lam2)]
+                - w_old
+            )
+            if self._accept(ln_acc):
+                self._n_del_acc += 1
+                self._n_lam_acc += 1
+                self.positions = self.positions[order]
+                self.velocities = self.velocities[order]
+                self._masses = self._masses[order]
+                self._fix_mask = self._fix_mask[order]
+                self.atom_types = [self.atom_types[i] for i in order]
+                self.N -= 1
+                self._lam, self._E0, self._E1 = lam2, E0n, E1n
+                self._update_nhc_dof()
+
+    def _displacement_move(self) -> None:
+        rows = [i for i, s in enumerate(self.atom_types[:-1]) if s == self.species] + [
+            self.N
+        ]
+        k = int(self.rng.choice(rows))
+        self._n_disp_try += 1
+        U_old, E0_old, E1_old = self._U(), self._E0, self._E1
+        r_old = self.positions[k].copy()
+        self.positions[k] += (self.rng.random(3) - 0.5) * 2.0 * self.max_disp
+        if k == self.N:  # only U_{N+1} sees the fractional atom
+            self._E1 = self._eval(self.positions, self.atom_types)
+        else:
+            self._refresh_energies()
+        if self._accept(-self._beta * (self._U() - U_old)):
+            self._n_disp_acc += 1
+        else:
+            self.positions[k] = r_old
+            self._E0, self._E1 = E0_old, E1_old
+
+    def _wang_landau(self) -> None:
+        b = self._bin(self._lam)
+        self._w[b] -= self._wl_f
+        self._wl_hist[b] += 1
+        h = self._wl_hist
+        if h.min() > 0.8 * h.mean():
+            self._wl_f *= 0.5
+            self._wl_hist[:] = 0.0
 
     def _gcmc_cycle(self) -> None:
-        """
-        Choose the active species, optionally pre-select a deletion
-        candidate, then propagate lambda-dynamics for one MD cycle.
-        """
-        self._choose_active_species()
-
-        if (self._del_candidate < 0 and self.N > 0
-                and self.rng.random() < 0.5):
-            self._del_candidate = self._select_deletion_candidate()
-
-        self._lambda_step()
+        equil = self._cycle < self.equil_cycles
+        if not equil and self._cycle == self.equil_cycles:
+            self._w -= self._w[0]  # freeze (the offset is irrelevant)
+        for _ in range(self.gcmc_tries):
+            if self.rng.random() < self.lambda_move_ratio:
+                self._lambda_move()
+                if equil and self.adapt_weights:
+                    self._wang_landau()
+            else:
+                self._displacement_move()
+            if not equil:
+                self._samples.append(
+                    (self._n_species(), self._lam, self._E1 - self._E0)
+                )
+        self._lam_log.append(self._lam)
+        self._cycle += 1
 
     # ------------------------------------------------------------------ #
-    #  Diagnostic properties and helpers                                  #
+    #  Estimators (ADR-0009)                                               #
     # ------------------------------------------------------------------ #
 
-    @property
-    def lambda_current(self) -> float:
-        """Current lambda of the ghost particle."""
-        return self._lam
-
-    @property
-    def active_species(self) -> str:
-        """Element symbol of the ghost particle in the current cycle."""
-        return self._active_sp
-
-    @property
-    def n_insertions(self) -> int:
-        """Total completed insertions (lambda reached 1)."""
-        return self._n_ins_complete
-
-    @property
-    def n_deletions(self) -> int:
-        """Total completed deletions (lambda reached 0)."""
-        return self._n_del_complete
-
-    def species_counts(self) -> Dict[str, int]:
-        """
-        Return the current number of real atoms per fluctuating species.
-
-        >>> sim.species_counts()
-        {'Li': 32, 'O': 16}
-        """
-        return {s: self.atom_types.count(s) for s in self._sp_symbols}
-
-    def species_stats(self) -> Dict[str, dict]:
-        """
-        Return per-species insertion/deletion counts and all lambda-dynamics
-        parameters as a nested dict.
-
-        Keys per species:
-            n_ins, n_del, mu, mass, m_lam, sc_alpha, sc_n,
-            lambda_dB, weight, N_current.
-
-        Rename note (``mu_ex`` -> ``mu``): the returned dict also carries
-        a deprecated ``mu_ex`` key duplicating ``mu`` (same value, no
-        warning -- a plain dict key can't intercept access the way a
-        property can), kept for any external code parsing this method's
-        return value directly. Use ``mu`` going forward.
-        """
-        out = {}
-        for sp in self._sp_symbols:
-            p = self._sp_table[sp]
-            out[sp] = {
-                'n_ins'    : self._sp_ins_count.get(sp, 0),
-                'n_del'    : self._sp_del_count.get(sp, 0),
-                'mu'       : p['mu'],
-                'mu_ex'    : p['mu'],   # deprecated duplicate, see docstring
-                'mass'     : p['mass'],
-                'm_lam'    : p['m_lam'],
-                'sc_alpha' : p['sc_alpha'],
-                'sc_n'     : p['sc_n'],
-                'lambda_dB': p['lambda_dB'],
-                'weight'   : p['weight'],
-                'N_current': self.atom_types.count(sp),
-            }
+    def _end_estimates(self, s: np.ndarray) -> dict:
+        """<N>_0, <N>_1 and beta mu_ex from samples s = (N_sp, lam, dU_f)."""
+        n = self.n_lambda_bins
+        N, lam, dU = s[:, 0], s[:, 1], s[:, 2]
+        bot, top = lam < 1.0 / n, lam >= 1.0 - 1.0 / n
+        out = {
+            "n_bottom": int(bot.sum()),
+            "n_top": int(top.sum()),
+            "N0": np.nan,
+            "N1": np.nan,
+            "beta_mu_ex": np.nan,
+        }
+        la0 = self._beta * lam[bot] * dU[bot]
+        la1 = -self._beta * (1.0 - lam[top]) * dU[top]
+        c = max(
+            la0.max() if bot.any() else -np.inf, la1.max() if top.any() else -np.inf
+        )
+        a0, a1 = np.exp(la0 - c), np.exp(la1 - c)
+        if bot.any():
+            out["N0"] = float(np.sum(a0 * N[bot]) / a0.sum())
+        if top.any():
+            out["N1"] = float(a1.sum() / np.sum(a1 / (N[top] + 1.0)))
+        if bot.any() and top.any():
+            ratio = (np.exp(-self._w[n - 1]) * a1.sum()) / (
+                np.exp(-self._w[0]) * a0.sum()
+            )
+            out["beta_mu_ex"] = float(-np.log(ratio))
         return out
 
-    def _acceptance_rates(self) -> Tuple[float, float, float]:
-        """lambda-completion rates (insertions/cycle, deletions/cycle, nan)."""
-        n = max(getattr(self, '_n_calls_total', 1), 1)
-        return (self._n_ins_complete / n,
-                self._n_del_complete / n,
-                float('nan'))
+    def estimates(self, n_blocks: int = 10) -> dict:
+        s = np.asarray(self._samples, dtype=float).reshape(-1, 3)
+        n_frame = self.N - self._n_species()
+        est = self._end_estimates(s) if len(s) else {}
+        blocks = [self._end_estimates(b) for b in np.array_split(s, n_blocks) if len(b)]
+        for key in ("N0", "N1", "beta_mu_ex"):
+            v = np.array([b[key] for b in blocks], dtype=float)
+            v = v[np.isfinite(v)]
+            est[key + "_se"] = (
+                float(v.std(ddof=1) / np.sqrt(len(v))) if len(v) > 1 else np.nan
+            )
+        hist = (
+            np.bincount([self._bin(x) for x in s[:, 1]], minlength=self.n_lambda_bins)
+            if len(s)
+            else []
+        )
+        est.update(
+            N_framework=n_frame,
+            n_samples=len(s),
+            lambda_hist=[int(h) for h in hist],
+            weights=[float(x) for x in self._w],
+        )
+        return est
 
     # ------------------------------------------------------------------ #
-    #  Override run() and XYZ writer                                      #
+    #  Output                                                              #
     # ------------------------------------------------------------------ #
-
-    def run(self) -> dict:
-        """
-        Execute the OSMMC simulation.
-
-        Additional keys in return dict (beyond GCMCMDSimulation.run):
-            n_insertions, n_deletions, insertion_mode,
-            species_stats, multi_species, timing.
-        """
-        self._n_calls_total = 0
-        result = super().run()
-        result['n_insertions']   = self._n_ins_complete
-        result['n_deletions']    = self._n_del_complete
-        result['insertion_mode'] = self.insertion_mode
-        result['species_stats']  = self.species_stats()
-        result['multi_species']  = self._multi_species
-        # timing is inherited from GCMCMDSimulation.run() via super()
-        return result
 
     def _write_xyz_frame(self, fh, cycle: int, e_pot: float) -> None:
-        """
-        Append one configuration to the open XDATCAR file.
-
-        OS-MC allows particle insertion/deletion (variable N), so --
-        as with GCMCMDSimulation -- a full header is written before
-        every frame, reflecting the CURRENT particle count.
-
-        The soft-core "ghost" particle (partially inserted, lambda in
-        (0,1)) is NOT a real VASP element and is therefore excluded
-        from the XDATCAR output; only fully-real atoms are written.
-        The ghost particle's position/species/lambda are still tracked
-        separately in the thermo log for internal bookkeeping.
-        """
-        comment = (f"akitsushima.py OS-MC  cycle={cycle}  N={self.N}  "
-                  f"ghost_sp={self._active_sp}  lambda={self._lam:.4f}  "
-                  f"E_pot={e_pot:.6f}eV  T={self._temperature_inst():.2f}K")
-        _write_xdatcar_frame(fh, self.positions, self.lattice,
-                             self.atom_types, self._xdatcar_frame_idx,
-                             variable_header=True, comment=comment)
+        comment = (
+            f"akitsushima.py CFCMC  cycle={cycle}  N={self.N}  "
+            f"lambda={self._lam:.4f}  U={e_pot:.6f}eV"
+        )
+        _write_xdatcar_frame(
+            fh,
+            self.positions[:-1],
+            self.lattice,
+            self.atom_types[:-1],
+            self._xdatcar_frame_idx,
+            variable_header=True,
+            comment=comment,
+        )
         self._xdatcar_frame_idx += 1
+
+    def run(self) -> dict:
+        res = super().run()
+        est = self.estimates()
+        V = abs(np.linalg.det(self.lattice))
+        kT = K_B * self.temperature
+        est["mu_ex"] = est.get("beta_mu_ex", np.nan) * kT
+        est["mu_ex_se"] = est.get("beta_mu_ex_se", np.nan) * kT
+        n0 = est.get("N0", np.nan)
+        # write the whole atoms only; the fractional one is reported apart
+        res.update(
+            positions=self.positions[:-1].copy(),
+            velocities=self.velocities[:-1].copy(),
+            atom_types=list(self.atom_types[:-1]),
+            N_whole_mean=res["N_mean"],
+            N_mean=est.get("N_framework", 0) + n0,
+            N_mean_se=est.get("N0_se", np.nan),
+            N_mean_lambda1=est.get("N_framework", 0) + est.get("N1", np.nan),
+            N_mean_lambda1_se=est.get("N1_se", np.nan),
+            mu_ex=est["mu_ex"],
+            mu_ex_se=est["mu_ex_se"],
+            rho_mean=(est.get("N_framework", 0) + n0) / V,
+            fractional={"position": self.positions[-1].copy(), "lambda": self._lam},
+            lambda_history=list(self._lam_log),
+            acc_lambda=(
+                self._n_lam_acc / self._n_lam_try if self._n_lam_try else float("nan")
+            ),
+            cfcmc=est,
+        )
+        if _mpi_rank == 0:
+            write_poscar(
+                os.path.join(self.output_dir, "POSCAR_gcmc_final"),
+                self.lattice,
+                res["positions"],
+                res["atom_types"],
+                title="CFCMC final frame (whole atoms)",
+            )
+            with open(os.path.join(self.output_dir, "lambda_vs_cycle.dat"), "w") as fh:
+                fh.write("# cycle  lambda\n")
+                fh.writelines(f"{c}  {x:.6f}\n" for c, x in enumerate(self._lam_log))
+            import json
+
+            with open(os.path.join(self.output_dir, "cfcmc_estimates.json"), "w") as fh:
+                json.dump({k: v for k, v in est.items()}, fh, indent=1, default=float)
+        if self.verbose:
+            print(
+                f"  CFCMC (lambda-end estimators, equil_cycles="
+                f"{self.equil_cycles} discarded)"
+            )
+            print(f"  <N> (lambda=0) = {res['N_mean']:.3f} +/- {res['N_mean_se']:.3f}")
+            print(
+                f"  <N> (lambda=1) = {res['N_mean_lambda1']:.3f} +/- "
+                f"{res['N_mean_lambda1_se']:.3f}"
+            )
+            print(f"  mu_ex          = {res['mu_ex']:.5f} +/- {res['mu_ex_se']:.5f} eV")
+            print(f"  lambda hist    = {est.get('lambda_hist')}")
+        return res

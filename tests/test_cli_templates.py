@@ -49,7 +49,7 @@ _SHRINK = {
     "gcmc": {"gcmc": {"n_cycles": 3}},
     "neb": {"neb": {"max_steps": 5}},
     "tsa": {"tsa": {"irc_max_steps": 5}},
-    "osmc": {"osmc": {"n_cycles": 3}},
+    "osmc": {"osmc": {"n_cycles": 3, "equil_cycles": 1}},
     "esm": {"esm": {"n_grid_z": 128}},
     "phonon": {},
     "kappa": {"kappa": {"n_steps": 200, "equil_steps": 20, "tau_max": 0.02}},
@@ -206,12 +206,6 @@ def test_template_runs_as_shipped(key, tmp_path, monkeypatch):
     yaml_path = tmp_path / f"{key}.yaml"
     yaml_path.write_text(yaml.safe_dump(cfg))
 
-    if key == "osmc":
-        # disabled until rebuilt (ADR-0003 T7, O2): the shipped template
-        # must reach the refusal, not an earlier error
-        with pytest.raises(ValueError, match="disabled"):
-            _DISPATCH[_COMMAND[key]](_ns(yaml_path))
-        return
     rc = _DISPATCH[_COMMAND[key]](_ns(yaml_path))
     assert rc == 0, f"template {key!r} returned {rc}"
 

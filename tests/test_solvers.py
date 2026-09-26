@@ -29,9 +29,7 @@ from akitsushima.solvers import (
     NPTSimulation,
     NVESimulation,
     NVTSimulation,
-    OSMMCSimulation,
     PhononCalculator,
-    SpeciesParams,
     ThermalConductivityCalculator,
     TransitionStateAnalyser,
 )
@@ -1012,26 +1010,6 @@ def test_local_energy_of_atom_matches_pair_energy_for_dimer():
     assert u0 == pytest.approx(V_expected, rel=1e-8)
 
 
-def test_species_params_is_defined_and_constructible():
-    """
-    S14 regression: SpeciesParams was referenced throughout
-    OSMMCSimulation's multi-species code path (isinstance checks, the
-    class docstring's own example) but never actually defined anywhere,
-    so constructing a multi-species OSMMCSimulation raised NameError
-    immediately.
-    """
-    sp = SpeciesParams(mu=-0.12, mass=6.941, m_lam=7.0,
-                       sc_alpha=0.55, sc_n=4, weight=2.0)
-    assert sp.mu == -0.12
-    assert sp.sc_alpha == 0.55
-
-    # Defaults usable with only the mandatory field:
-    sp_min = SpeciesParams(mu=-0.1)
-    assert sp_min.mass is None
-    assert sp_min.sc_alpha == 0.5
-    assert sp_min.sc_n == 4
-
-
 def test_gcmc_md_short_run_smoke():
     lattice = np.eye(3) * 15.0
     rng = np.random.default_rng(0)
@@ -1054,101 +1032,17 @@ def test_gcmc_md_short_run_smoke():
     assert np.isfinite(result["e_pot_mean"])
 
 
-def test_osmmc_single_species_short_run_smoke():
-    lattice = np.eye(3) * 15.0
-    rng = np.random.default_rng(0)
-    positions = rng.uniform(0, 15.0, size=(6, 3))
-    atom_types = ["Ar"] * 6
-
-    engine = PotentialEngine().add(
-        LennardJonesPotential({frozenset({"Ar"}): {"epsilon": 0.0103, "sigma": 3.405}},
-                              r_cut=6.0, shift=True))
-    fn = make_force_fn(engine)
-
-    sim = OSMMCSimulation(
-        lattice, positions, atom_types, fn,
-        _allow_unverified=True,
-        temperature=120.0, mu=-0.05, species="Ar", mass=39.948,
-        m_lam=50.0, sc_alpha=0.5, sc_n=4,
-        timestep=1.0, n_cycles=30, md_steps_per_cycle=5,
-        seed=1, verbose=False,
-        output_dir="/tmp/akitsushima_test_osmmc")
-    result = sim.run()
-    assert np.isfinite(result["e_pot_mean"])
-    assert result["multi_species"] is False
-
-
-def test_osmmc_multi_species_construction():
-    """S14 regression (integration level): a multi-species OSMMCSimulation
-    must actually construct and run, not NameError on SpeciesParams."""
-    lattice = np.eye(3) * 15.0
-    rng = np.random.default_rng(2)
-    positions = rng.uniform(0, 15.0, size=(6, 3))
-    atom_types = ["Li"] * 4 + ["O"] * 2
-
-    lj = {
-        frozenset({"Li"}):    {"epsilon": 0.02, "sigma": 2.0},
-        frozenset({"O"}):     {"epsilon": 0.02, "sigma": 2.8},
-        frozenset({"Li","O"}): {"epsilon": 0.02, "sigma": 2.4},
-    }
-    engine = PotentialEngine().add(LennardJonesPotential(lj, r_cut=6.0, shift=True))
-    fn = make_force_fn(engine)
-
-    sim = OSMMCSimulation(
-        lattice, positions, atom_types, fn,
-        _allow_unverified=True,
-        temperature=500.0,
-        species_params={
-            "Li": SpeciesParams(mu=-0.12, mass=6.941, m_lam=7.0,
-                                sc_alpha=0.55, sc_n=4, weight=2.0),
-            "O":  SpeciesParams(mu=-0.35, mass=15.999, m_lam=16.0,
-                                sc_alpha=0.40, sc_n=4, weight=1.0),
-        },
-        n_cycles=20, md_steps_per_cycle=5, seed=3, verbose=False,
-        output_dir="/tmp/akitsushima_test_osmmc_multi")
-    result = sim.run()
-    assert result["multi_species"] is True
-    assert set(result["species_stats"].keys()) == {"Li", "O"}
-
-
 # ===========================================================================
 # `mu_ex` -> `mu` rename: backward compatibility
 #
-# GCMCMDSimulation/OSMMCSimulation's constructor kwarg and SpeciesParams'
-# field were renamed from `mu_ex` to `mu` once test_gcmc_mu_is_the_full_
+# GCMCMDSimulation's constructor kwarg was renamed from `mu_ex` to `mu` once test_gcmc_mu_is_the_full_
 # chemical_potential (above) settled that the value had always been the
 # FULL chemical potential, never the excess the old name implied.  Every
-# old spelling -- the deprecated constructor kwarg, the deprecated
-# SpeciesParams field/attribute, and the deprecated YAML config key
+# old spelling -- the deprecated constructor kwarg and the deprecated
+# YAML config key
 # (covered in test_cli_smoke.py) -- is kept working, so these tests pin
 # that nothing which used the old name silently breaks.
 # ===========================================================================
-
-def test_species_params_mu_ex_kwarg_still_works_and_warns():
-    """Deprecated construction path: SpeciesParams(mu_ex=...) must still
-    build an equivalent object to SpeciesParams(mu=...), with a warning."""
-    with pytest.warns(UserWarning, match="mu_ex"):
-        sp = SpeciesParams(mu_ex=-0.12, mass=6.941)
-    assert sp.mu == -0.12
-    assert sp == SpeciesParams(mu=-0.12, mass=6.941)
-
-
-def test_species_params_mu_ex_attribute_read_still_works_and_warns():
-    """Deprecated attribute-read path: an existing SpeciesParams built
-    the new way must still answer `.mu_ex` (returning `.mu`), with a
-    warning, for code that reads the old attribute name."""
-    sp = SpeciesParams(mu=-0.35, mass=15.999)
-    with pytest.warns(UserWarning, match="mu_ex"):
-        val = sp.mu_ex
-    assert val == -0.35
-
-
-def test_species_params_mu_and_mu_ex_together_raises():
-    """Passing both the new and the deprecated spelling at once is
-    ambiguous and must raise rather than silently pick one."""
-    with pytest.raises(TypeError, match="mu_ex"):
-        SpeciesParams(mu=-0.1, mu_ex=-0.2)
-
 
 def test_gcmc_md_mu_ex_kwarg_still_works_and_warns(tmp_path):
     """Deprecated construction path: GCMCMDSimulation(..., mu_ex=...)
@@ -1188,58 +1082,6 @@ def test_gcmc_md_mu_and_mu_ex_together_raises(tmp_path):
         GCMCMDSimulation(lattice, positions, ["Ar"] * 6, fn,
                          mu=-0.05, mu_ex=-0.05, verbose=False,
                          output_dir=str(tmp_path))
-
-
-def test_osmmc_mu_ex_kwarg_still_works_and_warns(tmp_path):
-    """The deprecated mu_ex= kwarg reaches OSMMCSimulation's parent
-    constructor transparently via **kwargs, so single-species OSMMC
-    construction must accept it identically to GCMCMDSimulation."""
-    lattice = np.eye(3) * 15.0
-    rng = np.random.default_rng(0)
-    positions = rng.uniform(0, 15.0, size=(6, 3))
-    engine = PotentialEngine().add(
-        LennardJonesPotential({frozenset({"Ar"}): {"epsilon": 0.0103, "sigma": 3.405}},
-                              r_cut=6.0, shift=True))
-    fn = make_force_fn(engine)
-
-    with pytest.warns(UserWarning, match="mu_ex"):
-        sim = OSMMCSimulation(
-            lattice, positions, ["Ar"] * 6, fn, temperature=120.0,
-            _allow_unverified=True,
-            mu_ex=-0.05, species="Ar", mass=39.948, verbose=False,
-            output_dir=str(tmp_path))
-    assert sim.mu == -0.05
-
-
-def test_osmmc_species_stats_carries_deprecated_mu_ex_duplicate(tmp_path):
-    """species_stats()'s returned per-species dict must expose BOTH the
-    canonical 'mu' key and a same-valued deprecated 'mu_ex' duplicate,
-    for any external code parsing the returned dict directly (a plain
-    dict key can't itself emit a warning, unlike an attribute)."""
-    lattice = np.eye(3) * 15.0
-    rng = np.random.default_rng(2)
-    positions = rng.uniform(0, 15.0, size=(6, 3))
-    atom_types = ["Li"] * 4 + ["O"] * 2
-    lj = {
-        frozenset({"Li"}):    {"epsilon": 0.02, "sigma": 2.0},
-        frozenset({"O"}):     {"epsilon": 0.02, "sigma": 2.8},
-        frozenset({"Li","O"}): {"epsilon": 0.02, "sigma": 2.4},
-    }
-    engine = PotentialEngine().add(LennardJonesPotential(lj, r_cut=6.0, shift=True))
-    fn = make_force_fn(engine)
-
-    sim = OSMMCSimulation(
-        lattice, positions, atom_types, fn, temperature=500.0,
-        _allow_unverified=True,
-        species_params={
-            "Li": SpeciesParams(mu=-0.12, mass=6.941, m_lam=7.0),
-            "O":  SpeciesParams(mu=-0.35, mass=15.999, m_lam=16.0),
-        },
-        n_cycles=1, md_steps_per_cycle=1, seed=3, verbose=False,
-        output_dir=str(tmp_path))
-    stats = sim.species_stats()
-    assert stats["Li"]["mu"] == -0.12 == stats["Li"]["mu_ex"]
-    assert stats["O"]["mu"] == -0.35 == stats["O"]["mu_ex"]
 
 
 # ===========================================================================
@@ -2411,23 +2253,3 @@ def test_kappa_seed_changes_the_trajectory(tmp_path):
                         output_dir=str(tmp_path / f"s{seed}"), verbose=False)
         J.append(np.asarray(out["J_series"]))
     assert not np.allclose(J[0], J[1])
-
-
-def test_osmmc_lambda_wall_at_zero_reflects_upward(tmp_path):
-    """ADR-0003 T7, O1: the lambda <= 0 wall set lambda-dot to -|.|, so
-    lambda stayed at 0 and every step completed a deletion (N -> 0).  It
-    must reflect upward, and a deletion needs a candidate."""
-    lattice = np.eye(3) * 15.0
-    positions = np.random.default_rng(1).uniform(0, 15.0, size=(6, 3))
-    engine = PotentialEngine().add(
-        LennardJonesPotential({frozenset({"Ar"}): {"epsilon": 0.0103, "sigma": 3.405}},
-                              r_cut=6.0, shift=True))
-    sim = OSMMCSimulation(lattice, positions, ["Ar"] * 6, make_force_fn(engine),
-                          _allow_unverified=True,
-                          temperature=120.0, mu=-0.05, species="Ar", mass=39.948,
-                          n_cycles=1, seed=1, verbose=False,
-                          output_dir=str(tmp_path))
-    sim._lam, sim._lam_dot, sim._del_candidate = -0.01, -0.3, -1
-    sim._handle_lambda_boundary()
-    assert sim._lam == 0.0 and sim._lam_dot == pytest.approx(0.3)
-    assert sim.N == 6

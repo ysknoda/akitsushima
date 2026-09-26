@@ -180,8 +180,8 @@ def test_quick_start_docstring_example_works():
     "BornMayerParameterSet", "StillingerWeberParameterSet",
     "TersoffParameterSet", "ExternalFileEngine", "ScaledForceEngine",
     "ELMModel", "QuantizedELMModel", "GeometryOptimiser", "NVTSimulation",
-    "NVESimulation", "NPTSimulation", "GCMCMDSimulation", "OSMMCSimulation",
-    "SpeciesParams", "NEBChain", "NEBOptimiser", "TransitionStateAnalyser",
+    "NVESimulation", "NPTSimulation", "GCMCMDSimulation", "CFCMCSimulation",
+    "NEBChain", "NEBOptimiser", "TransitionStateAnalyser",
     "PhononCalculator", "ThermalConductivityCalculator", "parse_poscar",
     "write_poscar", "ATOMIC_MASS", "K_B", "K_E", "EV_ANG_TO_AMU_ANG_FS2",
 ])

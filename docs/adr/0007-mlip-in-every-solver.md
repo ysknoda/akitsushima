@@ -45,6 +45,8 @@ approximation applied to Stillinger-Weber, Tersoff and EAM.
    O1-O2) is settled.  Since 2026-09-26 it refuses to run at all: with O1
    fixed, O2 was confirmed (N grows without bound), and osmc is to be
    rebuilt as CFCMC (Shi & Maginn, J. Chem. Theory Comput. 3, 1451 (2007)).
+   Rebuilt 2026-09-27 (ADR-0009): osmc now takes an atom-centred MLIP, as
+   gcmc does.
 6. **Verification.** Internal consistency through the CLI (tests), and an
    MLIP trained on the reference potential against that potential through
    the same solver (`example/mlip/adr0007/verify_solvers.py`), tolerances
