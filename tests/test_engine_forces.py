@@ -615,7 +615,7 @@ def test_pair_potential_numba_matches_numpy():
 def test_sw_force_stress_match_finite_difference():
     from akitsushima.engine import StillingerWeberPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     # A minimal dict with a recognized top-level key ('sigma') triggers the
     # legacy flat (default Si) parameter path; the rest fall back to their
     # hardcoded Si defaults via .get(key, default) inside the class.
@@ -639,7 +639,7 @@ def test_sw_force_stress_match_finite_difference():
 def test_sw_numba_matches_numpy():
     from akitsushima.engine import StillingerWeberPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     pot = StillingerWeberPotential({"sigma": 2.0951}, species=["Si"])
     e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
     e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
@@ -653,7 +653,7 @@ def test_sw_multi_species_path():
     the legacy flat single-species default)."""
     from akitsushima.engine import StillingerWeberPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     params = {
         ("Si", "Si", "Si"): {
             "epsilon": 2.1682, "sigma": 2.0951, "A": 7.049556, "B": 0.6022246,
@@ -714,7 +714,7 @@ def test_sw_flat_and_multi_species_formats_agree_for_one_species(gamma, use_numb
         pytest.skip("numba not installed")
     from akitsushima.engine import StillingerWeberPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     flat = StillingerWeberPotential(_sw_si_flat(gamma), species=["Si"])
     multi = StillingerWeberPotential({("Si", "Si", "Si"): _sw_si_flat(gamma)},
                                      species=["Si"])
@@ -741,8 +741,8 @@ def test_sw_flat_format_gamma_reaches_the_three_body_exponent():
     """
     from akitsushima.engine import StillingerWeberPotential
 
-    perfect = diamond_si_dict()
-    distorted = randomly_perturbed(diamond_si_dict(), magnitude=0.15, seed=7)
+    perfect = diamond_si_dict(2)
+    distorted = randomly_perturbed(diamond_si_dict(2), magnitude=0.15, seed=7)
 
     def energy(struct, gamma, blind=False):
         pot = StillingerWeberPotential(_sw_si_flat(gamma), species=["Si"])
@@ -758,8 +758,8 @@ def test_sw_flat_format_gamma_reaches_the_three_body_exponent():
     # V3 != 0: gamma must show up.
     e_lo = energy(distorted, 1.0)
     e_hi = energy(distorted, 1.20)
-    # Measured separation on this fixture is 0.6448 eV over 8 atoms
-    # (-32.1983 vs -32.8432); 0.1 eV sits well clear of it and nine
+    # Measured separation on this fixture is 2.173 eV over 64 atoms
+    # (-262.677 vs -264.850); 0.1 eV sits well clear of it and nine
     # orders of magnitude above the ~1e-10 eV agreement the perfect
     # lattice above shows when gamma genuinely cannot matter.
     assert abs(e_hi - e_lo) > 0.1, (
@@ -779,7 +779,7 @@ def test_sw_flat_format_forces_match_finite_difference_at_nonunit_gamma():
     gamma = 1 and could not have caught it."""
     from akitsushima.engine import StillingerWeberPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     pot = StillingerWeberPotential(_sw_si_flat(1.20), species=["Si"])
 
     def e_of_pos(pos):
@@ -824,7 +824,7 @@ def test_sw_multi_species_numba_matches_numpy():
     physically meaningful, since the table is symmetric by construction."""
     from akitsushima.engine import StillingerWeberPotential
 
-    struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.05, seed=2)
+    struct = randomly_perturbed(rocksalt_nacl_dict(2), magnitude=0.05, seed=2)
     # a*sigma = 1.80*2.0951 = 3.771 A cuts off just short of the a/sqrt(2)
     # = 3.99 A same-species shell, leaving only the a/2 = 2.82 A
     # Na-Cl nearest-neighbour shell inside cutoff -- i.e. every 2-body/
@@ -881,7 +881,7 @@ _TERSOFF_SI_PARAMS = dict(
 def test_tersoff_force_stress_match_finite_difference():
     from akitsushima.engine import TersoffPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     pot = TersoffPotential(dict(_TERSOFF_SI_PARAMS), species=["Si"])
 
     def e_of_pos(pos):
@@ -904,7 +904,7 @@ def test_tersoff_force_stress_match_finite_difference():
 def test_tersoff_numba_matches_numpy():
     from akitsushima.engine import TersoffPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     pot = TersoffPotential(dict(_TERSOFF_SI_PARAMS), species=["Si"])
     e0, f0, s0 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=False)
     e1, f1, s1 = pot.compute(struct["lattice"], struct["positions"], struct["atom_types"], use_numba=True)
@@ -917,7 +917,7 @@ def test_tersoff_multi_species_path():
     """Exercise the nested-triple multi-species parameter format."""
     from akitsushima.engine import TersoffPotential
 
-    struct = randomly_perturbed(diamond_si_dict(), magnitude=0.05, seed=4)
+    struct = randomly_perturbed(diamond_si_dict(2), magnitude=0.05, seed=4)
     diag = dict(_TERSOFF_SI_PARAMS)
     params = {("Si", "Si", "Si"): diag}
     pot = TersoffPotential(params, species=["Si"])
@@ -949,9 +949,10 @@ def test_tersoff_multi_species_numba_matches_numpy():
     rather than being masked by both directions sharing one value."""
     from akitsushima.engine import TersoffPotential
 
-    base = diamond_si_dict()
+    base = diamond_si_dict(2)
     struct = randomly_perturbed(base, magnitude=0.05, seed=4)
-    struct["atom_types"] = ["X"] * 4 + ["Y"] * 4   # 2 diamond sublattices -> 2 species
+    # 2 diamond sublattices -> 2 species (each 8-atom cell lists them in turn)
+    struct["atom_types"] = (["X"] * 4 + ["Y"] * 4) * 8
 
     params = {
         ("X", "Y", "Y"): {

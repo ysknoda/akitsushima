@@ -7,6 +7,7 @@ pre-0.2.0a3 ELM formula (ADR-0003 finding M1).
 """
 
 import importlib.util
+import itertools
 
 import numpy as np
 import pytest
@@ -470,7 +471,14 @@ def _sw_si_structures(n, seed):
         lat = np.eye(3) * 5.431 @ (np.eye(3) + 0.5 * (e + e.T))
         pos = base @ lat + rng.normal(0, 0.05, (8, 3))
         types = ["Si"] * 8
-        E, F, S = eng.compute(lat, pos, types)
+        # Labels from the 2x2x2 replica: the 8-atom cell's half-width
+        # (2.7 A) cannot host SW's 3.77 A cutoff under the minimum-image
+        # convention, and the replica's E / 8, first 8 forces and stress
+        # are exactly the periodic 8-atom cell's.
+        shifts = np.array(list(itertools.product(range(2), repeat=3))) @ lat
+        big = (pos[None, :, :] + shifts[:, None, :]).reshape(-1, 3)
+        E, F, S = eng.compute(2 * lat, big, types * 8)
+        E, F = E / 8, F[:8]
         out.append(
             dict(
                 lattice=lat,

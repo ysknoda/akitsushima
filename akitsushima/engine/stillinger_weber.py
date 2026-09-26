@@ -15,7 +15,7 @@ from ..utils.mpi import (
     _mpi_domain_split,
 )
 from ._numba_common import _nb_exp
-from .neighborlist import NeighbourList
+from .neighborlist import NeighbourList, _check_min_image
 
 
 # -- Stillinger-Weber: 2-body kernel --------------------------------------
@@ -806,6 +806,11 @@ class StillingerWeberPotential:
             # See NeighbourList.get_pairs_arrays' bug-fix note.
             idx_i_raw, idx_j_raw = neigh_list.get_candidate_pairs()
         else:
+            # The O(N^2) fallback never goes through NeighbourList.build(),
+            # which is where the minimum-image precondition is enforced;
+            # past half the cell width `s -= np.round(s)` keeps one image
+            # per pair and silently drops the rest (BasePairPotential).
+            _check_min_image(lattice, rc, "StillingerWeberPotential.compute")
             ii_all, jj_all = np.triu_indices(N, k=1)
             idx_i_raw = ii_all.astype(np.int32)
             idx_j_raw = jj_all.astype(np.int32)
@@ -1047,6 +1052,11 @@ class StillingerWeberPotential:
             # See NeighbourList.get_pairs_arrays' bug-fix note.
             idx_i_raw, idx_j_raw = neigh_list.get_candidate_pairs()
         else:
+            # The O(N^2) fallback never goes through NeighbourList.build(),
+            # which is where the minimum-image precondition is enforced;
+            # past half the cell width `s -= np.round(s)` keeps one image
+            # per pair and silently drops the rest (BasePairPotential).
+            _check_min_image(lattice, rc_global, "StillingerWeberPotential.compute")
             ii_all, jj_all = np.triu_indices(N, k=1)
             idx_i_raw = ii_all.astype(np.int32)
             idx_j_raw = jj_all.astype(np.int32)

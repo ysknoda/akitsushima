@@ -19,6 +19,13 @@ from akitsushima.fitting.parameter_sets import LJParameterSet, StillingerWeberPa
 from akitsushima.utils.mpi import _mpi_rank, local_only
 
 
+def _supercell(lattice, frac, types, n):
+    frac = np.concatenate([(frac + [i, j, k]) / n for i in range(n)
+                           for j in range(n) for k in range(n)])
+    lattice = n * lattice
+    return lattice, frac @ lattice, list(types) * n ** 3
+
+
 def _fcc_al(a=4.05):
     frac = np.array([(0.0, 0.0, 0.0), (0.5, 0.5, 0.0),
                      (0.5, 0.0, 0.5), (0.0, 0.5, 0.5)])
@@ -26,13 +33,14 @@ def _fcc_al(a=4.05):
     return lattice, frac @ lattice, ["Al"] * 4
 
 
-def _diamond_si(a=5.43):
+def _diamond_si(a=5.43, n=2):
+    # n = 2: the 8-atom cell's half-width (2.715 A) cannot host the SW
+    # (3.77 A) or Tersoff (3.0 A) cutoff under the minimum-image convention.
     base = np.array([(0.0, 0.0, 0.0), (0.5, 0.5, 0.0),
                      (0.5, 0.0, 0.5), (0.0, 0.5, 0.5)])
     shift = np.array([0.25, 0.25, 0.25])
     frac = np.concatenate([base, base + shift], axis=0)
-    lattice = np.eye(3) * a
-    return lattice, frac @ lattice, ["Si"] * 8
+    return _supercell(np.eye(3) * a, frac, ["Si"] * 8, n)
 
 
 def _perturb(positions, magnitude, seed):
@@ -40,12 +48,11 @@ def _perturb(positions, magnitude, seed):
     return positions + rng.uniform(-magnitude, magnitude, size=positions.shape)
 
 
-def _rocksalt_nacl(a=5.64):
+def _rocksalt_nacl(a=5.64, n=2):
     na_frac = [(0.0, 0.0, 0.0), (0.5, 0.5, 0.0), (0.5, 0.0, 0.5), (0.0, 0.5, 0.5)]
     cl_frac = [(0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5), (0.5, 0.5, 0.5)]
     frac = np.array(na_frac + cl_frac)
-    lattice = np.eye(3) * a
-    return lattice, frac @ lattice, ["Na"] * 4 + ["Cl"] * 4
+    return _supercell(np.eye(3) * a, frac, ["Na"] * 4 + ["Cl"] * 4, n)
 
 
 def main():
@@ -166,7 +173,7 @@ def main():
             "lattice": lat_si, "positions": p, "atom_types": types_si,
             "natoms": len(types_si),
             "volume": float(abs(np.linalg.det(lat_si))),
-            "ref_energy": -4.0, "ref_forces": np.zeros((8, 3)),
+            "ref_energy": -4.0, "ref_forces": np.zeros((len(types_si), 3)),
             "ref_stress": np.zeros((3, 3)),
         })
     loss_sw = generic_loss_function(

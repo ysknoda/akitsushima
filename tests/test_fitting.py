@@ -324,7 +324,7 @@ def test_yukawa_param_set_round_trip(small_cell_ok):
 # ===========================================================================
 
 def test_stillinger_weber_param_set_build_engine_smoke():
-    si = diamond_si_dict()
+    si = diamond_si_dict(2)
     struct = randomly_perturbed(si, magnitude=0.03, seed=1)
     sw_params = {
         "epsilon": 2.17, "sigma": 2.0951, "A": 7.049556277,
@@ -343,7 +343,7 @@ def test_stillinger_weber_param_set_build_engine_smoke():
 
 
 def test_tersoff_param_set_build_engine_smoke():
-    si = diamond_si_dict()
+    si = diamond_si_dict(2)
     struct = randomly_perturbed(si, magnitude=0.03, seed=2)
     t_params = {
         "A": 1830.8, "B": 471.18, "lambda1": 2.4799, "lambda2": 1.7322,

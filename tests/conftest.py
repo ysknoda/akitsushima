@@ -35,24 +35,35 @@ def fcc_al_dict() -> dict:
     return _structure(_cubic(a), frac, ["Al"] * 4)
 
 
-def rocksalt_nacl_dict() -> dict:
-    """Conventional cubic rock-salt NaCl, a = 5.64 A, 4 Na + 4 Cl."""
+def rocksalt_nacl_dict(n: int = 1) -> dict:
+    """Conventional cubic rock-salt NaCl, a = 5.64 A, an n x n x n
+    supercell of the 4 Na + 4 Cl cell (each cell lists Na before Cl)."""
     a = 5.64
     na_frac = [(0.0, 0.0, 0.0), (0.5, 0.5, 0.0), (0.5, 0.0, 0.5), (0.0, 0.5, 0.5)]
     cl_frac = [(0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5), (0.5, 0.5, 0.5)]
-    frac = na_frac + cl_frac
-    atom_types = ["Na"] * 4 + ["Cl"] * 4
+    cell = np.array(na_frac + cl_frac)
+    frac = np.concatenate([(cell + [i, j, k]) / n for i in range(n)
+                           for j in range(n) for k in range(n)])
+    atom_types = (["Na"] * 4 + ["Cl"] * 4) * n ** 3
     charges = {"Na": 1.0, "Cl": -1.0}
-    return _structure(_cubic(a), frac, atom_types, charges=charges)
+    return _structure(_cubic(n * a), frac, atom_types, charges=charges)
 
 
-def diamond_si_dict() -> dict:
-    """Conventional cubic diamond silicon, a = 5.43 A, 8 atoms."""
+def diamond_si_dict(n: int = 1) -> dict:
+    """Conventional cubic diamond silicon, a = 5.43 A, an n x n x n
+    supercell of the 8-atom cell.
+
+    n = 2 (64 atoms, half-width 5.43 A) is the smallest that hosts the SW
+    (a * sigma = 3.77 A) and Tersoff (R + D = 3.0 A) cutoffs under the
+    minimum-image convention; the bare cell's half-width is 2.715 A.
+    """
     a = 5.43
     base = [(0.0, 0.0, 0.0), (0.5, 0.5, 0.0), (0.5, 0.0, 0.5), (0.0, 0.5, 0.5)]
     shift = np.array([0.25, 0.25, 0.25])
-    frac = base + [tuple(np.array(p) + shift) for p in base]
-    return _structure(_cubic(a), frac, ["Si"] * 8)
+    cell = np.array(base + [tuple(np.array(p) + shift) for p in base])
+    frac = np.concatenate([(cell + [i, j, k]) / n for i in range(n)
+                           for j in range(n) for k in range(n)])
+    return _structure(_cubic(n * a), frac, ["Si"] * (8 * n ** 3))
 
 
 def toy_dimer_dict() -> dict:
