@@ -50,7 +50,7 @@ _SHRINK = {
     "neb": {"neb": {"max_steps": 5}},
     "tsa": {"tsa": {"irc_max_steps": 5}},
     "osmc": {"osmc": {"n_cycles": 3}},
-    "esm": {"esm": {"relax": {"max_steps": 2}}},
+    "esm": {"esm": {"n_grid_z": 128}},
     "phonon": {},
     "kappa": {"kappa": {"n_steps": 200, "equil_steps": 20, "tau_max": 0.02}},
     "mlip": {},

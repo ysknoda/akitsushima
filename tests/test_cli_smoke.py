@@ -740,62 +740,14 @@ def test_fit_cfg_templates_all_have_r_cut():
         assert float(cfg["r_cut"]) > 0
 
 
-def test_esm_template_rcut_matches_the_cell_size_it_documents():
-    """
-    The shipped ESM template pairs ``r_cut: 15.0`` with a ``relax:``
-    section, and ``cmd_esm`` hands that r_cut to ``GeometryOptimiser``,
-    which builds a ``NeighbourList`` with the default ``skin_width=0.5``.
-    So the template silently requires every PERPENDICULAR cell width to
-    exceed ``2 * (r_cut + 0.5)`` -- 31.0 A at the shipped value.  For an
-    MgO slab (a = 4.21 A) that is an 8x8 in-plane supercell; the 4x4 and
-    6x6 slabs a user would reach for first are rejected outright.
-
-    Nothing caught this because ``test_cmd_esm_smoke`` uses ``r_cut: 8.0``
-    AND omits the ``relax:`` section, so it never constructs a
-    NeighbourList at all -- the template's own defaults were never
-    executed.  This test pins the arithmetic the template's comment now
-    states, so the comment cannot drift away from the code.
-
-    It deliberately checks the constraint rather than running a full ESM
-    relaxation on a 128-atom slab, which would cost minutes for no extra
-    information: the failure mode is NeighbourList construction, and that
-    is exactly what is exercised here.
-    """
-    import re
-
+def test_esm_command_is_analysis_only():
+    """ADR-0008: the esm template has no relax section any more (it relaxed
+    on electrostatics alone and collapsed the ions), and a config that
+    still has one is refused with a pointer to relax + coulomb_method: esm.
+    (Replaces the check of the template's r_cut, which only that relax
+    section used.)"""
     from akitsushima.cli.templates import _YAML_ESM_DEFAULT
-    from akitsushima.engine.neighborlist import NeighbourList, _cell_metrics
-
-    m = re.search(r"^\s*r_cut:\s*([0-9.]+)", _YAML_ESM_DEFAULT, re.MULTILINE)
-    assert m, "ESM template must declare an r_cut"
-    r_cut = float(m.group(1))
-    assert "relax:" in _YAML_ESM_DEFAULT, (
-        "this test's premise is that the template enables relaxation, "
-        "which is what pulls in the NeighbourList constraint")
-
-    skin = 0.5                      # GeometryOptimiser's default
-    required_width = 2.0 * (r_cut + skin)
-
-    # The comment in the template states 31.0 A for the shipped r_cut.
-    assert required_width == pytest.approx(31.0), (
-        f"the ESM template's comment documents a 31.0 A minimum width; "
-        f"r_cut={r_cut} + skin={skin} now implies {required_width} A -- "
-        f"update the comment alongside the value")
-
-    a_mgo = 4.21                    # MgO rocksalt lattice constant [A]
-    probe = np.array([[0.0, 0.0, 20.0]])
-    for n, should_pass in ((4, False), (6, False), (8, True)):
-        lat = np.diag([n * a_mgo, n * a_mgo, 40.0])
-        width = float(_cell_metrics(lat)[0].min())
-        nl = NeighbourList(r_cut=r_cut, skin_width=skin)
-        if should_pass:
-            assert width > required_width, "fixture sanity"
-            nl.build(lat, probe)    # must not raise
-        else:
-            assert width < required_width, "fixture sanity"
-            with pytest.raises(ValueError, match="perpendicular"):
-                nl.build(lat, probe)
-
+    assert "relax:" not in _YAML_ESM_DEFAULT
 
 def test_relax_template_keys_are_all_read_by_cmd_relax():
     """Every key the relax template ships must actually be consumed.
@@ -1002,3 +954,19 @@ def test_cmd_fit_refuses_a_bad_local_method_before_reading_any_data(tmp_path, ca
     assert cmd_fit(args) == 1
     out = capsys.readouterr().out
     assert "local_method" in out and "Training CSV not found" not in out
+
+
+def test_esm_command_refuses_a_relax_section(tmp_path, capsys):
+    """ADR-0008: esm.relax is refused with a pointer to relax + ESM."""
+    rng = np.random.default_rng(0)
+    pos = rng.uniform(0, 10.0, size=(2, 3))
+    pos[:, 2] = [-1.0, 1.0]
+    poscar = tmp_path / "POSCAR_slab"
+    write_poscar(str(poscar), np.diag([12.0, 12.0, 24.0]), pos, ["Na", "Cl"])
+    cfg = {"structure": {"poscar": str(poscar)},
+           "potential": {"charges": {"Na": 1.0, "Cl": -1.0}},
+           "esm": {"output_dir": str(tmp_path / "out"), "relax": {"max_steps": 2}}}
+    yaml_path = tmp_path / "esm.yaml"
+    _write_yaml(yaml_path, cfg)
+    assert cmd_esm(_ns(yaml_path)) == 1
+    assert "coulomb_method: esm" in capsys.readouterr().out

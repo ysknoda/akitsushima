@@ -8,7 +8,6 @@ import numpy as np
 
 from ..engine.coulomb.esm import ESMCalculator
 from ..fitting.io_utils import _load_potential_json
-from ..solvers import GeometryOptimiser
 from .common import (
     _check_poscar,
     _check_yaml,
@@ -30,7 +29,6 @@ def cmd_esm(args) -> int:
     struct_cfg = cfg.get("structure",{})
     pot_cfg    = cfg.get("potential",{})
     esm_cfg    = cfg.get("esm",      {})
-    verbose    = esm_cfg.get("verbose",True) and not getattr(args,"quiet",False)
 
     poscar = struct_cfg.get("poscar","POSCAR_slab")
     pos_data = _check_poscar(poscar)
@@ -78,18 +76,13 @@ def cmd_esm(args) -> int:
 
     rel_cfg = esm_cfg.get("relax")
     if rel_cfg:
-        t0 = _time.perf_counter()
-        go = GeometryOptimiser(
-            lattice=lattice, positions=positions,
-            atom_types=atom_types, force_fn=esm,
-            r_cut=esm_cfg.get("r_cut",15.0), method=rel_cfg.get("method","fire"),
-            fmax=rel_cfg.get("fmax",0.01), max_steps=rel_cfg.get("max_steps",200),
-            relax_cell=False, output_dir=os.path.join(output_dir,"relax"),
-            verbose=verbose)
-        res_go = go.run()
-        lattice, positions = res_go["lattice"], res_go["positions"]
-        esm.update_geometry(lattice, positions, atom_types)
-        t_sections.append(("ESM geometry relax", _time.perf_counter()-t0))
+        # ADR-0008: esm is analysis-only.  Its relax moved the ions on
+        # the electrostatics alone (no short-range term), so they
+        # collapsed; relaxing with ESM is `relax` + coulomb_method: esm.
+        print("ERROR: esm.relax is no longer supported (ADR-0008): it relaxed on "
+              "electrostatics alone.  Use `akitsushima relax` with "
+              "potential.coulomb_method: esm and a potential.esm block.")
+        return 1
 
     t0 = _time.perf_counter()
     # Bug-fix note (S21, newly found during the port): get_potential_

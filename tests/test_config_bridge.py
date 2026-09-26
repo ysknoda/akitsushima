@@ -170,9 +170,10 @@ def test_eam_raises_clear_error_not_typeerror():
 
 
 def test_buckingham_legacy_path_loads_json(tmp_path):
-    """The legacy Buckingham branch returns (None, r_cut, buck_params,
-    charges) for the caller's legacy-kwargs constructor path; confirms
-    S13's _load_potential_json is wired in correctly here too."""
+    """The Buckingham branch returns a complete force function (ADR-0008:
+    it used to return None, usable only by relax / md's legacy keywords)
+    plus buck_params and charges; confirms S13's _load_potential_json is
+    wired in correctly here too."""
     pair = frozenset({"Mg", "O"})
     result = {"params": {"buck": {pair: {"A": 1000.0, "rho": 0.30, "C": 30.0}},
                         "charges": {"Mg": 2.0, "O": -2.0}},
@@ -183,7 +184,7 @@ def test_buckingham_legacy_path_loads_json(tmp_path):
 
     cfg = {"type": "buckingham", "potential_json": path}
     force_fn, r_cut, buck_params, charges = _build_force_fn_from_yaml(cfg)
-    assert force_fn is None
+    assert callable(force_fn) and force_fn.coulomb == "ewald"
     assert r_cut == 10.0
     assert buck_params[pair]["C"] == pytest.approx(30.0)
     assert charges == {"Mg": 2.0, "O": -2.0}

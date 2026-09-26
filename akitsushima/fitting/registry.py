@@ -702,6 +702,12 @@ def _build_from_yaml_mlip(pot_cfg):
     """``potential: {type: MLIP, model: path}`` (ADR-0004, decision 6).
     The descriptor and element list come from the model file."""
     from .mlip_engine import MLIPForceField
+    if pot_cfg.get("coulomb_method") or pot_cfg.get("charges") or pot_cfg.get("esm"):
+        # ADR-0008: a model trained on total energies already contains the
+        # electrostatics; adding a Coulomb term would count it twice.
+        raise ValueError("potential.type MLIP takes no coulomb_method / charges / "
+                         "esm: the model's energy already includes electrostatics "
+                         "(ADR-0008).")
     path = pot_cfg.get("model")
     if not path:
         raise ValueError("potential.type MLIP needs potential.model: the "

@@ -92,6 +92,11 @@ class ThermalConductivityCalculator:
         self.force_fn   = force_fn
         self.temperature = float(temperature)
         self.N = len(atom_types)
+        from ..fitting.force_fn import check_esm_for_solver
+        check_esm_for_solver(force_fn, "ThermalConductivityCalculator",
+                             refuse="ESM has no site-energy decomposition for the "
+                                    "heat flux, and slab kappa is out of scope "
+                                    "(ADR-0008)")
         from ..fitting.mlip_engine import check_mlip_for_solver
         check_mlip_for_solver(force_fn, "ThermalConductivityCalculator",
                               need_site_energies=True,

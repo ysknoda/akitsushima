@@ -294,6 +294,18 @@ class GCMCMDSimulation(_BaseMDSimulation):
                               need_site_energies=True,
                               species=[species] if species else [],
                               refuse=self._MLIP_REFUSAL)
+        # ADR-0008: ESM bc1 (vacuum on both sides) needs a neutral cell;
+        # inserting a charged species breaks it.  bc2 / bc3 have an
+        # electrode that takes up the net charge.
+        from ..fitting.force_fn import esm_bc, uses_esm
+        if uses_esm(force_fn) and esm_bc(force_fn) == "bc1":
+            q_ins = (getattr(force_fn, "charges", None) or {}).get(species, 0.0)
+            if abs(q_ins) > 1e-10:
+                raise ValueError(
+                    f"{type(self).__name__}: ESM bc1 (vacuum | slab | vacuum) "
+                    f"needs a neutral cell, and inserting '{species}' (charge "
+                    f"{q_ins:+g}) changes the net charge; use bc2 or bc3, whose "
+                    f"electrode compensates it.")
         self.mass         = float(mass) if mass is not None \
                             else float(ATOMIC_MASS.get(species, 1.0))
         self.dt           = float(timestep)

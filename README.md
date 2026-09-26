@@ -50,6 +50,30 @@ library.
 - PPPM / SPME — FFT mesh, `O(N log N)` for N ≳ 500
 - ESM — Effective Screening Medium (open / metallic boundary conditions)
 
+All three are chosen in the potential section and reach every solver
+through the same force function (ADR-0008):
+
+```yaml
+potential:
+  type: buckingham
+  potential_json: ./fitting_output/fitted_potential.json
+  r_cut: 5.5
+  coulomb_method: esm          # ewald | pppm | esm
+  esm:
+    bc: bc1                    # bc1 vacuum|slab|vacuum, bc2 metal|slab|metal,
+                               # bc3 vacuum|slab|metal (Otani-Sugino / QE)
+    sigma: 0.5
+    n_grid_xy: 32
+    n_grid_z: 512
+    external_field: 0.0        # V/A (bc2)
+```
+
+With ESM the slab is centred at fractional z = 0 (the medium starts at
+fractional z = 1/2), as in Quantum ESPRESSO.  relax may relax only a_x and
+b_y; NPT and kappa refuse ESM; phonon needs supercell [N, N, 1]; gcmc
+inserts charged species only with bc2 / bc3.  The z-grid error is
+O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
+
 **Machine-learning potentials**
 - `ELMModel` — Extreme Learning Machine (single hidden layer)
 - `QuantizedELMModel` — ELM with quantised hidden-layer weights

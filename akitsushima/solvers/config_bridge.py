@@ -63,11 +63,10 @@ def _build_force_fn_from_yaml(
 
     Returns
     -------
-    (force_fn, r_cut, buck_params, charges) -- the last two are only
-    non-None for the legacy Buckingham path, matching the calling
-    convention used throughout the CLI ``cmd_*`` handlers, which pass
-    ``buck_params``/``charges`` straight through to a solver's legacy
-    Buckingham constructor kwargs when ``force_fn`` is None.
+    (force_fn, r_cut, buck_params, charges) -- force_fn is always a
+    complete force function; the last two are non-None only for
+    Buckingham, for callers that still pass them to a solver's legacy
+    keywords.
     """
     pot_type = str(pot_cfg.get("type", "")).strip().lower()
 
@@ -84,7 +83,25 @@ def _build_force_fn_from_yaml(
                 f"Buckingham potential JSON not found: '{pot_json_path}'")
         buck_params, charges = _load_potential_json(pot_json_path)
         r_cut = float(pot_cfg.get("r_cut", 10.0))
-        return None, r_cut, buck_params, charges
+        # ADR-0008: a complete force function (Buckingham + Coulomb by
+        # ewald / pppm / esm), so every solver takes it; it used to be
+        # None here, which only relax and md could handle (through their
+        # legacy buck_params / charges keywords).  The pair is still
+        # returned for those callers.
+        from ..fitting.force_fn import make_force_fn
+        coulomb = str(pot_cfg.get("coulomb_method", "ewald")).strip().lower()
+        if coulomb not in ("ewald", "pppm", "esm"):
+            raise ValueError(f"potential.coulomb_method must be ewald, pppm or esm, "
+                             f"got '{coulomb}'.")
+        if pot_cfg.get("esm") is not None and coulomb != "esm":
+            raise ValueError("potential.esm is set but coulomb_method is not 'esm'.")
+        force_fn = make_force_fn(
+            "buckingham", buck_params=buck_params, charges=charges, r_cut=r_cut,
+            ewald_alpha=pot_cfg.get("ewald_alpha"), coulomb_method=coulomb,
+            pppm_accuracy=pot_cfg.get("pppm_accuracy", 1e-5),
+            pppm_mesh=pot_cfg.get("pppm_mesh"),
+            esm=pot_cfg.get("esm") if coulomb == "esm" else None)
+        return force_fn, r_cut, buck_params, charges
 
     spec = registry.get_by_yaml_type(pot_type)
     if spec.build_from_yaml is None:

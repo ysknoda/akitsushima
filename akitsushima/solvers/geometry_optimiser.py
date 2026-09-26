@@ -465,6 +465,20 @@ class GeometryOptimiser:
         # Rebuild generalised free-DoF mask whenever relax_cell changes
         self._rebuild_free_mask()
 
+        # ADR-0008: with ESM electrostatics Lz places the vacuum / electrode
+        # boundaries and the in-plane cell must stay rectangular, so only
+        # a_x and b_y may relax.
+        from ..fitting.force_fn import uses_esm
+        if self.relax_cell and uses_esm(self._force_fn):
+            free = (np.asarray(self._lattice_constraints_mask, dtype=bool)
+                    & ~self._fix_cell_mask)
+            if np.any(free[[1, 2, 3, 5, 6, 7, 8]]):
+                raise ValueError(
+                    "GeometryOptimiser: with ESM electrostatics only a_x and b_y "
+                    "may relax (Lz places the boundaries; the in-plane cell must "
+                    "stay rectangular).  Set lattice_constraints: "
+                    "'1 0 0 0 1 0 0 0 0', or relax_cell: false.")
+
         # Timing
         self._tc = TimingCollector(enabled=timing)
 

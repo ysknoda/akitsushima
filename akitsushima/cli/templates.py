@@ -785,24 +785,9 @@ esm:
   n_grid_xy:      64
   n_grid_z:       256
   external_field: 0.0
-  # r_cut drives a MINIMUM CELL SIZE via the 'relax' section below.
-  # GeometryOptimiser builds a NeighbourList with skin_width=0.5, so it
-  # requires r_list = r_cut + 0.5 < min_i(d_i) / 2, where d_i is the
-  # PERPENDICULAR width (interplanar spacing) of the cell along axis i --
-  # not the lattice vector length, which is larger for a sheared cell.
-  # For a slab the vacuum direction is generous and the IN-PLANE width
-  # is what binds.  At r_cut = 15.0 that means every perpendicular width
-  # must exceed 31.0 A: an MgO slab (a = 4.21 A) needs an 8x8 in-plane
-  # supercell (33.7 A); 4x4 (16.8 A) and 6x6 (25.3 A) are REJECTED with a
-  # ValueError from NeighbourList.  Either build a large enough slab or
-  # lower r_cut to suit yours (r_cut < in-plane width / 2 - 0.5).
-  # Removing the 'relax' section drops the constraint entirely, since
-  # ESMCalculator itself does not build a NeighbourList.
-  r_cut:          15.0
-  relax:
-    fmax:      0.01
-    max_steps: 200
-    method:    fire
+  # esm is analysis-only (ADR-0008): single point, planar-averaged
+  # potential, work function, charge density.  To relax or run MD with ESM
+  # electrostatics use relax / md with potential.coulomb_method: esm.
   verbose: true
 """
 

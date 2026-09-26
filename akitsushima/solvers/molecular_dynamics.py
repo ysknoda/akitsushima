@@ -1310,6 +1310,11 @@ class NPTSimulation(_BaseMDSimulation):
                  velocity_rescale_steps : int = 0,
                  flush_every_step : bool = True,
                  fsync_every_step : bool = False):
+        from ..fitting.force_fn import check_esm_for_solver
+        check_esm_for_solver(
+            force_fn, "NPTSimulation",
+            refuse="its barostat is isotropic and would move the ESM boundaries "
+                   "(no in-plane barostat yet, ADR-0008)")
 
         self.flush_every_step = bool(flush_every_step)
         self.fsync_every_step = bool(fsync_every_step)

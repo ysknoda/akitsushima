@@ -1660,7 +1660,8 @@ def test_phonon_esm_warning_uses_kind_attribute_not_isinstance():
             return fn(lattice, positions, atom_types, neigh_list=neigh_list)
 
     al = fcc_al_dict()
-    with pytest.warns(UserWarning, match="ESM"):
+    # an error since ADR-0008 (was a warning)
+    with pytest.raises(ValueError, match="ESM"):
         PhononCalculator(al["lattice"], al["positions"], al["atom_types"],
                         _FakeESM(), supercell=[2, 2, 2], delta=0.01)
 

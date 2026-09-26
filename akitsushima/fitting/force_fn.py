@@ -127,6 +127,7 @@ def make_force_fn(backend,
                   pppm_accuracy  : float           = 1e-5,
                   pppm_mesh      : Optional[int]   = None,
                   pppm_order     : int             = 6,
+                  esm            : Optional[dict]  = None,
                   # removed in ADR-0005; kept to give a clear error
                   descriptor_fn  : Optional[Callable] = None,
                   ) -> Callable:
@@ -252,10 +253,14 @@ def make_force_fn(backend,
                 pppm_accuracy  = pppm_accuracy,
                 pppm_mesh      = pppm_mesh,
                 pppm_order     = pppm_order,
-                neigh_list     = neigh_list)
+                neigh_list     = neigh_list,
+                esm            = esm)
         _buck.r_cut  = _rc
         _buck.kind   = "buckingham"
         _buck.engine = _engine
+        _buck.coulomb = coulomb_method
+        _buck.esm = dict(esm or {}) if coulomb_method == "esm" else None
+        _buck.charges = dict(charges)
         return _buck
 
     # -- PotentialEngine -----------------------------------
@@ -296,10 +301,15 @@ def make_force_fn(backend,
                     pppm_accuracy  = pppm_accuracy,
                     pppm_mesh      = pppm_mesh,
                     pppm_order     = pppm_order,
-                    neigh_list     = neigh_list)
+                    neigh_list     = neigh_list,
+                    esm            = esm)
             _engine_coulomb_fn.r_cut  = _rc
             _engine_coulomb_fn.kind   = "engine"
             _engine_coulomb_fn.engine = _eng
+            _engine_coulomb_fn.coulomb = coulomb_method
+            _engine_coulomb_fn.esm = (dict(esm or {}) if coulomb_method == "esm"
+                                      else None)
+            _engine_coulomb_fn.charges = dict(charges)
             return _engine_coulomb_fn
 
         def _engine_fn(lattice, positions, atom_types, neigh_list=None):
@@ -360,3 +370,26 @@ def _resolve_force_fn(force_fn, r_cut,
     else:
         raise ValueError(
             f"{caller_name}: provide force_fn= or (buck_params=, charges=, r_cut=).")
+
+
+def uses_esm(force_fn) -> bool:
+    """True when the force function's electrostatics is ESM (ADR-0008):
+    a make_force_fn closure with coulomb_method 'esm', or an
+    ESMCalculator / ESMCoulomb itself."""
+    return (getattr(force_fn, "coulomb", None) == "esm"
+            or getattr(force_fn, "kind", None) == "esm")
+
+
+def esm_bc(force_fn) -> str:
+    esm = getattr(force_fn, "esm", None)
+    if isinstance(esm, dict):
+        return esm.get("bc", "bc1")
+    return getattr(force_fn, "bc", "bc1")
+
+
+def check_esm_for_solver(force_fn, solver, refuse=None):
+    """Refuse at construction a solver that cannot run with ESM
+    electrostatics (ADR-0008, decision 5).  No-op without ESM."""
+    if uses_esm(force_fn) and refuse:
+        raise ValueError(f"{solver}: not available with ESM electrostatics "
+                         f"(coulomb_method: esm) -- {refuse}")

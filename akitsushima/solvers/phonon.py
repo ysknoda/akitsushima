@@ -199,16 +199,16 @@ class PhononCalculator:
         # convention (see fitting/force_fn.py), so checking
         # getattr(force_fn, "kind", None) works uniformly for both and
         # removes the need for this module to depend on engine internals.
-        if getattr(force_fn, "kind", None) == "esm" and self.supercell[2] > 1:
-            import warnings
-            warnings.warn(
-                f"PhononCalculator: force_fn is an ESM calculator "
-                f"(bc='{getattr(force_fn, 'bc', '?')}') but "
-                f"supercell[2] = {self.supercell[2]} > 1.  "
-                "Replicating the cell in z compresses the vacuum layer and "
-                "corrupts the ESM boundary condition.  "
-                "Use supercell = [N, N, 1] for surface-phonon calculations.",
-                UserWarning, stacklevel=2)
+        # ADR-0008: an error, not a warning -- replicating along z compresses
+        # the vacuum and moves the ESM boundaries, so the result is not the
+        # system asked for.
+        from ..fitting.force_fn import esm_bc, uses_esm
+        if uses_esm(force_fn) and self.supercell[2] > 1:
+            raise ValueError(
+                f"PhononCalculator: ESM electrostatics (bc='{esm_bc(force_fn)}') "
+                f"with supercell[2] = {self.supercell[2]} > 1: replicating the "
+                "cell in z compresses the vacuum layer and corrupts the ESM "
+                "boundary condition.  Use supercell = [N, N, 1].")
 
         # Results (populated after compute_ifc / compute_band_structure / etc.)
         self.IFC          : Optional[np.ndarray] = None   # (3N_sc, 3N_sc) eV/A^2

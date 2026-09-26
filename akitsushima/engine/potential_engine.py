@@ -105,6 +105,25 @@ class PotentialEngine:
         return energy, forces, stress
 
 
+_ESM_CACHE: dict = {}
+
+
+def _esm_coulomb(esm: Optional[dict]):
+    """One ESMCoulomb per distinct setting (its grids and kernels persist
+    across calls, like the PPPM solver cache)."""
+    from .coulomb.esm import ESMCoulomb
+    cfg = dict(esm or {})
+    allowed = {"bc", "sigma", "n_grid_xy", "n_grid_z", "external_field"}
+    unknown = set(cfg) - allowed
+    if unknown:
+        raise ValueError(f"coulomb_method 'esm': unknown setting(s) {sorted(unknown)}; "
+                         f"allowed {sorted(allowed)}.")
+    key = tuple(sorted(cfg.items()))
+    if key not in _ESM_CACHE:
+        _ESM_CACHE[key] = ESMCoulomb(**cfg)
+    return _ESM_CACHE[key]
+
+
 def compute_all_general(
         lattice: np.ndarray,
         positions: np.ndarray,
@@ -119,6 +138,7 @@ def compute_all_general(
         pppm_order: int = 6,
         neigh_list: Optional[NeighbourList] = None,
         use_numba: bool = False,
+        esm: Optional[dict] = None,
         ) -> Tuple[float, np.ndarray, np.ndarray]:
     """
     Unified energy / force / stress driver for any combination of potentials.
@@ -128,6 +148,9 @@ def compute_all_general(
     engine     : PotentialEngine holding any combination of potentials.
     charges    : dict  symbol -> charge [e].  None or all-zero -> no Coulomb.
     r_cut      : Ewald/PPPM real-space cutoff (defaults to engine.r_cut).
+    coulomb_method : 'ewald' | 'pppm' | 'esm' (ADR-0008: slab boundary
+                 conditions; settings in ``esm`` = {bc, sigma, n_grid_xy,
+                 n_grid_z, external_field}).
 
     Returns
     -------
@@ -145,7 +168,10 @@ def compute_all_general(
     if charges is not None:
         q = np.array([charges.get(a, 0.0) for a in atom_types])
         if np.any(np.abs(q) > 1e-10):
-            if coulomb_method == "pppm":
+            if coulomb_method == "esm":
+                e_c, f_c, s_c = _esm_coulomb(esm).compute(
+                    lattice, positions, atom_types, q)
+            elif coulomb_method == "pppm":
                 alpha = (_pppm_alpha_from_accuracy(rc, pppm_accuracy)
                          if ewald_alpha is None else ewald_alpha)
                 mesh = (_pppm_mesh_from_alpha(lattice, alpha, pppm_order,
