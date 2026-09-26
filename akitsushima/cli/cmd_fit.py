@@ -21,6 +21,7 @@ import numpy as np
 
 from ..fitting import registry
 from ..fitting.driver import (
+    DEFAULT_LOCAL_METHOD,
     evaluate_diagnostics_generic,
     fit_potential,
     print_fit_result,
@@ -323,7 +324,7 @@ def cmd_fit(args: argparse.Namespace) -> int:
     # Checked before any data is read: fit_potential validates too, but
     # only after the CSV and every POSCAR have been loaded.
     try:
-        resolve_local_method(cfg.get("local_method", "L-BFGS-B"))
+        resolve_local_method(cfg.get("local_method", DEFAULT_LOCAL_METHOD))
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 1
@@ -410,7 +411,7 @@ def cmd_fit(args: argparse.Namespace) -> int:
         ewald_alpha  = cfg.get("ewald_alpha"),
         weights      = _weights,
         loss_type    = loss_type,
-        method       = cfg.get("local_method", "L-BFGS-B"),
+        method       = cfg.get("local_method", DEFAULT_LOCAL_METHOD),
         use_de       = cfg.get("use_de", False),
         de_maxiter   = cfg.get("de_maxiter", 300),
         de_popsize   = cfg.get("de_popsize", 10),

@@ -1313,6 +1313,28 @@ def test_resolve_local_method_accepts_bounded_gradient_free_capable_methods(name
     assert opts == LOCAL_METHOD_OPTIONS[canon]
 
 
+def test_default_local_method_is_nelder_mead_everywhere():
+    """Nelder-Mead replaced L-BFGS-B as the default (driver.py note on
+    DEFAULT_LOCAL_METHOD): the library, the CLI and every --write-config
+    template agree, and its iteration budget equals its evaluation one."""
+    import inspect
+
+    from akitsushima.cli import cmd_fit
+    from akitsushima.fitting import registry
+    from akitsushima.fitting.driver import (
+        DEFAULT_LOCAL_METHOD,
+        LOCAL_METHOD_OPTIONS,
+    )
+    assert DEFAULT_LOCAL_METHOD == "Nelder-Mead"
+    assert inspect.signature(fit_potential).parameters["method"].default == "Nelder-Mead"
+    assert cmd_fit.DEFAULT_LOCAL_METHOD == "Nelder-Mead"
+    templates = [v for v in vars(registry).values()
+                 if isinstance(v, dict) and "local_method" in v]
+    assert templates and all(t["local_method"] == "Nelder-Mead" for t in templates)
+    nm = LOCAL_METHOD_OPTIONS["Nelder-Mead"]
+    assert nm["maxiter"] == nm["maxfev"] == 100_000 and nm["adaptive"]
+
+
 @pytest.mark.parametrize("name,why", [
     ("BFGS", "bounds"), ("CG", "bounds"), ("Newton-CG", "gradient"),
     ("dogleg", "gradient"), ("trust-ncg", "gradient"),

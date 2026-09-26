@@ -199,30 +199,38 @@ Fitting runs in two stages, both driven from the config file:
    per generation, so it is practical for a handful of parameters, not
    for tens.
 2. **Local refinement (always)** -- `local_method` picks a bounded
-   scipy optimiser (default `L-BFGS-B`, case-insensitive):
+   scipy optimiser (default `Nelder-Mead`, case-insensitive):
 
 | `local_method` | uses a gradient | notes |
 |---|---|---|
-| `L-BFGS-B`    | finite-difference | default; the usual choice |
+| `L-BFGS-B`    | finite-difference | former default; stalls in narrow valleys |
 | `TNC`         | finite-difference | truncated Newton |
 | `SLSQP`       | finite-difference | |
-| `Nelder-Mead` | none | adaptive simplex; many evaluations |
+| `Nelder-Mead` | none | default; adaptive simplex; many evaluations |
 | `COBYLA`      | none | linear trust-region model |
 | `COBYQA`      | none | quadratic trust-region model |
 
 All six respect the parameter bounds and receive the same stopping
-intent in their own option names (at most 5000 iterations and 100 000
-loss evaluations, loss tolerance 1e-12 eV^2, gradient and step
-tolerances 1e-8).  Any other name is refused before any data is loaded:
-`BFGS` and `CG` ignore bounds, `Newton-CG`, `trust-*` and `dogleg` need
-an analytic gradient, which `fit` does not provide, and scipy's bounded
-`Powell` returned points worse than ones it had itself evaluated on
-real fit losses.
+intent in their own option names (at most 5000 iterations -- 100 000
+for Nelder-Mead -- and 100 000 loss evaluations, loss tolerance 1e-12
+eV^2, gradient and step tolerances 1e-8).  Nelder-Mead stops on the step
+tolerance alone (a simplex ~1e-8 relative in every parameter): scipy's
+loss tolerance is absolute, so a fit whose minimum is not zero never
+met it and ran all 100 000 evaluations.  Any other name is refused
+before any data is loaded: `BFGS` and `CG` ignore bounds, `Newton-CG`,
+`trust-*` and `dogleg` need an analytic gradient, which `fit` does not
+provide, and scipy's bounded `Powell` returned points worse than ones
+it had itself evaluated on real fit losses.
 
-If `L-BFGS-B` stops early from a poor starting point -- it stalled at a
-loss of 14 on an LJ test where the others reached 1e-14 -- rerun with
-`Nelder-Mead` or `COBYQA`, which do not rely on a finite-difference
-gradient.
+`Nelder-Mead` is the default because it was the only method that
+reached the minimum (loss ~1e-14) on every real fit loss measured: SW Si
+from the DE result and from a 10-25% perturbed start, and the 19-variable
+GeSn SW fit.  `L-BFGS-B`, the former default, stopped at 6.6e-5, 2.3e-3
+and 1.9e4 on those (it also stalled at 14 on an LJ test where the others
+reached 1e-14): its finite-difference gradient and line search end early
+in narrow curved valleys and at points the loss scores as failed.  The
+price is evaluations: 800-1700 for 5 SW parameters, ~32 000 for 19.
+`COBYQA` is the next choice for a handful of parameters.
 
 ### Fitting a machine-learning potential
 

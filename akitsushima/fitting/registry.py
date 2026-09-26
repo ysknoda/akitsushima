@@ -236,7 +236,7 @@ _DEFAULT_FIT_CFG_LJ = {
     "use_de"       : False,
     "de_maxiter"   : 300,
     "de_popsize"   : 10,
-    "local_method" : "L-BFGS-B",
+    "local_method" : "Nelder-Mead",
     "val_fraction" : 0.2,
     "val_seed"     : 0,
     "initial_lj"   : {
@@ -292,7 +292,7 @@ _DEFAULT_FIT_CFG_MIE = {
     "use_de"       : False,
     "de_maxiter"   : 300,
     "de_popsize"   : 10,
-    "local_method" : "L-BFGS-B",
+    "local_method" : "Nelder-Mead",
     "val_fraction" : 0.2,
     "val_seed"     : 0,
     "initial_mie"  : {
@@ -343,7 +343,7 @@ _DEFAULT_FIT_CFG_MORSE = {
     "use_de"       : False,
     "de_maxiter"   : 300,
     "de_popsize"   : 10,
-    "local_method" : "L-BFGS-B",
+    "local_method" : "Nelder-Mead",
     "val_fraction" : 0.2,
     "val_seed"     : 0,
     "initial_morse": {
@@ -394,7 +394,7 @@ _DEFAULT_FIT_CFG_BORNMAYER = {
     "use_de"       : False,
     "de_maxiter"   : 300,
     "de_popsize"   : 10,
-    "local_method" : "L-BFGS-B",
+    "local_method" : "Nelder-Mead",
     "val_fraction" : 0.2,
     "val_seed"     : 0,
     "initial_bornmayer": {
@@ -455,7 +455,7 @@ _DEFAULT_FIT_CFG_YUKAWA = {
     "use_de"       : False,
     "de_maxiter"   : 300,
     "de_popsize"   : 10,
-    "local_method" : "L-BFGS-B",
+    "local_method" : "Nelder-Mead",
     "val_fraction" : 0.2,
     "val_seed"     : 0,
     # dict of "Sp1-Sp2": {"A": <eV.A>}. A ~ k_e.q_i.q_j (k_e = 14.3996
@@ -514,7 +514,7 @@ _DEFAULT_FIT_CFG_SW = {
     "use_de"       : True,
     "de_maxiter"   : 500,
     "de_popsize"   : 15,
-    "local_method" : "L-BFGS-B",
+    "local_method" : "Nelder-Mead",
     "val_fraction" : 0.2,
     "val_seed"     : 0,
     # Keys: species list + a FLAT parameter dict matching
@@ -609,7 +609,7 @@ _DEFAULT_FIT_CFG_TERSOFF = {
     "use_de"       : True,
     "de_maxiter"   : 500,
     "de_popsize"   : 15,
-    "local_method" : "L-BFGS-B",
+    "local_method" : "Nelder-Mead",
     "val_fraction" : 0.2,
     "val_seed"     : 0,
     # Standard Tersoff parameters for C (Tersoff 1988); a FLAT dict, not

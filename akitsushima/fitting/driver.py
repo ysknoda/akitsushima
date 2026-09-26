@@ -41,6 +41,7 @@ __all__ = [
     "parity_plot_all",
     "fit_potential",
     "LOCAL_METHOD_OPTIONS",
+    "DEFAULT_LOCAL_METHOD",
     "resolve_local_method",
     "print_fit_result",
     "evaluate_diagnostics_generic",
@@ -466,14 +467,45 @@ def parity_plot_all(train_sc  : ScoreCard,
 # the worst LJ start, L-BFGS-B stalled at 14.2 while TNC, SLSQP,
 # Nelder-Mead, COBYLA and COBYQA all reached 1e-14 or below; and on the
 # GeSn problem adaptive Nelder-Mead was the most accurate, 5e-19.)
+# Default local method: Nelder-Mead (adaptive), since 2026-09-26.
+# L-BFGS-B, the former default, works from a finite-difference gradient
+# and stopped far from the answer on three real fit losses where the loss
+# at the reference parameters is ~1e-14 (measured 2026-09-26, scipy
+# 1.17.1; loss after the local step, loss evaluations in brackets):
+#
+#                    Si SW from DE   Si SW from x0   GeSn SW (19 var) from x0
+#   L-BFGS-B         6.6e-5 [19]     2.3e-3 [559]    1.9e+4 [61]  (no step)
+#   Nelder-Mead      7.2e-15 [827]   7.2e-15 [1660]  2.7e-14 [31721]
+#   TNC              2.8e-5 [247]    0.50 [1117]     not finished in 100 min
+#   SLSQP            3.6e-6 [4699]   3.2e+5 [7] (no step)  7.5e-7 [7765]
+#   COBYQA           1.7e-13 [1219]  4.9e-14 [4043]  1.1e-7 [100 001] (maxfev)
+#
+# L-BFGS-B stops after one line search in narrow curved valleys
+# ("relative reduction <= factr*epsmch" with |g| ~ 8), and on GeSn its
+# first trial step reaches a cutoff the training cells cannot host, which
+# the loss scores as a failed evaluation (1e30) and ends the search.
+# Nelder-Mead needs no gradient and treats such points as merely bad.
+# Its maxiter is 100 000, the same as maxfev: at 5000 it stopped GeSn at
+# 3.2e-3 on the iteration limit.  It costs more evaluations (17 min for
+# GeSn), which is the price of reaching the minimum.
+DEFAULT_LOCAL_METHOD = "Nelder-Mead"
+
 LOCAL_METHOD_OPTIONS = {
     "L-BFGS-B":    {"maxiter": 5000, "maxfun": 100_000, "ftol": 1e-12, "gtol": 1e-8},
     "TNC":         {"maxfun": 100_000, "ftol": 1e-12, "gtol": 1e-8},
     "SLSQP":       {"maxiter": 5000, "ftol": 1e-12},
     # adaptive: dimension-dependent simplex coefficients (Gao & Han 2012);
     # the fixed textbook ones degrade badly beyond a handful of variables.
-    "Nelder-Mead": {"maxiter": 5000, "maxfev": 100_000, "fatol": 1e-12,
-                    "xatol": 1e-8, "adaptive": True},
+    # scipy stops only when BOTH the simplex's x spread <= xatol AND its
+    # loss spread <= fatol, and fatol is absolute.  With fatol = 1e-12 a
+    # fit whose minimum is not ~0 (any real data) never met it: the Si SW
+    # control (minimum 2.12) ran the full 100 000 evaluations, ~50 min,
+    # to 2.121594, a point reached in 1758 evaluations with fatol off.
+    # On the three zero-residual cases above fatol off changes nothing
+    # (same loss, same evaluation count), so the stop is xatol alone: a
+    # simplex 1e-8 wide in log(value), ~1e-8 relative in each parameter.
+    "Nelder-Mead": {"maxiter": 100_000, "maxfev": 100_000,
+                    "fatol": float("inf"), "xatol": 1e-8, "adaptive": True},
     # COBYLA's maxiter counts loss evaluations, not iterations.
     "COBYLA":      {"maxiter": 100_000, "tol": 1e-10},
     "COBYQA":      {"maxiter": 5000, "maxfev": 100_000, "final_tr_radius": 1e-10},
@@ -511,7 +543,7 @@ def fit_potential(param_set      : FittableParameterSet,
                   r_cut          : float,
                   ewald_alpha    : Optional[float] = None,
                   weights        : Optional[dict]  = None,
-                  method         : str   = "L-BFGS-B",
+                  method         : str   = DEFAULT_LOCAL_METHOD,
                   use_de         : bool  = False,
                   de_maxiter     : int   = 500,
                   de_popsize     : int   = 15,
@@ -577,7 +609,7 @@ def fit_potential(param_set      : FittableParameterSet,
                      - F term:  w_F x r_0^2 x mean(deltaF^2)       [eV^2]
                      - S term:  w_S x (V_s epsilon_0)^2 x mean(deltasigma^2) [eV^2]
     method         : local optimiser, one of LOCAL_METHOD_OPTIONS
-                     (default 'L-BFGS-B'; case-insensitive).  Checked
+                     (default 'Nelder-Mead'; case-insensitive).  Checked
                      BEFORE any loss evaluation, so a bad name fails in
                      seconds instead of after a long DE run.
     use_de         : run Differential Evolution before local refinement.

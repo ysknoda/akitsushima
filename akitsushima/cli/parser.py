@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
                 "                             templates set true for sw/tersoff\n"
                 "  local_method: NAME         bounded local refinement, always run:\n"
                 "                             " + ", ".join(LOCAL_METHOD_OPTIONS) + "\n"
-                "                             (default L-BFGS-B; case-insensitive)\n"
+                "                             (default Nelder-Mead; case-insensitive)\n"
                 "  BFGS, CG, Newton-CG, trust-*, dogleg and Powell are refused: they\n"
                 "  ignore bounds, need an analytic gradient (fit supplies none), or\n"
                 "  (Powell, with bounds) returned worse points than they had found."))
