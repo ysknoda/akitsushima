@@ -206,6 +206,12 @@ def test_template_runs_as_shipped(key, tmp_path, monkeypatch):
     yaml_path = tmp_path / f"{key}.yaml"
     yaml_path.write_text(yaml.safe_dump(cfg))
 
+    if key == "osmc":
+        # disabled until rebuilt (ADR-0003 T7, O2): the shipped template
+        # must reach the refusal, not an earlier error
+        with pytest.raises(ValueError, match="disabled"):
+            _DISPATCH[_COMMAND[key]](_ns(yaml_path))
+        return
     rc = _DISPATCH[_COMMAND[key]](_ns(yaml_path))
     assert rc == 0, f"template {key!r} returned {rc}"
 

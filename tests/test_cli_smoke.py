@@ -359,8 +359,9 @@ def test_cmd_tsa_smoke(tmp_path):
     assert cmd_tsa(_ns(yaml_path)) == 0
 
 
-def test_cmd_osmc_smoke(tmp_path):
-    """S7 regression coverage at the CLI level."""
+def test_cmd_osmc_is_disabled(tmp_path):
+    """osmc refuses to run until redesigned (ADR-0003 T7, O2): its lambda
+    dynamics does not sample the muVT ensemble.  (Was the S7 smoke test.)"""
     rng = np.random.default_rng(0)
     positions = rng.uniform(0, 15.0, size=(6, 3))
     poscar = tmp_path / "POSCAR"
@@ -378,7 +379,8 @@ def test_cmd_osmc_smoke(tmp_path):
     }
     yaml_path = tmp_path / "osmc.yaml"
     _write_yaml(yaml_path, cfg)
-    assert cmd_osmc(_ns(yaml_path)) == 0
+    with pytest.raises(ValueError, match="disabled"):
+        cmd_osmc(_ns(yaml_path))
 
 
 def test_cmd_osmc_smoke_accepts_deprecated_mu_ex_yaml_key(tmp_path):
@@ -401,8 +403,10 @@ def test_cmd_osmc_smoke_accepts_deprecated_mu_ex_yaml_key(tmp_path):
     }
     yaml_path = tmp_path / "osmc.yaml"
     _write_yaml(yaml_path, cfg)
+    # the key is still read (and warned about) before osmc refuses to run
     with pytest.warns(UserWarning, match="mu_ex"):
-        assert cmd_osmc(_ns(yaml_path)) == 0
+        with pytest.raises(ValueError, match="disabled"):
+            cmd_osmc(_ns(yaml_path))
 
 
 def test_cmd_esm_smoke(tmp_path):

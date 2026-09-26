@@ -1170,7 +1170,22 @@ class OSMMCSimulation(GCMCMDSimulation):
                  insertion_mode : str   = 'random',
                  n_probe        : int   = 20,
                  lambda_probe   : float = 0.1,
+                 _allow_unverified: bool = False,
                  **kwargs):
+
+        # Refused until redesigned (ADR-0003 T7, O2; decided 2026-09-26):
+        # the lambda dynamics does not sample the muVT ensemble -- a
+        # deletion removes a random atom with no energy criterion and the
+        # lambda force has no translational term, so with O1 fixed N grows
+        # without bound (ideal gas: 30 -> 710 in 713 cycles, exact 40).
+        # The planned replacement is CFCMC (Shi & Maginn, J. Chem. Theory
+        # Comput. 3, 1451 (2007)).  _allow_unverified is for tests of the
+        # present code only.
+        if not _allow_unverified:
+            raise ValueError(
+                "OSMMCSimulation (osmc) is disabled: its lambda dynamics does "
+                "not sample the muVT ensemble (ADR-0003 T7, finding O2; N "
+                "grows without bound).  Use gcmc, which passes the NIST check.")
 
         kwargs.setdefault('cavity_bias',     False)
         kwargs.setdefault('energy_bias_del', False)
@@ -1668,7 +1683,11 @@ class OSMMCSimulation(GCMCMDSimulation):
 
         elif self._lam <= 0.0:
             self._lam     = 0.0
-            self._lam_dot = -abs(self._lam_dot)   # elastic wall (upward)
+            # Elastic wall, upward.  Bug-fix note (ADR-0003 T7, O1): this
+            # was -abs(), which kept lambda moving down, so it stayed at 0,
+            # hit this branch every step and deleted the candidate each
+            # time (N -> 0.74 against the NIST 41.9).
+            self._lam_dot = abs(self._lam_dot)
             self._n_lam_reflect += 1
 
             if self._del_candidate >= 0:

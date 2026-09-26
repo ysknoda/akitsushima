@@ -349,7 +349,7 @@ passed.
 | T5 neb/tsa | PASS all 8 checks (criterion 0 added: endpoint a minimum), 63 and 215 atoms, with the corrected SW (ADR-0006) and endpoints rebuilt 2026-09-26 (C3v vacancy, E_f 2.835 / 2.694 eV). Barrier 0.517 / 0.513 eV; imaginary mode -178.09 vs -178.10 and -171.80 vs -171.81 cm^-1 (independent Hessian); IRC ends within 0.004 A of the endpoints. Literature, for information: 0.43 eV for SW from vacancy vs split-vacancy formation energies (Maroudas & Brown, PRB 47, 15562 (1993), as quoted by El-Mellouhi et al., arXiv cond-mat/0308289, sec. IV.2.1; the original not re-read). Before ADR-0006 (three-body doubled): 0.949 / 0.909 eV | `example/neb/check_neb_tsa.py` |
 | T6 esm | FAIL (findings E1-E3) | `example/esm/check_esm.py`; reference Ewald self-tested on the rock-salt Madelung constant (1.747565) |
 | T7 gcmc | PASS after fix G1 (5000 cycles, last 80%): ideal gas <N> = 39.57 +/- 0.25 (exact 40), Var(N)/<N> = 0.984; NIST TMMC vapour (T* = 0.90, p/p_sat = 0.80, LFS 2.5 sigma, V = 512 sigma^3) <N> = 42.88 +/- 1.41 vs 41.90 (ideal gas at the same z: 22.5). Before G1: 18.8 | `example/gcmc/check_gcmc.py`; NIST table cached in `references/nist_srsw/vaporEOS_rc25LFS.csv` (all 100 rows x 6 temperatures; the page quotes no uncertainties) |
-| T7 osmc | FAIL: <N> = 0.74 +/- 0.63 against 41.90; gcmc vs osmc differ by 42.1 +/- 1.5 (findings O1-O2) | |
+| T7 osmc | FAIL: <N> = 0.74 +/- 0.63 against 41.90; gcmc vs osmc differ by 42.1 +/- 1.5 (findings O1-O2).  After fixing O1 (2026-09-26) it fails the other way: N climbs without bound -- NIST point 30 -> 82 -> 138 over 1500 cycles (NIST 41.9); ideal gas 30 -> 710 in 713 cycles, one insertion per cycle and no deletion (exact 40).  O2 confirmed | `example/gcmc/check_osmc_o1.py` |
 | T8 fit | LJ, Morse, Born-Mayer, Buckingham PASS (V0, B0, E0 within 6e-4; Buckingham after fix F5); Tersoff FAIL (finding FT1). Tersoff re-judged 2026-09-26 with the Nelder-Mead default (ADR-0006): the local step alone from +10% reaches loss 1.5e-4 and E0 / V0 / B0 within 3e-6 / 3e-6 / 1.6e-4: PASS (beta, c, d stay off by 59-98% -- the (beta zeta)^n and c/d degeneracy E, F, S cannot resolve; the other six parameters within 0.5%).  With the template's DE first (as check_fit_others runs it) DE settles in another basin (loss 210, beta at its 1e-10 bound) and the fit ends at 19.8, B0 -2.0%: FAIL -- the global search, not the local one, is what fails | `example/fit/others/check_fit_others.py`, `example/fit/others/tersoff_nm_local/` |
 | T9 kappa | After fixes K1-K3, 5 seeds x 1 ns, HCACFs averaged: 50 K 0.302 +/- 0.036 vs 0.323 (-6.6%) PASS; 80 K 0.141 +/- 0.013 vs 0.162 (-13.3%) PASS; 20 K 0.928 +/- 0.116 vs 1.216 (-23.7%, 2.5 SE) FAIL -- the seed-to-seed SE alone is 12.5% at 20 K (tau_ac,lg = 8 ps against 1 ns runs; the paper used 4.3 ns x 5), so the +/-15% bar is not resolvable there; the running integral at tau_max/2 is 1.13 (-7%). Isotropy PASS at all T. NVE E_tot range <= 0.14% (paper 0.005%; plain truncation steps). Before K2/K3 all five seeds were identical (0.837 / 0.281 / 0.105) | `example/kappa/check_kappa.py`, `run_kappa.py` |
 
@@ -404,11 +404,17 @@ passed.
   Also, the `relax:` section relaxes on ESM electrostatics alone (no
   Buckingham short range): ions collapse. Forces are consistent with ESM's own
   energy (finite differences, 3e-3 eV/A).
-- **O1-O2** osmc: O1 the lambda <= 0 wall sets lambda-dot negative (its comment
-  says upward), so lambda sticks at 0 and deletes repeatedly (N -> 0); O2 the
+- **O1-O2** osmc: O1 (FIXED 2026-09-26, regression test
+  `test_osmmc_lambda_wall_at_zero_reflects_upward`) the lambda <= 0 wall set
+  lambda-dot negative (its comment says upward), so lambda stuck at 0 and
+  deleted repeatedly (N -> 0); O2 (CONFIRMED by the T7 re-run: N grows
+  without bound once O1 is fixed; also, a deletion removes a random real
+  atom with no energy criterion at all) the
   lambda force -dV/dlambda - mu has no ideal-gas translational term, so even
-  with O1 fixed it cannot reproduce <N>(mu) of the muVT ensemble (SUSPECTED,
-  design-level).
+  with O1 fixed it cannot reproduce <N>(mu) of the muVT ensemble
+  (design-level).  Decided 2026-09-26: osmc refuses to run (a start-up
+  error pointing to gcmc) until it is rebuilt as continuous fractional
+  component MC (Shi & Maginn, J. Chem. Theory Comput. 3, 1451 (2007)).
 - **FT1** fit Tersoff: from +10% the fit does not recover the potential (B0 off
   by 4.6-5.1%, beta collapses to its lower bound 0); from the true parameters
   it stays put (loss 2e-11), so the loss is right and the optimisation is

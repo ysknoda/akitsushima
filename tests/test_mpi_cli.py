@@ -1,6 +1,7 @@
 """The MPI-aware CLI commands must give the same answer on 1, 2 and 4 ranks.
 
-ADR-0003, T1.  ``relax``, ``md`` (NVT and NPT), ``gcmc`` and ``osmc`` are
+ADR-0003, T1.  ``relax``, ``md`` (NVT and NPT) and ``gcmc`` (``osmc`` is
+disabled, ADR-0003 T7) are
 each run end-to-end under ``mpirun -np 1/2/4`` through ``python -m
 akitsushima``, from their shipped templates with only the step counts
 shrunk, and the files they write are compared.
@@ -76,7 +77,7 @@ _CASES = {
         "si",
     ),
     "gcmc": ("gcmc", "gcmc", "gcmc", {"n_cycles": 10}, "ar"),
-    "osmc": ("osmc", "osmc", "osmc", {"n_cycles": 10}, "ar"),
+    # osmc is disabled until rebuilt (ADR-0003 T7, O2)
 }
 
 # case -> (log files compared to 1e-5, structure files compared at 1e-6 A)
@@ -85,7 +86,6 @@ _FILES = {
     "nvt": (["thermo.log"], ["POSCAR_final_MD"]),
     "npt": (["thermo.log"], ["POSCAR_final_NPT"]),
     "gcmc": (["N_vs_cycle.dat", "gcmc_md_thermo.log"], ["POSCAR_gcmc_final"]),
-    "osmc": (["N_vs_cycle.dat", "gcmc_md_thermo.log"], ["POSCAR_gcmc_final"]),
 }
 
 

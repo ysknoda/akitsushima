@@ -276,7 +276,7 @@ Which solvers take an MLIP (ADR-0007):
 | `relax`, `md`, `neb`, `tsa`, `phonon` | yes | yes | need E, F, S only |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
 | `kappa` | refused | yes | exact heat flux from the site terms |
-| `osmc` | refused | refused | ghost coupling is soft-core LJ; osmc fails its muVT check (ADR-0003 T7) |
+| `osmc` | refused | refused | osmc is disabled for every potential: its lambda dynamics does not sample the muVT ensemble (ADR-0003 T7, O2); use `gcmc` |
 | `esm` | refused | refused | electrostatics only |
 
 A refusal is an error at start-up, not a silent approximation.  The heat

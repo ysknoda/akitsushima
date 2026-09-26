@@ -42,7 +42,9 @@ approximation applied to Stillinger-Weber, Tersoff and EAM.
    Jacobians).  `kappa` uses it for every term that has one; only a Coulomb
    term keeps the centre-of-mass approximation, with the warning.
 5. **osmc** refuses an MLIP until its own muVT failure (ADR-0003 T7,
-   O1-O2) is settled.
+   O1-O2) is settled.  Since 2026-09-26 it refuses to run at all: with O1
+   fixed, O2 was confirmed (N grows without bound), and osmc is to be
+   rebuilt as CFCMC (Shi & Maginn, J. Chem. Theory Comput. 3, 1451 (2007)).
 6. **Verification.** Internal consistency through the CLI (tests), and an
    MLIP trained on the reference potential against that potential through
    the same solver (`example/mlip/adr0007/verify_solvers.py`), tolerances

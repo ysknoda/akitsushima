@@ -1067,6 +1067,7 @@ def test_osmmc_single_species_short_run_smoke():
 
     sim = OSMMCSimulation(
         lattice, positions, atom_types, fn,
+        _allow_unverified=True,
         temperature=120.0, mu=-0.05, species="Ar", mass=39.948,
         m_lam=50.0, sc_alpha=0.5, sc_n=4,
         timestep=1.0, n_cycles=30, md_steps_per_cycle=5,
@@ -1095,6 +1096,7 @@ def test_osmmc_multi_species_construction():
 
     sim = OSMMCSimulation(
         lattice, positions, atom_types, fn,
+        _allow_unverified=True,
         temperature=500.0,
         species_params={
             "Li": SpeciesParams(mu=-0.12, mass=6.941, m_lam=7.0,
@@ -1203,6 +1205,7 @@ def test_osmmc_mu_ex_kwarg_still_works_and_warns(tmp_path):
     with pytest.warns(UserWarning, match="mu_ex"):
         sim = OSMMCSimulation(
             lattice, positions, ["Ar"] * 6, fn, temperature=120.0,
+            _allow_unverified=True,
             mu_ex=-0.05, species="Ar", mass=39.948, verbose=False,
             output_dir=str(tmp_path))
     assert sim.mu == -0.05
@@ -1227,6 +1230,7 @@ def test_osmmc_species_stats_carries_deprecated_mu_ex_duplicate(tmp_path):
 
     sim = OSMMCSimulation(
         lattice, positions, atom_types, fn, temperature=500.0,
+        _allow_unverified=True,
         species_params={
             "Li": SpeciesParams(mu=-0.12, mass=6.941, m_lam=7.0),
             "O":  SpeciesParams(mu=-0.35, mass=15.999, m_lam=16.0),
@@ -2406,3 +2410,23 @@ def test_kappa_seed_changes_the_trajectory(tmp_path):
                         output_dir=str(tmp_path / f"s{seed}"), verbose=False)
         J.append(np.asarray(out["J_series"]))
     assert not np.allclose(J[0], J[1])
+
+
+def test_osmmc_lambda_wall_at_zero_reflects_upward(tmp_path):
+    """ADR-0003 T7, O1: the lambda <= 0 wall set lambda-dot to -|.|, so
+    lambda stayed at 0 and every step completed a deletion (N -> 0).  It
+    must reflect upward, and a deletion needs a candidate."""
+    lattice = np.eye(3) * 15.0
+    positions = np.random.default_rng(1).uniform(0, 15.0, size=(6, 3))
+    engine = PotentialEngine().add(
+        LennardJonesPotential({frozenset({"Ar"}): {"epsilon": 0.0103, "sigma": 3.405}},
+                              r_cut=6.0, shift=True))
+    sim = OSMMCSimulation(lattice, positions, ["Ar"] * 6, make_force_fn(engine),
+                          _allow_unverified=True,
+                          temperature=120.0, mu=-0.05, species="Ar", mass=39.948,
+                          n_cycles=1, seed=1, verbose=False,
+                          output_dir=str(tmp_path))
+    sim._lam, sim._lam_dot, sim._del_candidate = -0.01, -0.3, -1
+    sim._handle_lambda_boundary()
+    assert sim._lam == 0.0 and sim._lam_dot == pytest.approx(0.3)
+    assert sim.N == 6
