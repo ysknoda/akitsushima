@@ -323,7 +323,7 @@ class ESMCalculator:
                                           z components set to 0 for BC1.
         """
         lattice = np.asarray(lattice, dtype=float)
-        positions = np.asarray(positions, dtype=float)
+        positions = self._to_esm_frame(lattice, positions)
 
         # Update geometry (rebuilds grids if lattice changed)
         if not np.allclose(lattice, self.lattice):
@@ -347,6 +347,29 @@ class ESMCalculator:
         # update_geometry is called explicitly.
 
         return self._compute_esm(lattice, positions)
+
+    def _to_esm_frame(self, lattice, positions):
+        """Map z into [-Lz/2, Lz/2) (ADR-0008, decision 3).
+
+        Solvers wrap fractional coordinates into [0, 1); ESM's grid and
+        boundaries are centred on z = 0, as in Quantum ESPRESSO: the slab
+        sits around fractional z = 0 and the medium starts at z = +/- Lz/2.
+        z -> z - Lz round(z / Lz) moves each atom by a lattice vector, so
+        forces are unchanged.  An atom closer than 4 sigma to a boundary
+        is refused: its Gaussian would wrap across the medium, and near a
+        metal the point-charge complement of its image would matter."""
+        positions = np.asarray(positions, dtype=float).copy()
+        Lz = float(lattice[2, 2])
+        positions[:, 2] -= Lz * np.round(positions[:, 2] / Lz)
+        margin = 4.0 * self.sigma
+        if positions.size and np.max(np.abs(positions[:, 2])) > Lz / 2 - margin:
+            k = int(np.argmax(np.abs(positions[:, 2])))
+            raise ValueError(
+                f"ESM: atom {k} is at z = {positions[k, 2]:+.3f} A, within "
+                f"4 sigma = {margin:.2f} A of the boundary at +/- Lz/2 = "
+                f"{Lz / 2:.2f} A.  Centre the slab at fractional z = 0 (the "
+                f"medium starts at fractional z = 1/2) and keep a vacuum gap.")
+        return positions
 
     def update_geometry(self,
                          lattice: np.ndarray,
@@ -616,6 +639,13 @@ class ESMCalculator:
         rho_z0 = rho_Gz[0, 0, :].real
         V_z0 = self._solve_gpar0(rho_z0, z_grid, dz, Lz, bc)
         V_Gz[0, 0, :] = V_z0 * K
+        # The applied field's own potential, in the solver's gauge: the
+        # energy counts it once (not halved like the ions' mutual term).
+        if self.external_field != 0.0:
+            self._V_ext0 = (V_z0 - self._solve_gpar0(rho_z0, z_grid, dz, Lz, bc,
+                                                     field_on=False)) * K
+        else:
+            self._V_ext0 = np.zeros_like(V_z0)
 
         return V_Gz
 
@@ -680,6 +710,7 @@ class ESMCalculator:
                       dz: float,
                       Lz: float,
                       bc: str,
+                      field_on: bool = True,
                       ) -> np.ndarray:
         """
         Solve the 1-D Poisson equation for the G|| = 0 component.
@@ -722,12 +753,12 @@ class ESMCalculator:
         quadrature. The (much smaller) G||!=0 contributions do not go
         through this cumulative integration and were not affected.
         """
-        Nz = len(rho_z)
         # The field here is in the Gaussian units of V_z (e/A^2, multiplied
         # by K = e^2/(4 pi eps0) = 14.40 eV A later); the user's field is
         # in V/A.  Bug-fix note (ADR-0003 T6, E2): it was added unconverted,
         # so the applied field came out K = 14.40 times too strong.
-        E_ext = self.external_field / _ESM_EV_PER_E2_ANG    # [e/A^2]
+        E_ext = (self.external_field / _ESM_EV_PER_E2_ANG      # [e/A^2]
+                 if field_on else 0.0)
 
         # First integration: E_z(z) = 4 pi int_{z_min}^{z} rho dz' + C1
         # E = -dV/dz and d2V/dz2 = -4 pi rho give dE/dz = +4 pi rho.
@@ -820,6 +851,13 @@ class ESMCalculator:
         E_self = float(np.sum(self._charges**2)) / (
             2.0 * sig * np.sqrt(np.pi)) * _ESM_EV_PER_E2_ANG
 
+        # (1/2) int rho V counted the applied field's potential with a
+        # factor 1/2 as well; the interaction with an external potential
+        # is int rho V_ext, so add the other half (ADR-0008).
+        V_ext0 = getattr(self, "_V_ext0", None)
+        if V_ext0 is not None:
+            E_int += 0.5 * area * float(np.sum(rho_Gz[0, 0, :].real * V_ext0)) * dz
+
         return E_int - E_self
 
     # ------------------------------------------------------------------ #
@@ -891,85 +929,38 @@ class ESMCalculator:
         identical forces to the original per-atom loop on every existing
         ESM test structure.
         """
+        # Energy-consistent forces (ADR-0008).  With E = (1/2) A sum_G int
+        # rho* V dz and the atom's density rho_I(G, z) = (q_I / A) f(G)
+        # exp(-i G.R_I) g(z - Z_I) as built in _build_charge_density_2d,
+        #     F_I = -A sum_G int Re[(d rho_I* / d R_I) V] dz,
+        # the Gaussian-weighted field at the atom: its own field cancels
+        # exactly, and the z derivative is that of the sampled Gaussian, so
+        # these are the gradient of the discretised energy.  Bug-fix note:
+        # the field used to be interpolated trilinearly at the atom centre
+        # from the total potential, own Gaussian included; that self-field
+        # does not vanish on a grid, so the forces depended on the grid and
+        # did not sum to zero (1.7 eV/A off in x for a +-1 quartet, 96 x 512
+        # grid; only z-aligned pairs had been checked).
         dz = Lz / Nz
-
-        # Pre-compute gradient potentials in G-space
-        dV_dx_Gz = 1j * GX[:, :, None] * V_Gz
-        dV_dy_Gz = 1j * GY[:, :, None] * V_Gz
-        dV_dz_Gz = (np.roll(V_Gz, -1, axis=2)
-                    - np.roll(V_Gz, +1, axis=2)) / (2.0 * dz)
-
-        # Real-space gradient fields (Nx, Ny, Nz) -- see bug-fix note (b)
-        NxNy = Nx * Ny
-        dV_dx = NxNy * np.fft.ifft2(dV_dx_Gz, axes=(0, 1)).real
-        dV_dy = NxNy * np.fft.ifft2(dV_dy_Gz, axes=(0, 1)).real
-        dV_dz = NxNy * np.fft.ifft2(dV_dz_Gz, axes=(0, 1)).real
-
-        dx = Lx / Nx
-        dy = Ly / Ny
-
-        rx = positions[:, 0]
-        ry = positions[:, 1]
-        rz = positions[:, 2]
-
-        out_of_range = (rz < -Lz / 2.0) | (rz >= Lz / 2.0)
-        if np.any(out_of_range):
-            I = int(np.argmax(out_of_range))   # first offending atom, as the old loop would hit
-            raise ValueError(
-                f"ESMCalculator: atom {I} has z={rz[I]:.4f} A outside the "
-                f"cell's open/metal-boundary z-range [{-Lz / 2:.4f}, "
-                f"{Lz / 2:.4f}) A. This boundary is not periodic in z "
-                "(unlike x/y), so this is not a wrapping issue -- "
-                "increase the vacuum padding or check for a diverging "
-                "MD/relax step or an out-of-bounds GCMC insertion.")
-
-        # Fractional grid coordinates (0-based, periodic in xy)
-        fx = (rx / dx) % Nx
-        fy = (ry / dy) % Ny
-        fz = (rz + Lz / 2) / dz   # in [0, Nz) -- checked above, no wrap needed
-
-        fx_floor = fx.astype(int)   # fx/fy/fz >= 0 always (see the % above), so
-        fy_floor = fy.astype(int)   # truncation == floor, matching the original
-        fz_floor = fz.astype(int)   # scalar int(...) exactly.
-
-        # Lower-corner indices
-        ix0 = fx_floor % Nx
-        ix1 = (ix0 + 1) % Nx
-        iy0 = fy_floor % Ny
-        iy1 = (iy0 + 1) % Ny
-        iz0 = fz_floor % Nz
-        iz1 = (iz0 + 1) % Nz
-
-        # Fractional offsets [0, 1)
-        tx = fx - fx_floor
-        ty = fy - fy_floor
-        tz = fz - fz_floor
-
-        # Trilinear weights (8 corners), each (N,)
-        w000 = (1 - tx) * (1 - ty) * (1 - tz)
-        w001 = (1 - tx) * (1 - ty) * tz
-        w010 = (1 - tx) * ty * (1 - tz)
-        w011 = (1 - tx) * ty * tz
-        w100 = tx * (1 - ty) * (1 - tz)
-        w101 = tx * (1 - ty) * tz
-        w110 = tx * ty * (1 - tz)
-        w111 = tx * ty * tz
-
-        forces = np.zeros((len(charges), 3), dtype=float)
-        for grad, field in [(0, dV_dx), (1, dV_dy), (2, dV_dz)]:
-            # Fancy indexing: field[ix0, iy0, iz0] gathers one value per
-            # atom (ix0 etc. are (N,) arrays), same as calling
-            # field[ix0[I], iy0[I], iz0[I]] for each I in the old loop.
-            val = (w000 * field[ix0, iy0, iz0]
-                   + w001 * field[ix0, iy0, iz1]
-                   + w010 * field[ix0, iy1, iz0]
-                   + w011 * field[ix0, iy1, iz1]
-                   + w100 * field[ix1, iy0, iz0]
-                   + w101 * field[ix1, iy0, iz1]
-                   + w110 * field[ix1, iy1, iz0]
-                   + w111 * field[ix1, iy1, iz1])
-            forces[:, grad] = -charges * val
-
+        sig = self.sigma
+        z_g = self._z_grid
+        Nxy = Nx * Ny
+        Vg = V_Gz.reshape(Nxy, Nz)                                  # (G, z)
+        fform = np.exp(-0.5 * (GX**2 + GY**2) * sig**2).reshape(Nxy)
+        gx, gy = GX.reshape(Nxy), GY.reshape(Nxy)
+        dzm = z_g[None, :] - positions[:, 2][:, None]               # (N, z)
+        dzm -= Lz * np.round(dzm / Lz)
+        g = np.exp(-0.5 * dzm**2 / sig**2) / (sig * np.sqrt(2.0 * np.pi))
+        dg = g * dzm / sig**2                                       # d g / d Z
+        W = dz * (g @ Vg.T)                                         # (N, G)
+        U = dz * (dg @ Vg.T)
+        ph = np.exp(1j * (positions[:, 0][:, None] * gx[None, :]
+                          + positions[:, 1][:, None] * gy[None, :]))  # (N, G)
+        a = fform[None, :] * ph
+        forces = np.empty((len(charges), 3))
+        forces[:, 0] = -charges * np.sum((1j * gx[None, :] * a * W).real, axis=1)
+        forces[:, 1] = -charges * np.sum((1j * gy[None, :] * a * W).real, axis=1)
+        forces[:, 2] = -charges * np.sum((a * U).real, axis=1)
         return forces
 
     # ------------------------------------------------------------------ #
@@ -986,63 +977,83 @@ class ESMCalculator:
                          dz: float,
                          ) -> np.ndarray:
         """
-        Maxwell stress tensor (xy components physically meaningful).
+        In-plane stress, the strain derivative of this class's energy
+        (ADR-0008); z rows and columns are zero (Lz places the boundaries,
+        so the cell is not strained along z with ESM).
 
-        sigma_alphabeta = -(1/V) int (dV/dr_alpha)(dV/dr_beta) / (4pi) d^3r
+        Under an in-plane strain at fixed fractional coordinates G.R is
+        unchanged; the density's 1/A factor and |G| (through the Gaussian
+        form factor exp(-|G|^2 sigma^2 / 2) and the kernel) change::
 
-        z components are set to zero for BC1 (open boundary).
+            sigma_ab = (1/V) [E_ion delta_ab + sum_{G != 0} (G_a G_b / |G|)
+                       (A/2) dz Re{rho* [(-1/|G| - 2 |G| sigma^2) V
+                                         + K (2 pi / |G|) dz dG_bc/d|G| rho]}]
 
-        Bug-fix note: same missing ``Nx*Ny`` normalisation as
-        :meth:`_compute_forces` (see that method's bug-fix note (b)) --
-        ``ifft2`` here converts the same unnormalised G-space field back to
-        real space. Fixed the same way, by multiplying each field
-        component by ``Nx*Ny`` (the stress is quadratic in the field, so
-        this alone restores the correct overall normalisation once each
-        component is individually correct -- no additional factor needed).
-
-        Returns
-        -------
-        stress : (3,3) [eV/A^3]
+        E_ion excludes the applied field (its energy does not depend on A).
+        Bug-fix note: this was a Maxwell-stress estimate, -(1/V) int
+        dV/dr_a dV/dr_b / 4 pi, which does not match the Gaussian energy
+        with its self terms removed (xx and yy off by 7x and 4x, xy of the
+        wrong sign, on a +-1 quartet against a strain finite difference).
         """
+        K = _ESM_EV_PER_E2_ANG
+        area = self._Lx * self._Ly
         V = abs(np.linalg.det(lattice))
-        Lx = self._Lx
-        Ly = self._Ly
-        NxNy = GX.shape[0] * GX.shape[1]
-
-        # Electric field components in G-space
-        Ex_Gz = -1j * GX[:, :, None] * V_Gz
-        Ey_Gz = -1j * GY[:, :, None] * V_Gz
-        Ez_Gz = -(np.roll(V_Gz, -1, axis=2)
-                  - np.roll(V_Gz, +1, axis=2)) / (2.0 * dz)
-
-        Ex = NxNy * np.fft.ifft2(Ex_Gz, axes=(0, 1)).real
-        Ey = NxNy * np.fft.ifft2(Ey_Gz, axes=(0, 1)).real
-        Ez = NxNy * np.fft.ifft2(Ez_Gz, axes=(0, 1)).real
-
+        Nz = rho_Gz.shape[2]
+        V_ion = V_Gz.copy()
+        V_ext0 = getattr(self, "_V_ext0", None)
+        if V_ext0 is not None:
+            V_ion[0, 0, :] -= V_ext0
+        E_ion = 0.5 * area * float(np.sum((np.conj(rho_Gz) * V_ion).real)) * dz
+        sig = self.sigma
+        z = self._z_grid
+        Lz_h = self._Lz / 2.0
+        gp = Gpar.ravel()
+        gx, gy = GX.ravel(), GY.ravel()
+        rho = rho_Gz.reshape(-1, Nz)
+        Vf = V_ion.reshape(-1, Nz)
+        S2 = np.zeros((2, 2))
+        _scale = 10 ** (8 - int(np.floor(np.log10(max(gp.max(), 1e-30)))) - 1)
+        keys = np.round(gp * _scale) / _scale
+        for k in np.unique(keys):
+            if k < 1e-10:
+                continue
+            idx = np.where(keys == k)[0]
+            dG = self._green_function_dmatrix(k, z[:, None], z[None, :],
+                                              self._bc, Lz_h)
+            r = rho[idx]                                      # (n, Nz)
+            t1 = (np.conj(r) * Vf[idx]).real.sum(axis=1) * (-1.0 / k - 2.0 * k * sig**2)
+            t2 = (np.conj(r) * (r @ dG.T)).real.sum(axis=1) * K * (2.0 * np.pi / k) * dz
+            w = 0.5 * area * dz * (t1 + t2) / k                # per G
+            S2[0, 0] += np.sum(w * gx[idx] ** 2)
+            S2[1, 1] += np.sum(w * gy[idx] ** 2)
+            S2[0, 1] += np.sum(w * gx[idx] * gy[idx])
+        S2[1, 0] = S2[0, 1]
         stress = np.zeros((3, 3))
-        # Maxwell stress: sigma_alphabeta = [E_alpha E_beta - (1/2)|E|^2 delta_{alphabeta}]
-        # In eV/A^3 units: prefactor = 1/(4pi x _ESM_EV_PER_E2_ANG)
-        pref = 1.0 / (4.0 * np.pi * _ESM_EV_PER_E2_ANG)
-        E2 = Ex**2 + Ey**2 + Ez**2
-
-        comps = [Ex, Ey, Ez]
-        for a in range(3):
-            for b in range(a, 3):
-                integrand = comps[a] * comps[b]
-                if a == b:
-                    integrand -= 0.5 * E2
-                # Integrate over real-space volume
-                val = pref * np.sum(integrand) * (Lx / self.n_grid_xy) * \
-                    (Ly / self.n_grid_xy) * dz / V
-                stress[a, b] = val
-                stress[b, a] = val
-
-        # For BC1: z components are not well-defined (open boundary)
-        if self._bc == '_vv':
-            stress[2, :] = 0.0
-            stress[:, 2] = 0.0
-
+        stress[:2, :2] = (E_ion * np.eye(2) + S2) / V
         return stress
+
+    @staticmethod
+    def _green_function_dmatrix(Gpar, z_row, z_col, bc, Lz_half):
+        """d/dG|| of _green_function_matrix (same bc codes)."""
+        Lz = 2.0 * Lz_half
+        absz = np.abs(z_row - z_col)
+        zs = z_row + z_col
+        e1 = np.exp(-Gpar * absz)
+        if bc == '_vv':
+            return -absz * e1
+        if bc == '_vm':
+            e3 = np.exp(-Gpar * (Lz - zs))
+            return -absz * e1 + (Lz - zs) * e3
+        if bc == '_mm':
+            e2 = np.exp(-Gpar * (2.0 * Lz - absz))
+            e3 = np.exp(-Gpar * (Lz - zs))
+            e4 = np.exp(-Gpar * (Lz + zs))
+            N = e1 + e2 - e3 - e4
+            dN = -absz * e1 - (2.0 * Lz - absz) * e2 + (Lz - zs) * e3 + (Lz + zs) * e4
+            D = 1.0 - np.exp(-2.0 * Gpar * Lz)
+            dD = 2.0 * Lz * np.exp(-2.0 * Gpar * Lz)
+            return (dN * D - N * dD) / D**2
+        raise ValueError(f"Unknown bc '{bc}'.")
 
     # ------------------------------------------------------------------ #
     #  Diagnostic / post-processing helpers                               #
@@ -1327,3 +1338,90 @@ class ESMCalculator:
             print(f"    Work function = {self.work_function():.3f} eV")
         if self._bc == '_vv':
             print(f"    Dipole corr.  = {self.surface_dipole_correction():.4f} eV")
+
+
+# ---------------------------------------------------------------------------
+#  Point-charge electrostatics with ESM boundary conditions (ADR-0008)
+# ---------------------------------------------------------------------------
+
+class ESMCoulomb:
+    """
+    Coulomb energy, forces and stress of POINT charges under ESM boundary
+    conditions -- the ESM counterpart of ``ewald_sum`` / ``PPPMSolver``.
+
+    ``ESMCalculator`` gives the interaction of Gaussian charges of width
+    sigma (self terms removed).  The point-charge result adds the
+    real-space complement, as in Ewald's split::
+
+        E = E_ESM(sigma) + K sum_{i<j} q_i q_j erfc(r_ij / 2 sigma) / r_ij
+
+    summed with the minimum image in x and y only (z is not periodic).
+    erfc(r / 2 sigma) < 1e-7 beyond r = 11 sigma, so the pair sum is cut
+    there, which must fit in the in-plane half-width.
+    """
+
+    kind = "esm"
+
+    def __init__(self, bc="bc1", sigma=0.5, n_grid_xy=64, n_grid_z=256,
+                 external_field=0.0):
+        self.bc, self.sigma = bc, float(sigma)
+        self.n_grid_xy, self.n_grid_z = int(n_grid_xy), int(n_grid_z)
+        self.external_field = float(external_field)
+        self.r_real = 11.0 * self.sigma
+        self._esm = None
+
+    def _calc(self, lattice, positions, atom_types, q):
+        if self._esm is None:
+            self._esm = ESMCalculator(
+                lattice, positions, atom_types, np.asarray(q, float), bc=self.bc,
+                sigma=self.sigma, n_grid_xy=self.n_grid_xy,
+                n_grid_z=self.n_grid_z, external_field=self.external_field)
+        elif len(q) != self._esm.N or not np.allclose(q, self._esm._charges):
+            self._esm.update_geometry(lattice, positions, atom_types,
+                                      charges=np.asarray(q, float))
+        return self._esm
+
+    def compute(self, lattice, positions, atom_types, q):
+        """E [eV], F (N, 3) [eV/A], S (3, 3) [eV/A^3] (compressive-positive)."""
+        lattice = np.asarray(lattice, float)
+        q = np.asarray(q, float)
+        esm = self._calc(lattice, positions, atom_types, q)
+        E, F, S = esm(lattice, positions, atom_types)
+        e2, f2, s2 = self._real_space(lattice, esm._to_esm_frame(lattice, positions), q)
+        return E + e2, F + f2, S + s2
+
+    def _real_space(self, lattice, pos, q):
+        from scipy.special import erfc
+
+        N = len(pos)
+        F = np.zeros((N, 3))
+        S = np.zeros((3, 3))
+        widths = [abs(np.linalg.det(lattice)) / np.linalg.norm(np.cross(lattice[1], lattice[2])),
+                  abs(np.linalg.det(lattice)) / np.linalg.norm(np.cross(lattice[2], lattice[0]))]
+        if self.r_real >= min(widths) / 2:
+            raise ValueError(
+                f"ESMCoulomb: the real-space complement reaches 11 sigma = "
+                f"{self.r_real:.2f} A, more than half the in-plane cell width "
+                f"({min(widths) / 2:.2f} A); enlarge the cell in x/y or lower sigma.")
+        if N < 2:
+            return 0.0, F, S
+        ii, jj = np.triu_indices(N, k=1)
+        d = pos[jj] - pos[ii]
+        s = d @ np.linalg.inv(lattice)
+        s[:, :2] -= np.round(s[:, :2])
+        d = s @ lattice
+        r = np.linalg.norm(d, axis=1)
+        m = (r < self.r_real) & (r > 1e-12)
+        ii, jj, d, r = ii[m], jj[m], d[m], r[m]
+        qq = q[ii] * q[jj] * _ESM_EV_PER_E2_ANG
+        a = 1.0 / (2.0 * self.sigma)
+        e = qq * erfc(a * r) / r
+        # dE/dr of erfc(a r) / r
+        dedr = -qq * (erfc(a * r) / r**2
+                      + 2.0 * a / np.sqrt(np.pi) * np.exp(-(a * r) ** 2) / r)
+        f = (dedr / r)[:, None] * d          # force on i (d = r_j - r_i)
+        np.add.at(F, ii, f)
+        np.add.at(F, jj, -f)
+        V = abs(np.linalg.det(lattice))
+        S = -np.einsum("ma,mb->ab", f, d) / V
+        return float(e.sum()), F, 0.5 * (S + S.T)

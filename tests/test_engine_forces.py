@@ -377,12 +377,12 @@ def test_esm_gpar0_poisson_solve_converges_quadratically():
         fz_numeric = -(ep - em) / (2 * h)
         return abs(f_analytic[0, 2] - fz_numeric)
 
-    err_192 = fz_error(192)
-    err_384 = fz_error(384)
-    # linear (buggy) convergence would give a ratio near 2; quadratic
-    # (fixed) convergence gives a ratio near 4 -- assert clearly closer to
-    # quadratic to guard against a regression back to cumsum.
-    assert err_192 / err_384 > 3.0
+    # ADR-0008: the forces are now the exact gradient of the discretised
+    # energy (Gaussian-weighted field), so the residual is finite-difference
+    # noise at every grid -- a stronger statement than the former 4x-per-
+    # doubling convergence, which this test used to check.
+    assert fz_error(192) < 1e-6
+    assert fz_error(384) < 1e-6
 
 
 def test_esm_rejects_bad_lattice():
