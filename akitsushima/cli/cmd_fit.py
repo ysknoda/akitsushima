@@ -443,6 +443,7 @@ def cmd_fit(args: argparse.Namespace) -> int:
     elif potential == "yukawa":
         extra_meta = {"kappa": cfg.get("kappa", 1.0)}
     save_fit_result_generic(result, potential, cfg["output_dir"], diag,
-                            extra_meta=extra_meta)
+                            extra_meta=extra_meta, r_cut=r_cut,
+                            species=all_species)
 
     return 0

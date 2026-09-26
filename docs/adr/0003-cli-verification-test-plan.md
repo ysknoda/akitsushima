@@ -343,14 +343,14 @@ passed.
 | T2 NVE | PASS 5/5 (drift <= 0.13 meV/atom/ns) | `example/check_md.py` |
 | T2 NVT | 11/15 on the 20 ps examples. AlN (3 runs): Var(K) excess decays from 1.22-1.28 to 0.95-1.01 over a 100 ps run and <T> = 600.8 +/- 1.0 K -- insufficient equilibration in the examples, not a thermostat defect. Cu3Au LJ 600 K: <T> 601.3-605.4 K over 4 runs, not a timestep effect (dt 0.5 fs gives 605.4) and not COM drift (sum F = 0 to 1e-11): **unexplained** | block SE underestimates true error by ~5x (seed spread) |
 | T2 NPT | (GeSn rows: SW before ADR-0006; the re-run is in ADR-0006 -- 200 ps powered test ratio 1.03) <P> PASS 14/14. B from volume fluctuations: 12/14 within 25%, but per-run SE 15-100% gives the test no power; pooled chi^2 = 4.2 / 14 dof. Powered test (GeSn, 200 ps): B_T = 67.0 +/- 3.4 GPa vs static B(V_T) = 54.5 GPa, ratio 1.23 +/- 0.06: PASS but marginal; the static reference ignores the thermal term, sizeable for this potential (B' = 12) | |
-| T3a mlip | ELM 1.23-1.26, QELM 1.23-1.31, NN 0.98-1.04 x sigma: PASS. LightGBM 1.72-1.92: FAIL; raw lightgbm with the same row weights reaches 1.48-1.58, unweighted 1.24-1.33 | `example/mlip/check_mlip.py` |
+| T3a mlip | ELM 1.23-1.26, QELM 1.23-1.31, NN 0.98-1.04 x sigma: PASS. LightGBM 1.72-1.92: FAIL; raw lightgbm with the same row weights reaches 1.48-1.58, unweighted 1.24-1.33. Re-judged after ADR-0004 (decision 7): LightGBM 1.59 / 1.41 / 1.43 (E, F, S) with the template weights -- E misses 1.5 narrowly -- and 1.25 / 1.27 / 1.29 with noise-optimal weights: PASS | `example/mlip/check_mlip.py`, `example/mlip/adr0004/check_lgbm_t3a.py` |
 | T3b mlip (info) | NN 1.0-1.4; ELM E 201x, QELM E 130x (finding M1) | |
 | T4 phonon | PASS after fixes P1-P7: frequencies within 1e-3 THz of phonopy on every path point (Si and AlN), F_vib within 0.06 meV/atom, theta_D within 0.1% | `example/phonon/check_phonon.py`, `tests/test_phonon_regressions.py` |
 | T5 neb/tsa | PASS all 8 checks (criterion 0 added: endpoint a minimum), 63 and 215 atoms, with the corrected SW (ADR-0006) and endpoints rebuilt 2026-09-26 (C3v vacancy, E_f 2.835 / 2.694 eV). Barrier 0.517 / 0.513 eV; imaginary mode -178.09 vs -178.10 and -171.80 vs -171.81 cm^-1 (independent Hessian); IRC ends within 0.004 A of the endpoints. Literature, for information: 0.43 eV for SW from vacancy vs split-vacancy formation energies (Maroudas & Brown, PRB 47, 15562 (1993), as quoted by El-Mellouhi et al., arXiv cond-mat/0308289, sec. IV.2.1; the original not re-read). Before ADR-0006 (three-body doubled): 0.949 / 0.909 eV | `example/neb/check_neb_tsa.py` |
 | T6 esm | FAIL (findings E1-E3) | `example/esm/check_esm.py`; reference Ewald self-tested on the rock-salt Madelung constant (1.747565) |
 | T7 gcmc | PASS after fix G1 (5000 cycles, last 80%): ideal gas <N> = 39.57 +/- 0.25 (exact 40), Var(N)/<N> = 0.984; NIST TMMC vapour (T* = 0.90, p/p_sat = 0.80, LFS 2.5 sigma, V = 512 sigma^3) <N> = 42.88 +/- 1.41 vs 41.90 (ideal gas at the same z: 22.5). Before G1: 18.8 | `example/gcmc/check_gcmc.py`; NIST table cached in `references/nist_srsw/vaporEOS_rc25LFS.csv` (all 100 rows x 6 temperatures; the page quotes no uncertainties) |
 | T7 osmc | FAIL: <N> = 0.74 +/- 0.63 against 41.90; gcmc vs osmc differ by 42.1 +/- 1.5 (findings O1-O2) | |
-| T8 fit | LJ, Morse, Born-Mayer, Buckingham PASS (V0, B0, E0 within 6e-4; Buckingham after fix F5); Tersoff FAIL (finding FT1) | `example/fit/others/check_fit_others.py` |
+| T8 fit | LJ, Morse, Born-Mayer, Buckingham PASS (V0, B0, E0 within 6e-4; Buckingham after fix F5); Tersoff FAIL (finding FT1). Tersoff re-judged 2026-09-26 with the Nelder-Mead default (ADR-0006): the local step alone from +10% reaches loss 1.5e-4 and E0 / V0 / B0 within 3e-6 / 3e-6 / 1.6e-4: PASS (beta, c, d stay off by 59-98% -- the (beta zeta)^n and c/d degeneracy E, F, S cannot resolve; the other six parameters within 0.5%).  With the template's DE first (as check_fit_others runs it) DE settles in another basin (loss 210, beta at its 1e-10 bound) and the fit ends at 19.8, B0 -2.0%: FAIL -- the global search, not the local one, is what fails | `example/fit/others/check_fit_others.py`, `example/fit/others/tersoff_nm_local/` |
 | T9 kappa | After fixes K1-K3, 5 seeds x 1 ns, HCACFs averaged: 50 K 0.302 +/- 0.036 vs 0.323 (-6.6%) PASS; 80 K 0.141 +/- 0.013 vs 0.162 (-13.3%) PASS; 20 K 0.928 +/- 0.116 vs 1.216 (-23.7%, 2.5 SE) FAIL -- the seed-to-seed SE alone is 12.5% at 20 K (tau_ac,lg = 8 ps against 1 ns runs; the paper used 4.3 ns x 5), so the +/-15% bar is not resolvable there; the running integral at tau_max/2 is 1.13 (-7%). Isotropy PASS at all T. NVE E_tot range <= 0.14% (paper 0.005%; plain truncation steps). Before K2/K3 all five seeds were identical (0.837 / 0.281 / 0.105) | `example/kappa/check_kappa.py`, `run_kappa.py` |
 
 ### Defects fixed (with regression tests)
@@ -413,11 +413,19 @@ passed.
   by 4.6-5.1%, beta collapses to its lower bound 0); from the true parameters
   it stays put (loss 2e-11), so the loss is right and the optimisation is
   ill-conditioned (beta ~ 1e-6 beside parameters of order 1-1e5).
-- **fit output JSON**: Born-Mayer nests its parameters under `params.bm`, and
-  neither Born-Mayer nor Buckingham records `r_cut`, so passing the file to
-  `potential_json` silently builds a different potential (r_cut defaults to
-  10 A; for Born-Mayer the nested keys are also misread as pairs).
+  Re-judged 2026-09-26 (T8 row): with Nelder-Mead the local fit PASSES;
+  DE before it still lands in a wrong basin; the Tersoff `--write-config`
+  template now sets `use_de: false` (ADR-0007, decision 8).
+- **fit output JSON** (FIXED 2026-09-26, ADR-0007): Born-Mayer nested its
+  parameters under `params.bm`, and neither Born-Mayer nor Buckingham
+  recorded `r_cut`, so passing the file to `potential_json` silently built a
+  different potential (r_cut defaulted to 10 A; for Born-Mayer the nested
+  keys were also misread as pairs).  save_potential now unwraps `bm`, and
+  every fit file records `r_cut` and `species`
+  (`test_fit_output_json_reloads_to_the_fitted_potential`).
 - **ESM input convention**: z must lie in [-Lz/2, Lz/2); a slab centred the
   usual POSCAR way is rejected. Undocumented in the template and CLI.
-- **tsa**: the printed "k (TST)" is (kT/h) exp(-Ea/kT); harmonic TST is 24x
-  larger for the Si vacancy hop. Not labelled as an approximation in the output.
+- **tsa** (FIXED 2026-09-26, ADR-0007): the printed "k (TST)" is (kT/h)
+  exp(-Ea/kT); harmonic TST is 11x / 5x larger for the Si vacancy hop (63 /
+  215 atoms, corrected SW; 24x with the doubled one).  The output now states
+  the form and that it is not the Vineyard rate.

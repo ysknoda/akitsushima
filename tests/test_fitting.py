@@ -1415,3 +1415,40 @@ def test_fit_potential_runs_with_non_default_local_methods(tmp_path, method, sma
     res = fit_potential(ps, structs, r_cut=6.0, weights=weights, method=method,
                         val_fraction=0.0, verbose=False, output_dir=str(tmp_path))
     assert res["loss"] < initial * 1e-3
+
+
+def test_fit_output_json_reloads_to_the_fitted_potential(tmp_path):
+    """ADR-0003 "fit output JSON": Born-Mayer's params were saved nested
+    under 'bm' (read back as a species pair) and no fit file recorded
+    r_cut (reloaded at 10 A).  A Born-Mayer + Buckingham result saved by
+    save_fit_result_generic must reload to the same energy at r_cut 5 A."""
+    from akitsushima.fitting.driver import save_fit_result_generic
+    from akitsushima.fitting.io_utils import load_potential
+
+    st = randomly_perturbed(rocksalt_nacl_dict(2), magnitude=0.05, seed=1)
+    lat, pos, types = st["lattice"], st["positions"], st["atom_types"]
+    pairs = {frozenset({"Na", "Cl"}): {"A": 1200.0, "rho": 0.32},
+             frozenset({"Cl"}): {"A": 3500.0, "rho": 0.30}}
+    cases = [("bornmayer", {"bm": pairs}, BornMayerPotential(pairs, r_cut=5.0)),
+             ("buckingham", {"buck": {k: dict(v, C=10.0) for k, v in pairs.items()}},
+              BuckinghamPotential({k: dict(v, C=10.0) for k, v in pairs.items()},
+                                  r_cut=5.0))]
+    for name, params, ref in cases:
+        out = tmp_path / name
+        out.mkdir()
+        params = dict(params, charges={"Na": 1.0, "Cl": -1.0})
+        save_fit_result_generic({"params": params, "loss": 0.0}, name, str(out),
+                                {}, r_cut=5.0, species=["Na", "Cl"])
+        engine, meta = load_potential(str(out / "fitted_potential.json"))
+        assert meta["r_cut"] == 5.0
+        assert set(meta["charges"]) == {"Na", "Cl"}
+        E = engine.compute(lat, pos, types)[0]
+        assert E == pytest.approx(ref.compute(lat, pos, types)[0], rel=1e-10)
+
+
+def test_tersoff_template_leaves_de_off_and_sw_keeps_it():
+    """ADR-0007 decision 8: DE settled in a wrong basin on the T8 Tersoff
+    fit, where the local search alone recovers the potential."""
+    from akitsushima.cli.templates import _FIT_CFG_TEMPLATES
+    assert _FIT_CFG_TEMPLATES["tersoff"]["use_de"] is False
+    assert _FIT_CFG_TEMPLATES["sw"]["use_de"] is True

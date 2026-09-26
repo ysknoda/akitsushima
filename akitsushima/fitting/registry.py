@@ -606,7 +606,11 @@ _DEFAULT_FIT_CFG_TERSOFF = {
     "r_cut"        : 2.10,
     "weights"      : {"energy": 1.0, "forces": 1.0, "stress": 0.1,
                       "r0": 1.0, "eps0": 1.0},
-    "use_de"       : True,
+    # Off since 2026-09-26 (ADR-0007, decision 8): on the T8 Si test DE
+    # settled in a wrong basin along the beta / c / d directions E, F and S
+    # cannot resolve (loss 210, beta at its bound) and the fit failed,
+    # while Nelder-Mead alone from +10% recovered E0 / V0 / B0 to 2e-4.
+    "use_de"       : False,
     "de_maxiter"   : 500,
     "de_popsize"   : 15,
     "local_method" : "Nelder-Mead",

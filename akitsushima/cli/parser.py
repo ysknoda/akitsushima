@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=("optimisation (config file keys):\n"
                 "  use_de: true|false         global Differential Evolution first\n"
                 "                             (de_maxiter, de_popsize); --write-config\n"
-                "                             templates set true for sw/tersoff\n"
+                "                             templates set true for sw only\n"
                 "  local_method: NAME         bounded local refinement, always run:\n"
                 "                             " + ", ".join(LOCAL_METHOD_OPTIONS) + "\n"
                 "                             (default Nelder-Mead; case-insensitive)\n"

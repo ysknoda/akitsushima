@@ -114,6 +114,13 @@ def save_potential(result        : dict,
         elif pot_type == 'buckingham' and 'buck' in inner:
             # BuckinghamParameterSet uses 'buck' as key
             params_raw = inner['buck']
+        elif pot_type in ('bornmayer', 'born_mayer') and 'bm' in inner:
+            # BornMayerParameterSet uses 'bm'.  Bug-fix note (ADR-0003
+            # "fit output JSON"): it used to fall through to the branch
+            # below, which saved {'bm': {...}, 'charges': ...} as the
+            # params, and load_potential then read 'bm' and 'charges' as
+            # species pairs.
+            params_raw = inner['bm']
         else:
             # SW / Tersoff: result['params'] is the full param dict itself
             params_raw = inner

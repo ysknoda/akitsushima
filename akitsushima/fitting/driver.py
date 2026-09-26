@@ -1025,7 +1025,9 @@ def save_fit_result_generic(result: dict,
                               potential : str,
                               output_dir: str,
                               diag      : dict,
-                              extra_meta: Optional[dict] = None) -> None:
+                              extra_meta: Optional[dict] = None,
+                              r_cut     : Optional[float] = None,
+                              species   : Optional[list]  = None) -> None:
     """
     Save fitted parameters for any potential type to JSON.
 
@@ -1051,6 +1053,9 @@ def save_fit_result_generic(result: dict,
     raised ``KeyError('potential_type')`` immediately.  Delegating to
     ``save_potential`` here makes the write and read sides consistent.
 
+    ``r_cut``, ``species`` : the cutoff and elements the fit used, stored
+    so the file reloads to the same potential.
+
     ``extra_meta`` : fixed (not-fit) construction hyperparameters that
     are not part of the fitted ``params`` dict but are still needed to
     reconstruct an identical potential on load -- e.g. Mie's ``n``/``m``
@@ -1063,7 +1068,12 @@ def save_fit_result_generic(result: dict,
     extra = {"diagnostics": diag}
     if extra_meta:
         extra.update(extra_meta)
-    save_potential(result, out_path, potential_type=potential, extra=extra)
+    # r_cut and species go into the file: without them load_potential
+    # fell back to r_cut = 10 A, and `potential_json:` silently built a
+    # different potential from the one fitted (ADR-0003, "fit output
+    # JSON"; a Born-Mayer / Buckingham fit at r_cut 5 A).
+    save_potential(result, out_path, potential_type=potential,
+                   r_cut=r_cut, species=species, extra=extra)
 
     if potential == "buckingham":
         params = result.get("params", {})

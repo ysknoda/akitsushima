@@ -116,6 +116,13 @@ def cmd_tsa(args) -> int:
     if k is not None:
         print(f"\n[Reaction rate  (T={T:.0f} K)]")
         print(f"  k (TST)            : {k:.4e} s^-1")
+        # ADR-0003 (tsa finding): say which approximation this is -- for
+        # the SW Si vacancy hop the harmonic (Vineyard) rate is 11x / 5x
+        # larger (63 / 215 atoms, example/neb/check_neb_tsa.json).
+        print("                       (k_B T / h) exp(-E_a / k_B T): "
+              "Q_TS/Q_IS = 1 assumed,")
+        print("                       not the harmonic (Vineyard) "
+              "prefactor from the mode frequencies")
     if irc_result is not None:
         # Bug-fix note (S6/S7): run_irc() (fixed in S6 to return a proper
         # dict instead of a bare tuple) returns e_forward/e_backward/

@@ -194,8 +194,10 @@ Fitting runs in two stages, both driven from the config file:
 1. **Global search (optional)** -- `use_de: true` runs scipy's
    Differential Evolution over the parameter bounds first
    (`de_maxiter`, `de_popsize`; `--use-de` on the command line does the
-   same).  The `--write-config` templates switch it on for `sw` and
-   `tersoff` only.  Its cost is `de_popsize x n_params` loss evaluations
+   same).  The `--write-config` templates switch it on for `sw` only:
+   for `tersoff` it settled in a wrong basin along the beta / c / d
+   directions the data cannot resolve, where the local search alone
+   recovers the potential (ADR-0007).  Its cost is `de_popsize x n_params` loss evaluations
    per generation, so it is practical for a handful of parameters, not
    for tens.
 2. **Local refinement (always)** -- `local_method` picks a bounded
