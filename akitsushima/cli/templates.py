@@ -78,6 +78,16 @@ potential:
     lambda:  21.0
     gamma:   1.20
     costheta0: -0.333333
+# External code instead (ADR-0011): each call writes work_dir/POSCAR, runs
+# cmd there and reads work_dir/result.efs (E per atom, F, S in eV, eV/A,
+# eV/A^3, stress positive under compression).  A wrapper converts the
+# code's output, e.g. `python -m akitsushima.tools.ase_efs --read vasprun.xml`.
+# potential:
+#   type:     external
+#   cmd:      "vasp_std > vasp.out && python -m akitsushima.tools.ase_efs --read vasprun.xml"
+#   work_dir: ./external_run
+#   timeout:  null             # seconds
+#   stress_to_eV_Ang3: 1.0     # factor applied to the EFS stress column
 
 relax:
   output_dir:    ./relax_output

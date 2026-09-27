@@ -293,6 +293,28 @@ a sum of local terms, so a model trained on one cell size runs on others;
 the model file (`atomic_<model>_model.npz` / `.pt`) records the form and
 is used with the same `potential: {type: MLIP, model: ...}` entry.
 
+### External codes (ADR-0011)
+
+Any code that can be run from a shell drives every E/F/S solver through
+
+```yaml
+potential:
+  type:     external
+  cmd:      "mpirun -np 8 vasp_std > vasp.out && python -m akitsushima.tools.ase_efs --read vasprun.xml"
+  work_dir: ./external_run
+```
+
+Each call writes `work_dir/POSCAR`, runs `cmd` in `work_dir` and reads
+`work_dir/result.efs` (akitsushima EFS format: energy per atom, forces,
+stress in eV/A^3, positive under compression).  Wrappers:
+`python -m akitsushima.tools.ase_efs --calc emt|lj` (an ASE calculator),
+`--read FILE` (any ASE-readable output with energy, forces and stress --
+unverified on real VASP / QE files), and
+`python -m akitsushima.tools.akitsushima_efs pot.yaml` (akitsushima itself,
+for testing).  `relax`, `md`, `neb`, `tsa`, `phonon` and elastic constants
+take it; `gcmc` / `osmc` warn (one external run per trial move); `kappa`
+and `coulomb_method` / `charges` / `esm` are refused.
+
 Which solvers take an MLIP (ADR-0007):
 
 | command | tabular | atom-centred | note |

@@ -26,10 +26,34 @@ from ..engine.cell_gradient import cell_force_from_stress
 from ..io.efs import read_efs_file
 from ..io.poscar import write_poscar
 
-__all__ = ["ExternalFileEngine", "ScaledForceEngine"]
+__all__ = ["ExternalFileEngine", "ScaledForceEngine",
+           "check_external_for_solver"]
+
+
+def check_external_for_solver(force_fn, solver, *, refuse=None, slow=False):
+    """Start-up rules for an external engine (ADR-0011).  No-op for any
+    other force function.  ``refuse``: a reason this solver cannot use it
+    (it returns only E, F and S).  ``slow``: the solver calls the force
+    function per trial move, each an external run -- warn."""
+    if getattr(force_fn, "kind", None) != "external":
+        return
+    if refuse:
+        raise ValueError(f"{solver}: an external engine cannot drive it -- "
+                         f"{refuse}")
+    if slow:
+        import warnings
+        warnings.warn(
+            f"{solver}: every trial move runs the external code once "
+            f"(ExternalFileEngine); expect a very slow run.", UserWarning,
+            stacklevel=3)
 
 
 class ExternalFileEngine:
+    # Capabilities read by the solvers' start-up checks (ADR-0011): total
+    # E, F and S only -- no per-atom energies.
+    kind = "external"
+    per_atom_energy = False
+
     """
     Generic file-based external force engine.
 
@@ -92,10 +116,12 @@ class ExternalFileEngine:
                        structure is identical to the previous call
                        (max atom displacement < ``cache_tol`` A, same lattice).
     cache_tol        : position-change threshold for cache hit [A].  Default 1e-6.
-    r_cut            : short-range cutoff [A] stored as an attribute so that
-                       ``make_force_fn(engine)`` and solver constructors can
-                       auto-detect it.  Has no effect on the computation
-                       itself (the external code manages its own cutoffs).
+    r_cut            : cutoff [A] the solvers use for their own Verlet
+                       neighbour list (and its minimum-image check).  The
+                       external code ignores that list and applies its own
+                       cutoffs, so the default 1.0 A only keeps the list
+                       cheap and never rejects a cell; it must be positive
+                       (the solvers' NeighbourList requires it).
     verbose          : if True, print each call's command, timing, and E/F/S
                        summary.
 
@@ -171,7 +197,7 @@ class ExternalFileEngine:
                  env              : Optional[dict] = None,
                  cache            : bool  = True,
                  cache_tol        : float = 1e-6,
-                 r_cut            : float = 0.0,
+                 r_cut            : float = 1.0,
                  verbose          : bool  = True):
 
         self.cmd               = cmd
@@ -186,6 +212,9 @@ class ExternalFileEngine:
         self.env               = env
         self.cache             = cache
         self.cache_tol         = float(cache_tol)
+        if r_cut <= 0.0:
+            raise ValueError("ExternalFileEngine: r_cut must be positive (it "
+                             "sizes the solvers' own neighbour list).")
         self.r_cut             = float(r_cut)
         self.verbose           = verbose
 
@@ -195,6 +224,7 @@ class ExternalFileEngine:
         self._cached_pos : Optional[np.ndarray]  = None
         self._cached_lat : Optional[np.ndarray]  = None
         self._cached_EFS : Optional[tuple]       = None   # (E, F, S)
+        self._cached_types : Optional[list]      = None
 
     # ------------------------------------------------------------------ #
     #  Core compute method                                                 #
@@ -231,9 +261,12 @@ class ExternalFileEngine:
         N         = len(positions)
 
         # -- Cache check ---------------------------------------
+        # (the species list is part of the key: a swap of two species at
+        # the same positions is a different structure)
         if self.cache and self._cached_EFS is not None:
             lat_match = np.allclose(lattice, self._cached_lat, atol=1e-12)
-            if lat_match and self._cached_pos.shape == positions.shape:
+            if (lat_match and self._cached_pos.shape == positions.shape
+                    and list(atom_types) == self._cached_types):
                 max_disp = float(np.max(np.abs(positions - self._cached_pos)))
                 if max_disp < self.cache_tol:
                     self._n_cache += 1
@@ -241,7 +274,8 @@ class ExternalFileEngine:
                         print(f"  ExternalEngine: cache hit "
                               f"(call #{self._n_calls}, "
                               f"max_disp={max_disp:.2e} A)")
-                    return self._cached_EFS
+                    E, F, S = self._cached_EFS
+                    return E, F.copy(), S.copy()
 
         self._n_calls += 1
         os.makedirs(self.work_dir, exist_ok=True)
@@ -280,6 +314,10 @@ class ExternalFileEngine:
             E, F, S = read_efs_file(out_path, N,
                                     stress_to_eV_Ang3=self.stress_to_eV_Ang3)
 
+        E = float(E)
+        F = np.asarray(F, dtype=float).reshape(N, 3)
+        S = np.asarray(S, dtype=float).reshape(3, 3)
+
         if self.verbose:
             fmax = float(np.max(np.abs(F))) if N > 0 else 0.0
             print(f"  -> E={E:.6f} eV  Fmax={fmax:.4f} eV/A  "
@@ -288,7 +326,8 @@ class ExternalFileEngine:
         # -- Update cache --------------------------------------
         self._cached_pos = positions.copy()
         self._cached_lat = lattice.copy()
-        self._cached_EFS = (E, F, S)
+        self._cached_types = list(atom_types)
+        self._cached_EFS = (E, F.copy(), S.copy())
 
         return E, F, S
 

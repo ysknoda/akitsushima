@@ -97,6 +97,11 @@ class ThermalConductivityCalculator:
                              refuse="ESM has no site-energy decomposition for the "
                                     "heat flux, and slab kappa is out of scope "
                                     "(ADR-0008)")
+        from ..fitting.external import check_external_for_solver
+        check_external_for_solver(force_fn, "ThermalConductivityCalculator",
+                                  refuse="the heat flux needs per-atom energies, "
+                                         "and it returns only E, F and S "
+                                         "(ADR-0011)")
         from ..fitting.mlip_engine import check_mlip_for_solver
         check_mlip_for_solver(force_fn, "ThermalConductivityCalculator",
                               need_site_energies=True,

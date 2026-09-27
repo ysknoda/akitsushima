@@ -717,3 +717,52 @@ def _build_from_yaml_mlip(pot_cfg):
 
 
 register(PotentialSpec("mlip", build_from_yaml=_build_from_yaml_mlip))
+
+
+# ============================================================================
+#  External code through files (ExternalFileEngine, ADR-0011)
+# ============================================================================
+
+_EXTERNAL_KEYS = {"type", "cmd", "work_dir", "input_file", "output_file",
+                  "stress_to_eV_Ang3", "timeout", "mpi_prefix", "cache_tol",
+                  "r_cut", "verbose"}
+
+
+def _build_from_yaml_external(pot_cfg):
+    """``potential: {type: external, cmd: ...}``: every call writes POSCAR,
+    runs ``cmd`` in ``work_dir`` and reads the EFS file ``output_file``
+    (akitsushima.io.efs; E per atom, F, S in the akitsushima conventions --
+    a wrapper script converts the external code's output, see
+    ``python -m akitsushima.tools.ase_efs``)."""
+    from .external import ExternalFileEngine
+    if pot_cfg.get("coulomb_method") or pot_cfg.get("charges") or pot_cfg.get("esm"):
+        raise ValueError(
+            "potential.type external takes no coulomb_method / charges / esm: "
+            "the external total energy already contains the electrostatics "
+            "(ADR-0011).")
+    unknown = sorted(set(pot_cfg) - _EXTERNAL_KEYS)
+    if unknown:
+        raise ValueError(f"potential.type external: unknown key(s) {unknown}; "
+                         f"allowed: {sorted(_EXTERNAL_KEYS - {'type'})}.")
+    cmd = str(pot_cfg.get("cmd", "")).strip()
+    if not cmd:
+        raise ValueError("potential.type external needs potential.cmd: the "
+                         "shell command that writes the EFS file.")
+    timeout = pot_cfg.get("timeout")
+    r_cut = float(pot_cfg.get("r_cut", 1.0))
+    fn = ExternalFileEngine(
+        cmd=cmd,
+        work_dir=str(pot_cfg.get("work_dir", "./external_run")),
+        input_file=str(pot_cfg.get("input_file", "POSCAR")),
+        output_file=str(pot_cfg.get("output_file", "result.efs")),
+        mpi_prefix=str(pot_cfg.get("mpi_prefix", "")),
+        timeout=None if timeout is None else float(timeout),
+        stress_to_eV_Ang3=float(pot_cfg.get("stress_to_eV_Ang3", 1.0)),
+        cache_tol=float(pot_cfg.get("cache_tol", 1e-6)),
+        r_cut=r_cut,
+        verbose=bool(pot_cfg.get("verbose", False)),
+    )
+    return fn, r_cut
+
+
+register(PotentialSpec("external", build_from_yaml=_build_from_yaml_external))

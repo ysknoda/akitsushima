@@ -198,6 +198,8 @@ class GCMCMDSimulation(_BaseMDSimulation):
         self.temperature  = float(temperature)
         self.mu           = float(mu)
         self.species      = species
+        from ..fitting.external import check_external_for_solver
+        check_external_for_solver(force_fn, type(self).__name__, slow=True)
         check_mlip_for_solver(force_fn, type(self).__name__,
                               need_site_energies=True,
                               species=[species] if species else [],
