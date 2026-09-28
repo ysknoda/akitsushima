@@ -220,3 +220,71 @@ def physics_from_config(cfg):
         PairBaseline.from_config(b) if b else None,
         d.get("isolated_atom_energy") or None,
     )
+
+
+def fit_born_mayer(structures, energy_fn, species, r_inner, r_outer,
+                   x0=(1000.0, 0.3)):
+    """
+    Fit a switched Born-Mayer term A exp(-r / rho) s(r) (one (A, rho) per
+    species pair present within r_outer) to short-range reference data
+    (ADR-0014, follow-up).
+
+    structures : dicts with lattice, positions, atom_types and ref_energy
+                 [eV/atom] -- e.g. one atom pushed towards a neighbour,
+                 labelled by DFT single points
+    energy_fn  : (lattice, positions, atom_types) -> total energy [eV] of
+                 the trained model *with every other baseline term* (the
+                 MLIP engine); the fit minimises
+                 sum_k (E_ref,k - energy_fn_k - E_BM,k)^2
+    Returns (term, info): the baseline term dict (type born_mayer, with
+    the fitted pairs) and {pairs, rms_before_eV, rms_after_eV,
+    n_structures}.
+    """
+    from scipy.optimize import least_squares
+
+    from .descriptors.acsf import _neighbours
+
+    probe = PairBaseline(species, {"type": "born_mayer", "r_inner": r_inner,
+                                   "r_outer": r_outer, "pairs": {}})
+    sp_list = probe.species
+    entries, keys = [], set()
+    for s in structures:
+        sp = np.array([sp_list.index(t) for t in s["atom_types"]])
+        ptr, nbj, vec = _neighbours(np.asarray(s["lattice"], float),
+                                    s["positions"], r_outer)
+        centre = np.repeat(np.arange(len(sp)), np.diff(ptr))
+        r = np.linalg.norm(vec, axis=1)
+        entries.append((r, sp[centre], sp[nbj]))
+        keys |= {_pair_key(sp_list[a], sp_list[b])
+                 for a, b in zip(sp[centre], sp[nbj])}
+    pairs = sorted(keys)
+    if not pairs:
+        raise ValueError(
+            f"fit_born_mayer: no pair closer than r_outer = {r_outer} A in the "
+            f"short-range structures; nothing to fit.")
+    res = np.array([float(s["ref_energy"]) * len(s["atom_types"])
+                    - energy_fn(s["lattice"], s["positions"], s["atom_types"])
+                    for s in structures])
+
+    def make(p):
+        return PairBaseline(sp_list, {
+            "type": "born_mayer", "r_inner": r_inner, "r_outer": r_outer,
+            "pairs": {k: {"A": float(np.exp(p[2 * n])), "rho": float(p[2 * n + 1])}
+                      for n, k in enumerate(pairs)}})
+
+    def f(p):
+        b = make(p)
+        return np.array([0.5 * b.phi(r, si, sj)[0].sum()
+                         for r, si, sj in entries]) - res
+
+    lo = np.tile([np.log(1e-3), 0.05], len(pairs))
+    hi = np.tile([15.0, 1.0], len(pairs))
+    sol = least_squares(f, x0=np.tile([np.log(x0[0]), x0[1]], len(pairs)),
+                        bounds=(lo, hi))
+    term = make(sol.x).terms[0]
+    return term, {
+        "pairs": term["pairs"],
+        "rms_before_eV": float(np.sqrt(np.mean(res**2))),
+        "rms_after_eV": float(np.sqrt(np.mean(sol.fun**2))),
+        "n_structures": len(structures),
+    }

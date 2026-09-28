@@ -155,6 +155,7 @@ def _structures_and_descriptor(desc_cfg, csv_path, poscar_dir, species, verbose)
         desc_cfg.get("g2"),
         desc_cfg.get("g4"),
         desc_cfg.get("g5"),
+        desc_cfg.get("inner_cutoff"),
     )
 
 
@@ -166,6 +167,8 @@ def _physics(ml, species):
     from ..fitting.physics import PairBaseline
 
     b_cfg, iso = ml.get("baseline"), ml.get("isolated_atom_energy")
+    # terms with fit_to are fitted after training (_fit_short_range)
+    b_cfg = [t for t in _terms(b_cfg) if "fit_to" not in t]
     if not b_cfg and not iso:
         return None, ""
     base = PairBaseline(species, b_cfg) if b_cfg else None
@@ -175,6 +178,60 @@ def _physics(ml, species):
     if iso:
         cfg["isolated_atom_energy"] = {str(k): float(v) for k, v in iso.items()}
     return base, json.dumps(cfg)
+
+
+def _terms(b_cfg):
+    return [] if not b_cfg else ([b_cfg] if isinstance(b_cfg, dict) else list(b_cfg))
+
+
+def _fit_short_range(model, desc, ml, fixed, train_structs, refit, record):
+    """
+    Fit the ``born_mayer`` baseline term that carries ``fit_to`` (a
+    structure list of short-range configurations, fit layout) to the
+    residual E_ref - E_model of the trained model (ADR-0014 follow-up).
+    If the fitted term reaches the training data (it is not zero there),
+    the model is refitted once on labels minus the full baseline.
+    Returns the new PairBaseline.
+    """
+    import json
+
+    from ..fitting.mlip_engine import MLIPForceField
+    from ..fitting.physics import PairBaseline, fit_born_mayer
+
+    fit_terms = [t for t in _terms(ml.get("baseline")) if "fit_to" in t]
+    if len(fit_terms) != 1 or str(fit_terms[0].get("type")).lower() != "born_mayer":
+        raise ValueError("mlip.baseline: exactly one term may carry fit_to, "
+                         "and it must be of type born_mayer.")
+    t = fit_terms[0]
+    fit = t["fit_to"]
+    fit = {"training_csv": fit} if isinstance(fit, str) else dict(fit)
+    csv = fit["training_csv"]
+    pdir = fit.get("poscar_dir", os.path.dirname(os.path.abspath(csv)))
+    sr, _ = _structures_and_descriptor(desc, csv, pdir, desc.species, False)
+    ff = MLIPForceField(model)  # the model plus any fixed baseline
+    term, info = fit_born_mayer(
+        sr, lambda lat, pos, typ: ff(lat, pos, typ)[0], desc.species,
+        float(t["r_inner"]), float(t["r_outer"]))
+    new = PairBaseline(desc.species, (fixed.terms if fixed else []) + [term])
+    cfg = json.loads(model.physics_config) if model.physics_config else {}
+    cfg["baseline"] = new.config()
+    model.physics_config = json.dumps(cfg)
+    only = PairBaseline(desc.species, [term])
+    touch = max(abs(only.compute(s["lattice"], s["positions"], s["atom_types"])[0])
+                for s in train_structs)
+    info["refit"] = bool(touch > 1e-6)
+    print(f"  Short-range fit : {len(sr)} structures from {csv}")
+    for k, v in term["pairs"].items():
+        print(f"    {k}: A = {v['A']:.6g} eV  rho = {v['rho']:.5f} A")
+    print(f"    residual rms {info['rms_before_eV']:.4f} -> "
+          f"{info['rms_after_eV']:.4f} eV")
+    if info["refit"]:
+        print(f"    the fitted term reaches the training data (up to {touch:.2e} "
+              f"eV per structure): refitting the model on labels minus the "
+              f"full baseline")
+        refit(new)
+    record["baseline_fit"] = info
+    return new
 
 
 def _report_baseline(base, structs):
@@ -340,6 +397,7 @@ def cmd_mlip(args) -> int:
     )
     test_table = None
     test_structs = None
+    extra_summary = {}
     if atomic:
         poscar_dir = struct_cfg.get(
             "poscar_dir", os.path.dirname(os.path.abspath(training_csv))
@@ -359,13 +417,21 @@ def cmd_mlip(args) -> int:
         except (ValueError, KeyError) as exc:
             print(f"ERROR: mlip.baseline: {exc}")
             return 1
+        raw_structs = structs
         if base is not None:
             _report_baseline(base, structs)
             structs = base.subtract(structs)
         t1 = _time.perf_counter()
         try:
             model.fit(structs, desc, weight_csv=ml_cfg.get("weight_csv"), **fit_kw)
-        except ValueError as exc:
+            if any("fit_to" in t for t in _terms(ml_cfg.get("baseline"))):
+                base = _fit_short_range(
+                    model, desc, ml_cfg, base, raw_structs,
+                    lambda b: model.fit(b.subtract(raw_structs), desc,
+                                        weight_csv=ml_cfg.get("weight_csv"),
+                                        **fit_kw),
+                    extra_summary)
+        except (ValueError, KeyError) as exc:
             print(f"ERROR: {exc}")
             return 1
         sections.append(
@@ -418,7 +484,19 @@ def cmd_mlip(args) -> int:
         model.descriptor_config = desc.to_json()
         try:
             model.fit(y, lab, X, weights=w, **fit_kw, **extra)
-        except ValueError as exc:
+            if any("fit_to" in t for t in _terms(ml_cfg.get("baseline"))):
+                raw_structs, _ = _structures_and_descriptor(
+                    desc, training_csv, poscar_dir, desc.species, False)
+
+                def _refit(b):
+                    y2, l2, w2, X2, *_ = _descriptor_table(
+                        desc, training_csv, poscar_dir, ml_cfg, desc.species,
+                        False, baseline=b)
+                    model.fit(y2, l2, X2, weights=w2, **fit_kw, **extra)
+
+                base = _fit_short_range(model, desc, ml_cfg, base, raw_structs,
+                                        _refit, extra_summary)
+        except (ValueError, KeyError) as exc:
             print(f"ERROR: {exc}")
             return 1
         model.descriptor_config = desc.to_json()
@@ -472,7 +550,7 @@ def cmd_mlip(args) -> int:
         f"  Usable as a force field   : {'yes' if engine else 'no'}"
         + ("  (potential: {type: MLIP, model: " + model_path + "})" if engine else "")
     )
-    summary = {"model": model_path, "engine": engine, "form": form}
+    summary = {"model": model_path, "engine": engine, "form": form, **extra_summary}
     for name, sc in (
         ("train", getattr(model, "_train_sc", None)),
         ("val", getattr(model, "_val_sc", None)),

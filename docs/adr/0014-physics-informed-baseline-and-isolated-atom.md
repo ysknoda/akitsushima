@@ -1,5 +1,5 @@
 ---
-status: accepted (A and B implemented 2026-09-28; the direct-link extrapolation found here is open, see Open question)
+status: accepted (A, B and the ACSF inner cutoff implemented 2026-09-28)
 ---
 
 # Physics-informed MLIP parts: pair baseline (A) and isolated-atom limit (B)
@@ -73,7 +73,7 @@ isolated-atom energy and no force.
   - Tabular one-species f(0) = E_atom.
   - NN to 1e-5 (float32).
   - Refusals; CLI with both options.
-- **Full suite:** 600 passed (591 + 9 in tests/test_mlip_physics.py).
+- **Full suite:** 600 passed (591 + 9 in tests/test_mlip_physics.py); 602 after the inner cutoff (+2); 605 after the fitted Born-Mayer term (+3).
 
 ## Evaluation (example/mlip/adr0014/evaluate.py, report.md)
 
@@ -138,18 +138,149 @@ isolated-atom energy and no force.
   ELM (+2238 eV at 1.2 A on Si).  The baseline then changes the labels
   where the model is fitted, and does not help the extrapolation.
 
-## Open question (for the user)
+## Decision: inner cutoff in the ACSF (user, 2026-09-28, option 2)
 
-How to bound the ELM / QELM direct-link extrapolation while keeping its
-accuracy inside the data.  Candidates, not implemented:
-1. **Soft input saturation for the direct link only.**  x -> c tanh(x / c)
-   per whitened component, with c from the training range.  The energy
-   stays smooth, so the forces stay conservative.
-2. **Inner cutoff in the descriptor.**  The ML part does not see pairs
-   below r_inner (an inner switch on the ACSF pair and triplet terms), so
-   the baseline alone acts there.
-3. **Accept it and recommend the NN (or direct_link: false with A)** for
-   runs that reach close contacts.
+The user chose option (2) of the three put to them:
+1. Soft saturation of the direct-link inputs.
+2. An inner cutoff in the descriptor.
+3. Recommending the NN, or direct_link false with A.
+
+**Implementation.**
+- `ACSF(..., inner_cutoff=(r_off, r_on))` multiplies every cutoff factor
+  fc(r) by a C2 switch.  The switch is 0 for r <= r_off and 1 for
+  r >= r_on (quintic between: `_fcut` in the numba kernel).  It acts on
+  the G2 pair, on r_ij and r_ik of G4 / G5, and on r_jk of G4.
+- A pair closer than r_off, and every triplet containing it, does not
+  enter G.  There the ML part sees an undercoordinated environment and
+  stays bounded; the pair baseline alone supplies the repulsion.
+- The setting is stored in the descriptor config (absent in older
+  configs, meaning none) and set with `mlip.descriptor.inner_cutoff`.
+- Rule of use: put r_on at or below the shortest distance in the
+  training data, so the fitted range is untouched.  The baseline's
+  r_outer should reach r_on, so the baseline covers the blind range.
+
+**Verification.**  tests/test_mlip_physics.py (+2):
+- Atom-centred Jacobian forces / stress equal finite differences with
+  pairs inside the switch: 8.5e-10 eV/A, 1.3e-11 eV/A^3.
+- A dimer below r_off gives G = 0; inside the switch it does not.
+- The switch is continuous at both ends.
+- The config round-trips.
+- An ELM on an inner-cutoff ACSF plus a ZBL baseline is conservative
+  across the switch (fourth-order finite differences).
+
+**Evaluation** (same probes; I: inner cutoff 1.6 -> 1.95 A alone;
+I+A3+B: with ZBL 1.0 -> 1.95 A and E_atom = 0; I2+A4+B: inner 1.8 ->
+2.0 A, ZBL 1.2 -> 2.0 A, E_atom = 0; data start at 2.0 A):
+
+| data | model | condition | E / F / S | push at 1.8 / 1.5 / 1.2 / 1.0 A [eV] | expanded 1.7 a0 |
+|---|---|---|---|---|---|
+| Si | reference | | | 3.8 / 12.7 / 38.6 / 85.6 | 0.000 |
+| Si | ELM | none | 1.04 / 1.64 / 1.05 | 11 / 286 / 555 / 379 | -1.328 |
+| Si | ELM | I | 1.04 / 1.64 / 1.05 | (bounded, 5.2 at 1.2 A) | -1.328 |
+| Si | ELM | I2+A4+B | 1.06 / 1.67 / 1.08 | monotonic, 29.8 at 1.2 A | 0.000 |
+| Si | QELM | I2+A4+B | 1.06 / 1.68 / 1.08 | monotonic, 29.9 at 1.2 A | 0.000 |
+| Si | NN | I+A3+B | 2.44 / 3.06 / 1.81 | monotonic, 28.9 at 1.2 A | 0.000 |
+| Tersoff | reference | | | 4.1 / 16.2 / 52.8 / 91.9 | 0.000 |
+| Tersoff | ELM | none | 2.65 / 6.86 / 2.24 | 47 / 848 / 744 / 311 | 1.071 |
+| Tersoff | ELM | I2+A4+B | 2.65 / 6.85 / 2.22 | 29.4 at 1.2 A; one 1.1 eV dip at 1.85 -> 1.80 A | 0.000 |
+| Tersoff | QELM | I2+A4+B | 2.59 / 6.96 / 2.19 | 29.5 at 1.2 A | 0.000 |
+| Tersoff | NN | I+A3+B | 8.08 / 8.82 / 2.52 | monotonic, 31.4 at 1.2 A | 0.000 |
+
+**Findings.**
+- **The runaway is gone.**  The inner cutoff alone bounds the ELM /
+  QELM under compression: from +555 eV (Si) and +744 / -390 eV (Tersoff
+  ELM / QELM) at 1.2 A down to 5.2 and 3.4 eV.
+- **With the ZBL baseline and the isolated-atom limit** all models give
+  a repulsive curve: 28-31 eV at 1.2 A, against 38.6 (SW) and 52.8
+  (Tersoff).
+- **Accuracy inside the data is unchanged** (ELM / QELM F within 2 %),
+  because r_on sits at the data's edge.
+- **Tersoff ELM / QELM keep one small non-monotonic step** (1.1 eV
+  between 1.85 and 1.80 A).  The ML part still extrapolates a little
+  above the reference just outside the data (4.7 against 2.4 eV at
+  1.9 A) before the switch removes it.
+- **The resulting curves are softer than the references at 1.0-1.2 A.**
+  - SW Si: 29.8 against 38.6 eV at 1.2 A (-23 %), 57 against 86 eV at
+    1.0 A (-33 %).
+  - Tersoff: 29.4 against 52.8 eV at 1.2 A (-44 %), 46 against 92 eV at
+    1.0 A (-50 %).
+  - ZBL is the universal nuclear-collision repulsion, not a fit to Si.
+    A Born-Mayer term fitted to short-range reference data would match
+    better when such data exist.
+
+## Follow-up study: remedies for the remaining short-range issues (2026-09-29)
+
+The two remaining issues -- ZBL too soft at 1.0-1.5 A, and the 1.1 eV
+dip in the Tersoff switch -- have one cause: no training data closer
+than 2.0 A.  Three remedies were compared (example/mlip/adr0014/
+short_range.py and short_range.md).
+
+**Short-range (SR) data.**  From training snapshots, one atom is pushed
+towards its nearest neighbour and labelled by the reference potential
+(with the evaluation's noise).  In practice these are a few dozen DFT
+single points.  Held out: pushes from test snapshots.
+
+| remedy | what it does | result |
+|---|---|---|
+| (a) current | inner cutoff 1.8 -> 2.0 A + ZBL 1.2 -> 2.0 A | as above: soft, Tersoff dip 1.1 eV |
+| (b) fitted Born-Mayer | same inner cutoff; A exp(-r / rho), switched 1.8 -> 2.0 A, least-squares fitted to the SR residual energies E_ref - E_ML of the trained model | **best** (table below) |
+| (c) SR data in training | SR data added to the fit, inner cutoff lowered to 1.1 -> 1.25 A, ZBL below | SR configurations reproduced (0.3 meV/atom on Si), but the model runs away again below the SR data (16-22 eV dips), and Tersoff test accuracy collapses (F 6.85 -> 31.7 sigma) |
+| (d) b + c | a BM under the SR-trained model | degenerate: the residual is already ~0, the fit does not move |
+
+(b) with SR data at different distances.  The ELM is unchanged; the BM
+term is 0 at the data (>= 2.0 A), so test accuracy is untouched (Si
+F 1.67 sigma, Tersoff 6.85 sigma, as in (a)):
+
+| data | SR distances [A] | A [eV] / rho [A] | push 1.8 / 1.5 / 1.2 / 1.0 A [eV] | reference | largest dip |
+|---|---|---|---|---|---|
+| SW Si | (ZBL, no SR data) | | 3.3 / 10.4 / 29.8 / 57.3 | 3.8 / 12.7 / 38.6 / 85.6 | 0 |
+| SW Si | 1.3-1.9 | 10491 / 0.211 | 5.0 / 12.2 / 40.8 / 99.0 | | 0 |
+| SW Si | 1.1-1.9 | 5830 / 0.232 | 5.4 / 12.6 / 38.1 / 85.3 | | 0 |
+| Tersoff | (ZBL, no SR data) | | 4.1 / 11.6 / 29.4 / 46.1 | 4.1 / 16.2 / 52.8 / 91.9 | 1.14 eV |
+| Tersoff | 1.3-1.9 | 32740 / 0.190 | 6.1 / 16.6 / 62.7 / 162.8 | | 0.61 eV |
+| Tersoff | 1.1-1.9 | 6785 / 0.242 | 7.6 / 18.4 / 51.9 / 103.9 | | 0.29 eV |
+| Tersoff | 1.0-1.8 | 4616 / 0.261 | 8.4 / 19.5 / 51.2 / 95.7 | | 0.14 eV |
+
+**Findings.**
+- **A Born-Mayer term fitted to SR residuals fixes the softness** where
+  the SR data reach: Si within 1.5 % at 1.0-1.5 A, Tersoff within 2 % at
+  1.2 A.  It shrinks the dip by 4-8x and leaves the fitted range alone.
+- **It extrapolates only as far as the SR data go.**  Fitted on 1.3-1.9
+  A it overshoots at 1.0 A on Tersoff (163 against 92 eV); with data to
+  1.1 A it is within 13 %.
+- **One exponential cannot match both ends.**  It is too stiff
+  at 1.8 A, the edge of the switch (Si 5.4 against 3.8 eV, Tersoff 7.6
+  against 4.1 eV; 40-105 % too stiff).
+- **Teaching the ML the short range (c) moves the problem inward** and
+  hurts the fit on the harder data.  The baseline is the better place
+  for the short range.
+
+**Implemented (user, 2026-09-29).**
+- `fitting.physics.fit_born_mayer(structures, energy_fn, species,
+  r_inner, r_outer)`: one (A, rho) per species pair found within r_outer
+  in the short-range (SR) structures.  Bounded least squares on the
+  residual energies E_ref - energy_fn (the trained model with every
+  fixed baseline term).
+- CLI: a baseline term `{type: born_mayer, r_inner, r_outer, fit_to:
+  sr.csv}` (or `fit_to: {training_csv, poscar_dir}`), with SR data in the
+  `fit` layout.  After training, the term is fitted and appended to the
+  fixed terms in physics_config; `mlip_summary.json` records
+  `baseline_fit` (pairs, rms before / after, refit).
+- If the fitted term is non-zero on any training structure (> 1e-6 eV),
+  the model is refitted once on labels minus the full baseline, so the
+  training labels and the stored baseline stay consistent.
+- ZBL remains the choice without SR data.
+
+**Verification** (tests/test_mlip_physics.py, +3):
+- Synthetic SR data from known Si-Si and Si-Ge terms: both pairs are
+  recovered (rel 1e-6), residual < 1e-6 eV.
+- CLI, atom-centred and tabular ELM, with SW Si pushes as SR data: the
+  residual rms falls by more than half; the stored term has the fitted
+  Si-Si pair.
+- The refit happens exactly when r_outer reaches the training data
+  (2.3 A: yes; 2.0 A: no).
+- The engine with the fitted term is conservative (fourth-order finite
+  differences).
 
 ## Attractive and oscillating terms (study, not implemented)
 

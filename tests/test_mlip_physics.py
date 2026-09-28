@@ -133,7 +133,7 @@ def test_engine_adds_the_baseline_atom_centred_and_tabular(tmp_path):
     assert st.energy == pytest.approx(E, rel=1e-12)
     np.testing.assert_allclose(st.forces(), F, atol=1e-9 * np.abs(F).max())
     np.testing.assert_allclose(st.stress(abs(np.linalg.det(lat))), S, atol=1e-9)
-    _fd4_check(ff, lat, pos, types, 3e-5, tol_f=1e-6 * np.abs(F).max(), tol_s=1e-6)
+    _fd4_check(ff, lat, pos, types, 3e-5, tol_f=1e-6 * np.abs(F).max(), tol_s=1e-8 * np.abs(S).max())
 
     si = _sw_si_structures(12, 0)
     sb = PairBaseline(["Si"], {"type": "zbl", "r_inner": 1.0, "r_outer": 2.0})
@@ -313,3 +313,163 @@ def test_cli_mlip_with_baseline_and_isolated_atom(tmp_path, monkeypatch):
         assert ff.baseline is not None
         E, F, _ = ff(*_isolated(["Si"]))
         assert E == pytest.approx(0.0, abs=1e-8)
+
+
+# ------------------------------------------------------ ACSF inner cutoff
+
+
+def _inner_acsf(inner=(2.0, 2.8)):
+    return ACSF.from_grid(
+        ["Ge", "Sn", "Si"],
+        4.2,
+        g2={"eta": [0.5, 2.0], "rs": [0.0, 2.5]},
+        g4={"eta": [0.02, 0.1], "zeta": [1, 2, 4], "lambda": [-1, 1]},
+        g5={"eta": [0.05], "zeta": [1, 4], "lambda": [-1, 1]},
+        inner_cutoff=inner,
+    )
+
+
+def test_acsf_inner_cutoff_derivatives_and_invisibility():
+    from test_mlip_chain_rule import _distorted_cell
+
+    lat, frac, types = _distorted_cell()  # pairs at 0.99 ... 2.12 ... A
+    ac = _inner_acsf()
+    c = np.random.default_rng(1).normal(size=(len(types), ac.n_per_atom))
+
+    def ff(lat_, pos_, types_):
+        J = ac.atomic_jacobian(lat_, pos_, types_)
+        F, S = J.forces_and_stress(c)
+        return float(np.sum(c * J.G)), F, S
+
+    _fd_check(ff, lat, frac @ lat, types, 1e-6, 1e-7, 1e-8)
+    # a dimer closer than r_off is invisible; inside the switch it is not
+    lat = np.eye(3) * 20.0
+    for r, zero in ((1.9, True), (2.4, False)):
+        G = ac.atomic(lat, np.array([[0, 0, 0], [r, 0, 0.0]]), ["Si", "Si"])
+        assert (np.abs(G).max() == 0.0) == zero
+    # the switch is C1 at r_off and r_on (G2 of a dimer)
+    for r0 in (2.0, 2.8):
+        g = [ac.atomic(lat, np.array([[0, 0, 0], [r, 0, 0.0]]), ["Si", "Si"])[0]
+             for r in (r0 - 1e-6, r0, r0 + 1e-6)]
+        assert np.abs(g[2] - g[0]).max() < 1e-5
+    # config round trip; a config without the key has none
+    assert ACSF.from_config(ac.config()).inner_cutoff == [2.0, 2.8]
+    cfg = ac.config()
+    cfg.pop("inner_cutoff")
+    assert ACSF.from_config(cfg).inner_cutoff is None
+    with pytest.raises(ValueError, match="inner_cutoff"):
+        _inner_acsf((2.8, 2.0))
+
+
+def test_inner_cutoff_with_baseline_engine_is_conservative(tmp_path):
+    """Atom-centred ELM on an inner-cutoff descriptor plus a baseline that
+    covers the blind range: engine forces / stress are derivatives of
+    the total energy across the switch."""
+    structs = _random_structs(10, 0)
+    ac = _inner_acsf((1.4, 2.0))
+    base = PairBaseline(["Ge", "Sn", "Si"], {"type": "zbl", "r_inner": 1.0, "r_outer": 2.0})
+    m = AtomicELMModel(n_hidden=16, r0=0.1, eps0=0.01, verbose=False)
+    m.physics_config = json.dumps({"baseline": base.config()})
+    m.fit(base.subtract(structs), ac)
+    path = str(tmp_path / "m.npz")
+    m.save(path)
+    ff = MLIPForceField(load_mlip_model(path))
+    assert ff.descriptor.inner_cutoff == [1.4, 2.0]
+    lat, pos, types = _close_cell()
+    E, F, S = ff(lat, pos, types)
+    _fd4_check(ff, lat, pos, types, 3e-5, tol_f=1e-6 * np.abs(F).max(), tol_s=1e-8 * np.abs(S).max())
+
+
+# ------------------------------------------- fitted Born-Mayer (follow-up)
+
+
+def test_fit_born_mayer_recovers_known_pair_terms():
+    from akitsushima.fitting.physics import fit_born_mayer
+
+    rng = np.random.default_rng(0)
+    true = PairBaseline(["Ge", "Si"], {
+        "type": "born_mayer", "r_inner": 1.8, "r_outer": 2.4,
+        "pairs": {"Si-Si": {"A": 2000.0, "rho": 0.25}, "Ge-Si": {"A": 4000.0, "rho": 0.22}}})
+    sr = []
+    for _ in range(30):
+        lat, pos = np.eye(3) * 8.0, rng.random((6, 3)) * 8.0
+        t = ["Si", "Ge", "Si", "Si", "Ge", "Si"]
+        e = true.compute(lat, pos, t)[0] + 1.0  # + the "model" energy
+        sr.append(dict(lattice=lat, positions=pos, atom_types=t, ref_energy=e / 6))
+    term, info = fit_born_mayer(sr, lambda *a: 1.0, ["Si", "Ge"], 1.8, 2.4)
+    assert term["pairs"]["Si-Si"]["A"] == pytest.approx(2000.0, rel=1e-6)
+    assert term["pairs"]["Si-Si"]["rho"] == pytest.approx(0.25, rel=1e-6)
+    assert term["pairs"]["Si-Ge"]["A"] == pytest.approx(4000.0, rel=1e-6)
+    assert term["pairs"]["Si-Ge"]["rho"] == pytest.approx(0.22, rel=1e-6)
+    assert info["rms_after_eV"] < 1e-6 < info["rms_before_eV"]
+
+
+def _sw_pushed(structs, rs):
+    """8-atom SW Si cells with atom 0 pushed to r from its nearest
+    neighbour, labelled by SW on the 2x2x2 replica (as _sw_si_structures)."""
+    import itertools
+
+    from akitsushima import PotentialEngine, StillingerWeberPotential
+
+    sw = {"epsilon": 2.1683, "sigma": 2.0951, "a": 1.80, "gamma": 1.20,
+          "lambda": 21.0, "A": 7.049556277, "B": 0.6022245584, "p": 4.0,
+          "q": 0.0, "costheta0": -1.0 / 3.0}
+    eng = PotentialEngine().add(
+        StillingerWeberPotential({("Si", "Si", "Si"): sw}, species=["Si"]))
+    out = []
+    for s in structs:
+        lat, pos = s["lattice"], s["positions"]
+        d = pos - pos[0]
+        d -= np.round(d @ np.linalg.inv(lat)) @ lat
+        dist = np.linalg.norm(d, axis=1)
+        dist[0] = np.inf
+        j = int(np.argmin(dist))
+        for r in rs:
+            p = pos.copy()
+            p[0] = pos[0] + d[j] - d[j] / dist[j] * r
+            shifts = np.array(list(itertools.product(range(2), repeat=3))) @ lat
+            big = (p[None] + shifts[:, None]).reshape(-1, 3)
+            E, F, S = eng.compute(2 * lat, big, ["Si"] * 64)
+            out.append(dict(lattice=lat, positions=p, atom_types=["Si"] * 8,
+                            ref_energy=E / 64, ref_forces=F[:8], ref_stress=S))
+    return out
+
+
+@pytest.mark.parametrize("form,r_outer", [("atom_centred", 2.0), ("tabular", 2.3)])
+def test_cli_fits_born_mayer_to_short_range_data(form, r_outer, tmp_path, monkeypatch):
+    import yaml
+    from test_cli_smoke import _ns
+
+    from akitsushima.cli.parser import _DISPATCH
+
+    monkeypatch.chdir(tmp_path)
+    train = _sw_si_structures(16, 1)
+    _write_layout_b(tmp_path / "train", train)
+    _write_layout_b(tmp_path / "sr", _sw_pushed(train[:6], (1.3, 1.5, 1.7, 1.9)))
+    desc = {"type": "acsf", "r_cut": 3.771, "inner_cutoff": [1.8, 2.0],
+            "g2": {"eta": [4.0], "rs": [2.2, 2.6, 3.0]},
+            "g5": {"eta": [0.05], "zeta": [1, 2], "lambda": [-1, 1]}}
+    ml = {"output_dir": "out", "form": form, "model": "elm", "descriptor": desc,
+          "r0": 0.1, "eps0": 0.01, "n_hidden": 16,
+          "isolated_atom_energy": {"Si": 0.0},
+          "baseline": [{"type": "born_mayer", "r_inner": 1.8, "r_outer": r_outer,
+                        "fit_to": "sr/structures.csv"}]}
+    (tmp_path / "mlip.yaml").write_text(yaml.safe_dump(
+        {"structure": {"training_csv": "train/structures.csv"},
+         "potential": {"species": ["Si"]}, "mlip": ml}))
+    assert _DISPATCH["mlip"](_ns(tmp_path / "mlip.yaml")) == 0
+    summ = json.loads((tmp_path / "out" / "mlip_summary.json").read_text())
+    fit = summ["baseline_fit"]
+    assert fit["rms_after_eV"] < 0.5 * fit["rms_before_eV"]
+    # the rattled training cells have pairs below 2.3 A, none below 2.0 A
+    assert fit["refit"] is (r_outer > 2.2)
+    name = ("atomic_" if form == "atom_centred" else "") + "elm_model.npz"
+    m = load_mlip_model(str(tmp_path / "out" / name))
+    term = json.loads(m.physics_config)["baseline"]["terms"][0]
+    assert term["type"] == "born_mayer" and set(term["pairs"]) == {"Si-Si"}
+    # the engine is conservative with the fitted term in place
+    ff = MLIPForceField(m)
+    (s,) = _sw_pushed(train[6:7], (1.6,))
+    E, F, S = ff(s["lattice"], s["positions"], s["atom_types"])
+    _fd4_check(ff, s["lattice"], s["positions"], s["atom_types"], 3e-5,
+               tol_f=1e-6 * np.abs(F).max(), tol_s=1e-8 * np.abs(S).max())

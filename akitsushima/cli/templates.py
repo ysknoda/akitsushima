@@ -600,8 +600,12 @@ mlip:
   # matmul:        dense       # dense | sparse (CSC product)
   # w_memory:      int8        # int8 (W as integer levels) | float64
   # Physics-informed parts (ADR-0014), with mlip.descriptor only:
-  # baseline: {type: zbl, r_inner: 1.0, r_outer: 1.8}   # fixed repulsion,
-  #                            # r_outer below the data's shortest distance
+  # baseline: {type: zbl, r_inner: 1.2, r_outer: 2.0}   # fixed repulsion,
+  #                            # r_outer at the data's shortest distance,
+  #                            # with descriptor inner_cutoff: [1.8, 2.0]
+  # baseline: [{type: born_mayer, r_inner: 1.8, r_outer: 2.0,
+  #             fit_to: sr/structures.csv}]   # A, rho fitted after training
+  #                            # to short-range data (fit layout, POSCARs)
   # isolated_atom_energy: {Si: 0.0}   # eps(G = 0) = E_atom exactly
   # (b) in-package descriptor.  Example for Si with Stillinger-Weber
   # labels: r_cut = a * sigma = 1.80 * 2.0951 = 3.771 A (SW's own cutoff,
@@ -614,6 +618,8 @@ mlip:
   #   # G5 (no r_jk term): with r_c = 3.771 A two neighbours of a Si atom
   #   # are 3.84 A apart, so G4's fc(r_jk) would drop the bond angles.
   #   g5: {eta: [0.0, 0.05], zeta: [1, 2, 4], lambda: [-1, 1]}
+  #   inner_cutoff: [1.8, 2.0]  # pairs < 1.8 A leave G (ADR-0014); use with
+  #                             # mlip.baseline covering that range
   # write_table: false       # also write the descriptor table CSV
 
 # ----------------------------------------------------------------------

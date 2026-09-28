@@ -331,9 +331,26 @@ r_outer below the shortest distance in the data; it is printed.
 equal the isolated-atom energy when an atom has no neighbour within the
 cutoff: exactly for ELM / QELM (a constrained solve; tabular form for
 one species) and the atom-centred NN.  In ADR-0014's tests the isolated-
-atom limit was exact at little cost.  The baseline gave the NN a
-physical repulsion under compression, but did not tame the ELM / QELM,
-whose direct-link term runs away there (see above).
+atom limit was exact at little cost.
+`mlip.descriptor.inner_cutoff: [r_off, r_on]` switches pairs closer
+than r_off out of the ACSF, so the model cannot run away at close
+contacts (the ELM / QELM direct link otherwise does, see above) and the
+baseline alone acts there.  Put r_on at or below the data's shortest
+distance and let the baseline's r_outer reach r_on.  For example, for Si
+with data from 2.0 A: `inner_cutoff: [1.8, 2.0]`, `baseline: {type: zbl,
+r_inner: 1.2, r_outer: 2.0}`, `isolated_atom_energy: {Si: 0.0}`.  All
+models then gave a repulsive bond-compression curve with unchanged
+accuracy inside the data.
+ZBL is universal, not fitted, and was 20-50 % too soft at 1.0-1.2 A.
+With a few dozen short-range reference points (one atom pushed towards
+a neighbour, from about 1.1 A to the data's edge, in the same `fit`
+layout), a Born-Mayer term can be fitted instead:
+`baseline: [{type: born_mayer, r_inner: 1.8, r_outer: 2.0, fit_to:
+sr/structures.csv}]`.  After training, A and rho (per species pair) are
+fitted to the residual E_ref - E_model and stored in the model.  If the
+term reaches the training data, the model is refitted once.  In
+ADR-0014 this matched the reference within 2 % at 1.0-1.5 A (SW Si)
+and 1.2 A (Tersoff).
 
 With `mlip.descriptor` set (ACSF), `training_csv` is a structure list in the
 `fit` layout above and the descriptors are computed in-package and stored

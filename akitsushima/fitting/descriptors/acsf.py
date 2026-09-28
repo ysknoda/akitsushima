@@ -121,6 +121,25 @@ def _neighbours(lattice, positions, r_cut):
 
 
 @_numba_njit
+def _fcut(r, pi_rc, r_off, r_on):
+    """Cutoff factor and its r-derivative: the cosine cutoff fc(r) times,
+    when r_on > 0, the inner switch s(r) = 0 (r <= r_off), 1 (r >= r_on),
+    t^3 (10 - 15 t + 6 t^2) between, t = (r - r_off) / (r_on - r_off)
+    (C2; ADR-0014: pairs closer than r_off are invisible to the model)."""
+    fc = 0.5 * (math.cos(pi_rc * r) + 1.0)
+    dfc = -0.5 * pi_rc * math.sin(pi_rc * r)
+    if r_on <= 0.0 or r >= r_on:
+        return fc, dfc
+    if r <= r_off:
+        return 0.0, 0.0
+    w = r_on - r_off
+    t = (r - r_off) / w
+    sw = t * t * t * (10.0 - 15.0 * t + 6.0 * t * t)
+    dsw = 30.0 * t * t * (1.0 - t) * (1.0 - t) / w
+    return fc * sw, dfc * sw + fc * dsw
+
+
+@_numba_njit
 def _acsf_kernel(
     ptr,
     nbj,
@@ -137,6 +156,8 @@ def _acsf_kernel(
     pair_index,
     Dc,
     want_deriv,
+    r_off,
+    r_on,
 ):
     """
     Returns G (N, Dc) and dGdv (M, 3, Dc): for neighbour entry m of atom
@@ -163,8 +184,7 @@ def _acsf_kernel(
             vy = vec[m, 1]
             vz = vec[m, 2]
             r = math.sqrt(vx * vx + vy * vy + vz * vz)
-            fc = 0.5 * (math.cos(pi_rc * r) + 1.0)
-            dfc = -0.5 * pi_rc * math.sin(pi_rc * r)
+            fc, dfc = _fcut(r, pi_rc, r_off, r_on)
             for q in range(n2):
                 ch = sp[j] * n2 + q
                 x = r - g2_rs[q]
@@ -184,8 +204,7 @@ def _acsf_kernel(
             ay = vec[m, 1]
             az = vec[m, 2]
             ra = math.sqrt(ax * ax + ay * ay + az * az)
-            fa = 0.5 * (math.cos(pi_rc * ra) + 1.0)
-            dfa = -0.5 * pi_rc * math.sin(pi_rc * ra)
+            fa, dfa = _fcut(ra, pi_rc, r_off, r_on)
             for n in range(m + 1, s1):
                 k = nbj[n]
                 bx = vec[n, 0]
@@ -199,11 +218,9 @@ def _acsf_kernel(
                     continue
                 in_jk = rc_ < r_cut
                 rb = math.sqrt(bx * bx + by * by + bz * bz)
-                fb = 0.5 * (math.cos(pi_rc * rb) + 1.0)
-                dfb = -0.5 * pi_rc * math.sin(pi_rc * rb)
+                fb, dfb = _fcut(rb, pi_rc, r_off, r_on)
                 if in_jk:
-                    fcc = 0.5 * (math.cos(pi_rc * rc_) + 1.0)
-                    dfcc = -0.5 * pi_rc * math.sin(pi_rc * rc_)
+                    fcc, dfcc = _fcut(rc_, pi_rc, r_off, r_on)
                 else:
                     fcc = 0.0
                     dfcc = 0.0
@@ -377,6 +394,11 @@ class ACSF:
     g2      : list of (eta [1/A^2], r_s [A]) pairs.
     g4, g5  : lists of (eta [1/A^2], zeta, lambda) triples, lambda = +1 or
               -1, zeta >= 1.
+    inner_cutoff : optional (r_off, r_on) [A].  Every cutoff factor fc(r)
+              is multiplied by a C2 switch that is 0 for r <= r_off and 1
+              for r >= r_on, so closer pairs (and triplets containing
+              them) do not enter G.  A pair baseline (fitting.physics)
+              then describes the short range alone (ADR-0014).
 
     Feature layout of one atom (Dc columns): G2 blocks for each neighbour
     species (Z order) x each (eta, r_s); then angular blocks for each
@@ -384,9 +406,18 @@ class ACSF:
     G5 (eta, zeta, lambda).
     """
 
-    def __init__(self, species, r_cut, g2=(), g4=(), g5=()):
+    def __init__(self, species, r_cut, g2=(), g4=(), g5=(), inner_cutoff=None):
         self.species = sort_species(species)
         self.r_cut = float(r_cut)
+        # (r_off, r_on): pairs closer than r_off do not enter G (ADR-0014)
+        if inner_cutoff is not None:
+            r_off, r_on = (float(x) for x in inner_cutoff)
+            if not 0.0 <= r_off < r_on < self.r_cut:
+                raise ValueError(
+                    f"ACSF: inner_cutoff needs 0 <= r_off < r_on < r_cut, "
+                    f"got {inner_cutoff} with r_cut {self.r_cut}.")
+            inner_cutoff = [r_off, r_on]
+        self.inner_cutoff = inner_cutoff
         self.g2 = [(float(e), float(rs)) for e, rs in g2]
         self.g4 = [(float(e), float(z), float(l)) for e, z, l in g4]
         self.g5 = [(float(e), float(z), float(l)) for e, z, l in g5]
@@ -403,7 +434,7 @@ class ACSF:
 
     # ------------------------------------------------------------------
     @classmethod
-    def from_grid(cls, species, r_cut, g2=None, g4=None, g5=None):
+    def from_grid(cls, species, r_cut, g2=None, g4=None, g5=None, inner_cutoff=None):
         """
         Build from YAML-style grids: ``g2 = {eta: [...], rs: [...]}`` and
         ``g4`` / ``g5 = {eta: [...], zeta: [...], lambda: [...]}``
@@ -421,7 +452,7 @@ class ACSF:
                 for l in g.get("lambda", [-1, 1])
             ]
 
-        return cls(species, r_cut, g2l, _ang(g4), _ang(g5))
+        return cls(species, r_cut, g2l, _ang(g4), _ang(g5), inner_cutoff)
 
     def config(self) -> dict:
         return {
@@ -431,6 +462,7 @@ class ACSF:
             "g2": self.g2,
             "g4": self.g4,
             "g5": self.g5,
+            **({"inner_cutoff": self.inner_cutoff} if self.inner_cutoff else {}),
         }
 
     def to_json(self) -> str:
@@ -443,7 +475,12 @@ class ACSF:
         if cfg.get("type", "acsf") != "acsf":
             raise ValueError(f"ACSF.from_config: type {cfg.get('type')!r}.")
         return cls(
-            cfg["species"], cfg["r_cut"], cfg["g2"], cfg["g4"], cfg.get("g5", [])
+            cfg["species"],
+            cfg["r_cut"],
+            cfg["g2"],
+            cfg["g4"],
+            cfg.get("g5", []),
+            cfg.get("inner_cutoff"),
         )
 
     @property
@@ -526,6 +563,7 @@ class ACSF:
             self._pair_index,
             self.n_per_atom,
             want_deriv,
+            *(self.inner_cutoff or (0.0, 0.0)),
         )
         return sp, ptr, nbj, vec, G, dGdv
 

@@ -115,7 +115,9 @@ def _fd4_check(ff, lat, pos, types, h, tol_f=1e-7, tol_s=1e-8):
             return ff(lat @ T, frac @ lat @ T, types)[0]
 
         assert -d4(e_cell) / V == pytest.approx(S0[a, b], abs=tol_s), (a, b)
-    np.testing.assert_allclose(F0.sum(axis=0), 0.0, atol=1e-9)
+    np.testing.assert_allclose(
+        F0.sum(axis=0), 0.0, atol=1e-9 + 1e-13 * np.abs(F0).max()
+    )
 
 
 # ---------------------------------------------------------------- ACSF
