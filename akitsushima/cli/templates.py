@@ -598,6 +598,11 @@ mlip:
   # n_levels:      3           # uniform: odd number of levels {-k..k}
   # p_zero:        0.5         # fraction of each column set to zero
   # matmul:        dense       # dense | sparse (CSC product)
+  # w_memory:      int8        # int8 (W as integer levels) | float64
+  # Physics-informed parts (ADR-0014), with mlip.descriptor only:
+  # baseline: {type: zbl, r_inner: 1.0, r_outer: 1.8}   # fixed repulsion,
+  #                            # r_outer below the data's shortest distance
+  # isolated_atom_energy: {Si: 0.0}   # eps(G = 0) = E_atom exactly
   # (b) in-package descriptor.  Example for Si with Stillinger-Weber
   # labels: r_cut = a * sigma = 1.80 * 2.0951 = 3.771 A (SW's own cutoff,
   # Stillinger & Weber, PRB 31, 5262 (1985)); radial G2 centred every

@@ -625,7 +625,7 @@ def test_quantized_elm_quantization_error_is_nonzero():
     labels = np.array(["E"] * n, dtype=object)
 
     model = QuantizedELMModel(n_hidden=64, max_exponent=1, p_zero=0.7,
-                               reg=1e-4, verbose=False, seed=1)
+                               reg=1e-4, verbose=False, seed=1, keep_fp=True)
     model.fit(y, labels, X, val_fraction=0.0)
 
     diag = model.quantization_error(X, y)

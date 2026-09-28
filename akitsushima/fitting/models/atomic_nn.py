@@ -82,6 +82,8 @@ class AtomicNNModel:
         )
         self.species: list = []
         self.descriptor_config = ""
+        # physics-informed parts (ADR-0014): pair baseline, isolated atom
+        self.physics_config = ""
         self._nets = None
         self._fitted = False
 
@@ -115,13 +117,49 @@ class AtomicNNModel:
                 last.bias.fill_(float(e_ref[s]))
 
     def _eps(self, xn, sp):
-        """Per-atom energies of normalised descriptors xn (A, Dc)."""
+        """Per-atom energies of normalised descriptors xn (A, Dc).  While
+        training with isolated_atom_energy: net(x) - net(x0) + E_atom, so
+        eps_s(G = 0) = E_atom,s holds exactly (ADR-0014)."""
         eps = torch.zeros(len(xn), dtype=xn.dtype, device=xn.device)
+        iso = getattr(self, "_iso_t", None)
         for s, net in enumerate(self._nets):
             ma = sp == s
             if bool(ma.any()):
-                eps = eps.index_put((ma.nonzero().view(-1),), net(xn[ma]).view(-1))
+                e = net(xn[ma]).view(-1)
+                if iso is not None:
+                    e = e - net(iso[0][s : s + 1]).view(-1) + iso[1][s]
+                eps = eps.index_put((ma.nonzero().view(-1),), e)
         return eps
+
+    def _iso_setup(self):
+        """Tensors (x0 per species, E_atom per species) of the isolated-
+        atom limit, or None."""
+        from ..physics import physics_from_config
+
+        _, iso = physics_from_config(self.physics_config)
+        if not iso:
+            return None
+        missing = [s for s in self.species if s not in iso]
+        if missing:
+            raise ValueError(
+                f"AtomicNNModel: isolated_atom_energy has no entry for {missing}."
+            )
+        x0 = -np.asarray(self._X_mean) / np.asarray(self._X_std)
+        f32, dev = torch.float32, self.device
+        return (
+            torch.as_tensor(x0, dtype=f32, device=dev),
+            torch.as_tensor([float(iso[e]) for e in self.species], dtype=f32, device=dev),
+        )
+
+    def _iso_fold(self):
+        """Move the constraint into the output bias: bias += E_atom -
+        net(x0), after which the plain network satisfies it."""
+        x0, ea = self._iso_t
+        self._iso_t = None
+        with torch.no_grad():
+            for s, net in enumerate(self._nets):
+                last = (net.mlp if hasattr(net, "mlp") else net)[-1]
+                last.bias += ea[s] - net(x0[s : s + 1]).view(-1)[0]
 
     # ------------------------------------------------------------------
     def _tensors(self, data, structs):
@@ -248,6 +286,7 @@ class AtomicNNModel:
         torch.manual_seed(self.seed)
         self._nets = self._build(len(self.species), Dc)
         self._init_energy_offsets(data, y, ptr, tr)
+        self._iso_t = self._iso_setup()
         opt = torch.optim.Adam(
             self._nets.parameters(),
             lr=self.learning_rate,
@@ -308,6 +347,8 @@ class AtomicNNModel:
         if best_state is not None:
             self._nets.load_state_dict(best_state)
         self._nets.eval()
+        if self._iso_t is not None:
+            self._iso_fold()
         self._fitted = True
         self.fit_time_ = {
             "descriptors": data.t_descriptor,
@@ -408,6 +449,7 @@ class AtomicNNModel:
                 "X_std": self._X_std,
                 "state_dict": self._nets.state_dict(),
                 "descriptor_config": self.descriptor_config,
+                "physics_config": self.physics_config,
             },
             p,
         )
@@ -420,6 +462,7 @@ class AtomicNNModel:
         obj.species = list(ck["species"])
         obj._X_mean, obj._X_std = ck["X_mean"], ck["X_std"]
         obj.descriptor_config = ck["descriptor_config"]
+        obj.physics_config = ck.get("physics_config", "")
         obj._nets = obj._build(len(obj.species), obj._X_mean.shape[1])
         obj._nets.load_state_dict(ck["state_dict"])
         obj._nets.eval()

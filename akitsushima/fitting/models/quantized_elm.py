@@ -28,8 +28,15 @@ class QuantizedELMModel(ELMModel):
                            s_j = max|W[:, j]| / k  (integer arithmetic)
 
     A fraction p_zero of each column (the smallest raw magnitudes) is set
-    to exactly zero.  All levels are integers times s_j, so W also fits
-    in int8 storage (see ``quant_stats``).
+    to exactly zero.
+
+    Storage (ADR-0013): W is kept as integer levels K (int8; int16 when
+    |level| > 127, i.e. pow2 with max_exponent > 6) and the column scales
+    s, W = K * s exactly.  Model files store K and s only.  ``w_memory``
+    chooses what stays in memory after fit: 'int8' (default) keeps K and
+    s only and forms X W as (X K) * s on each call (8x less W memory; a
+    transient float copy of K is made inside the product; engine calls up
+    to 12 % slower); 'float64' also keeps the dense float W.
 
     Parameters
     ----------
@@ -39,9 +46,12 @@ class QuantizedELMModel(ELMModel):
                    a bit count -- 9 levels need 4 bits)
     n_levels     : odd number of levels of 'uniform' (>= 3)
     p_zero       : target fraction in [0, 1) of weights forced to zero
-    use_sparse_w : keep a CSC copy of W
+    use_sparse_w : allow a CSC copy of W (built only for matmul 'sparse')
     matmul       : 'dense' (default) or 'sparse' -- the product X W of the
                    chain-rule rows and the engine uses the CSC copy
+    w_memory     : 'int8' (default) | 'float64' -- see Storage above
+    keep_fp      : keep the full-precision draw after fit (needed only by
+                   :meth:`quantization_error`; default False)
 
     Examples
     --------
@@ -79,6 +89,8 @@ class QuantizedELMModel(ELMModel):
                  n_levels        : int   = 3,
                  matmul          : str   = 'dense',
                  n_bits          : Optional[int] = None,
+                 w_memory        : str   = 'int8',
+                 keep_fp         : bool  = False,
                  **elm_kw):
 
         super().__init__(
@@ -117,8 +129,8 @@ class QuantizedELMModel(ELMModel):
         if levels not in ('pow2', 'ternary', 'uniform'):
             raise ValueError(f"levels must be 'pow2', 'ternary' or "
                              f"'uniform', got {levels!r}")
-        if levels == 'pow2' and max_exponent < 1:
-            raise ValueError(f"max_exponent must be >= 1, got {max_exponent} "
+        if levels == 'pow2' and not 1 <= max_exponent <= 14:
+            raise ValueError(f"max_exponent must be 1..14, got {max_exponent} "
                              f"(use levels: ternary for {{-1, 0, 1}})")
         if levels == 'uniform' and (n_levels < 3 or n_levels % 2 == 0
                                     or n_levels > 255):
@@ -128,6 +140,9 @@ class QuantizedELMModel(ELMModel):
                              f"{matmul!r}")
         if matmul == 'sparse' and not use_sparse_w:
             raise ValueError("matmul 'sparse' needs use_sparse_w.")
+        if w_memory not in ('float64', 'int8'):
+            raise ValueError(f"w_memory must be 'float64' or 'int8', got "
+                             f"{w_memory!r}")
 
         self.levels       = levels
         self.max_exponent = max_exponent
@@ -135,14 +150,16 @@ class QuantizedELMModel(ELMModel):
         self.p_zero       = p_zero
         self.use_sparse_w = use_sparse_w
         self.matmul       = matmul
+        self.w_memory     = w_memory
+        self.keep_fp      = bool(keep_fp)
 
-        # Filled by _quantize_W()
+        # Filled by _quantize_W(): W = _W_int * _W_scale
+        self._W_int     : Optional[np.ndarray] = None  # (D, N_h) int8 / int16
         self._W_scale   : Optional[np.ndarray] = None  # (N_h,) per-col scale
-        self._W_q_dense : Optional[np.ndarray] = None  # (D, N_h) quantized
-        self._W_sparse  = None                          # scipy CSC sparse
+        self._W_sparse  = None                          # CSC (matmul sparse)
         self._quant_stats: Optional[dict]      = None
-        # Filled by fit(): full-precision W before quantisation (bug-fix
-        # F8, see the note in fit() below).
+        # Full-precision draw, kept with keep_fp (bug-fix F8, see
+        # _finish_W and quantization_error).
         self._W_fp: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
@@ -157,6 +174,45 @@ class QuantizedELMModel(ELMModel):
         pos = [2**k for k in range(n + 1)]
         neg = [-2**k for k in range(n + 1)]
         return np.array(sorted(set(neg + [0] + pos)), dtype=np.float64)
+
+    @staticmethod
+    def _int_dtype(kmax: int):
+        return np.int8 if kmax <= 127 else np.int16
+
+    def _int_from_float(self, Wq: np.ndarray, scale=None):
+        """(K, s) of a float quantised W (files written before int
+        storage).  Without stored scales s_j = max|W[:, j]| / kmax: the
+        largest entry of a column always sits on +-kmax (ternary: +-1)."""
+        _, kmax = self._level_set()
+        if scale is None:
+            m = np.abs(Wq).max(axis=0)
+            scale = np.where(m > 0, m / kmax, 1.0)
+        K = np.rint(Wq / scale)
+        if np.abs(K * scale - Wq).max() > 1e-9 * max(np.abs(Wq).max(), 1e-300) \
+                or np.abs(K).max() > kmax:
+            raise ValueError("QuantizedELMModel: stored W is not an integer "
+                             "multiple of its column scales.")
+        return K.astype(self._int_dtype(kmax)), np.asarray(scale, dtype=np.float64)
+
+    def _set_int_W(self, K, scale):
+        """Install W = K * s: the dense float copy (w_memory float64) and
+        the CSC copy (matmul sparse)."""
+        self._W_int, self._W_scale = K, scale
+        self._W = (K * scale) if self.w_memory == 'float64' else None
+        self._W_sparse = None
+        if self.matmul == 'sparse' and self.use_sparse_w:
+            from scipy.sparse import csc_matrix
+            dtype = np.float32 if self.use_float32 else np.float64
+            self._W_sparse = csc_matrix((K * scale).astype(dtype))
+
+    def _w_shape(self):
+        return self._W_int.shape if self._W_int is not None else self._W.shape
+
+    def _W_eff(self) -> np.ndarray:
+        """Dense float W (formed from K and s with w_memory 'int8')."""
+        if self._W is not None or self._W_int is None:
+            return self._W
+        return self._W_int * self._W_scale
 
     def _level_set(self):
         """(integer levels, kmax) of the chosen level set."""
@@ -194,7 +250,7 @@ class QuantizedELMModel(ELMModel):
         """
         levels, kmax = self._level_set()
         D, N_h = W_raw.shape
-        W_q     = np.empty_like(W_raw)
+        W_q     = np.empty_like(W_raw)       # integer levels (float dtype)
         scales  = np.empty(N_h)
 
         zero_counts = np.zeros(N_h, dtype=np.int64)
@@ -220,7 +276,7 @@ class QuantizedELMModel(ELMModel):
                 scales[j] = s
                 col_q = np.where(keep, np.sign(col), 0.0)
                 zero_counts[j] = int(np.sum(col_q == 0))
-                W_q[:, j] = col_q * s
+                W_q[:, j] = col_q
                 continue
 
             s      = max_abs / kmax
@@ -238,89 +294,44 @@ class QuantizedELMModel(ELMModel):
                 col_q[mask_z] = 0.0
 
             zero_counts[j] = int(np.sum(col_q == 0))
-            W_q[:, j]      = col_q * s              # back to original scale
+            W_q[:, j]      = col_q                  # integer level
 
+        K = W_q.astype(self._int_dtype(kmax))
+        self._set_int_W(K, scales)
         total_elems   = D * N_h
-        total_zeros   = int(np.sum(W_q == 0))
-        sparsity      = total_zeros / total_elems
-        unique_levels = np.unique(W_q)
-
-        self._W_scale    = scales
-        self._W_q_dense  = W_q
+        total_zeros   = int(np.sum(K == 0))
         self._quant_stats = {
             "level_set"    : self.levels,
             "max_exponent" : self.max_exponent,
             "p_zero"       : self.p_zero,
             "levels"       : levels.tolist(),
             "n_levels"     : len(levels),
-            "sparsity_W"   : float(sparsity),
+            "sparsity_W"   : total_zeros / total_elems,
             "total_zeros"  : total_zeros,
             "total_elems"  : total_elems,
-            "unique_W_vals": len(unique_levels),
-            "W_mem_dense_MB" : W_q.nbytes / 1e6,
-            # integer levels (|level| <= 127) + one float64 scale per column
-            "W_mem_int8_MB"  : (W_q.size + 8 * N_h) / 1e6,
+            "unique_W_vals": len(np.unique(K)),
+            "W_int_dtype"  : str(K.dtype),
+            "W_mem_dense_MB" : 8 * total_elems / 1e6,
+            # integer levels + one float64 scale per column (what is saved)
+            "W_mem_int8_MB"  : (K.nbytes + scales.nbytes) / 1e6,
         }
-
-        # scipy CSC sparse matrix for multiply-free inference
-        if self.use_sparse_w:
-            from scipy.sparse import csc_matrix
-            dtype = np.float32 if self.use_float32 else np.float64
-            self._W_sparse = csc_matrix(W_q.astype(dtype))
-            nnz = self._W_sparse.nnz
-            self._quant_stats["nnz_W"]       = nnz
+        if self._W_sparse is not None:
+            self._quant_stats["nnz_W"] = self._W_sparse.nnz
             self._quant_stats["W_mem_csc_MB"] = (
                 self._W_sparse.data.nbytes
                 + self._W_sparse.indices.nbytes
                 + self._W_sparse.indptr.nbytes) / 1e6
-        else:
-            self._W_sparse = None
-
-        return W_q
+        return K * scales
 
     # ------------------------------------------------------------------
     def _hidden(self, X_norm: np.ndarray) -> np.ndarray:
-        """
-        Compute the hidden matrix using the quantized W.
-
-        When use_sparse_w=True, uses scipy sparse matmul for the product.
-        In RFF mode the quantized W is used directly.
-        """
-        # Fall back to the dense ELMModel path before fit() has quantised W.
-        if self._W_q_dense is None:
+        """Hidden matrix with the quantised W (through :meth:`_xw`)."""
+        if self._W_int is None:          # before quantisation
             return super()._hidden(X_norm)
-
+        Z = self._xw(X_norm)
         if self.activation == 'rff':
-            # RFF: W shape (D, N_omega), b=None
-            if self.use_sparse_w and self._W_sparse is not None:
-                X_sp = X_norm.astype(np.float32) if self.use_float32 else X_norm
-                Z = np.array(X_sp @ self._W_sparse)   # dense result
-                if self.use_float32: Z = Z.astype(np.float64)
-            else:
-                W_use = (self._W_q_dense.astype(np.float32)
-                         if self.use_float32 else self._W_q_dense)
-                X_use = (X_norm.astype(np.float32)
-                         if self.use_float32 else X_norm)
-                Z = X_use @ W_use
-                if self.use_float32: Z = Z.astype(np.float64)
-            N_omega = self._W_q_dense.shape[1]
-            return np.hstack([np.cos(Z), np.sin(Z)]) / np.sqrt(N_omega)
-
-        # Standard activations
-        b = self._b
-        if self.use_sparse_w and self._W_sparse is not None:
-            X_sp = X_norm.astype(np.float32) if self.use_float32 else X_norm
-            Z = np.array(X_sp @ self._W_sparse)
-            if self.use_float32: Z = Z.astype(np.float64)
-            Z = Z + b
-        else:
-            W_use = (self._W_q_dense.astype(np.float32)
-                     if self.use_float32 else self._W_q_dense)
-            X_use = (X_norm.astype(np.float32)
-                     if self.use_float32 else X_norm)
-            Z = X_use @ W_use + (b.astype(np.float32) if self.use_float32 else b)
-            if self.use_float32: Z = Z.astype(np.float64)
-        return self._act(Z)
+            return np.hstack([np.cos(Z), np.sin(Z)]) / np.sqrt(Z.shape[1])
+        return self._act(Z + self._b)
 
     # ------------------------------------------------------------------
     def _finish_W(self, W_raw: np.ndarray) -> np.ndarray:
@@ -333,7 +344,9 @@ class QuantizedELMModel(ELMModel):
         # the quantised model against itself (always reporting exactly
         # zero error).  Store it before quantising so that
         # quantization_error() has something real to compare against.
-        self._W_fp = W_raw.copy()
+        # (ADR-0013: only with keep_fp, to save memory; quantization_error
+        # refuses without it instead of reporting zero.)
+        self._W_fp = W_raw.copy() if self.keep_fp else None
 
         t_q0 = _time.perf_counter()
         W_q  = self._quantize_W(W_raw)
@@ -342,17 +355,24 @@ class QuantizedELMModel(ELMModel):
             qs = self._quant_stats
             print(f'  Quantization ({t_q*1000:.0f} ms):  '
                   f'levels={qs["levels"]}  sparsity={qs["sparsity_W"]:.3f}')
-        return W_q
+        return W_q if self.w_memory == 'float64' else None
 
     def _xw(self, X: np.ndarray) -> np.ndarray:
         if self.matmul == 'sparse' and self._W_sparse is not None:
             return np.asarray(X @ self._W_sparse, dtype=np.float64)
-        return X @ self._W_eff()
+        if self._W is not None:
+            if self.use_float32:
+                return (X.astype(np.float32)
+                        @ self._W.astype(np.float32)).astype(np.float64)
+            return X @ self._W
+        return (X @ self._W_int) * self._W_scale
 
     def _uwT(self, U: np.ndarray) -> np.ndarray:
         if self.matmul == 'sparse' and self._W_sparse is not None:
             return np.asarray((self._W_sparse @ U.T).T, dtype=np.float64)
-        return U @ self._W_eff().T
+        if self._W is not None:
+            return U @ self._W.T
+        return (U * self._W_scale) @ self._W_int.T
 
     # ------------------------------------------------------------------
     def fit(self,
@@ -490,22 +510,19 @@ class QuantizedELMModel(ELMModel):
         # 0.  The swap must instead target ``self._W_q_dense`` (and disable
         # ``self._W_sparse`` so the dense fallback path in ``_hidden()`` is
         # taken) to actually force a full-precision forward pass.
-        W_q_dense = self._W_q_dense
-        W_sparse  = self._W_sparse
-        W_fp      = self._W_fp
-        if W_fp is None:
-            # No fp reference available (e.g. a reloaded model -- see
-            # QuantizedELMModel.load); fall back to comparing against
-            # itself rather than crashing.
-            y_fp = y_quant.copy()
-        else:
-            self._W_q_dense = W_fp
-            self._W_sparse  = None
-            try:
-                y_fp = self.predict(X)
-            finally:
-                self._W_q_dense = W_q_dense
-                self._W_sparse  = W_sparse
+        # (Swapping the float W now reaches every product: _xw reads
+        # self._W first, and the CSC copy is switched off for the swap.)
+        if self._W_fp is None:
+            raise RuntimeError(
+                "QuantizedELMModel.quantization_error: no full-precision "
+                "reference -- fit with keep_fp=True (reloaded models have "
+                "none; ADR-0013).")
+        W_saved, W_sparse = self._W, self._W_sparse
+        self._W, self._W_sparse = self._W_fp, None
+        try:
+            y_fp = self.predict(X)
+        finally:
+            self._W, self._W_sparse = W_saved, W_sparse
 
         def _mae(a, b):  return float(np.mean(np.abs(a - b)))
         def _rmse(a, b): return float(np.sqrt(np.mean((a - b)**2)))
@@ -536,7 +553,6 @@ class QuantizedELMModel(ELMModel):
             raise RuntimeError("QuantizedELMModel: model has not been fitted.")
         np.savez(path,
                  # ELMModel
-                 W               = self._W,
                  b               = (self._b if self._b is not None
                                     else np.array([])),
                  beta            = self._beta,
@@ -570,7 +586,9 @@ class QuantizedELMModel(ELMModel):
                  matmul          = np.array(self.matmul),
                  p_zero          = np.array(self.p_zero),
                  use_sparse_w    = np.array(self.use_sparse_w),
-                 W_q_dense       = self._W_q_dense,
+                 w_memory        = np.array(self.w_memory),
+                 # W = W_int * W_scale (ADR-0013); no float W is stored
+                 W_int           = self._W_int,
                  W_scale         = self._W_scale,
                  **self._extra_state())
         if self.verbose:
@@ -612,25 +630,23 @@ class QuantizedELMModel(ELMModel):
             matmul           = str(npz['matmul']) if 'matmul' in npz else 'dense',
             p_zero           = float(npz['p_zero']),
             use_sparse_w     = bool(npz.get('use_sparse_w', True)),
+            w_memory         = (str(npz['w_memory']) if 'w_memory' in npz
+                                else 'int8'),
             verbose          = verbose,
         )
-        obj._W         = npz['W']
         b_arr          = npz['b'] if 'b' in npz else np.array([])
         obj._b         = b_arr if b_arr.size > 0 else None
         obj._beta      = npz['beta']
         obj._X_mean    = npz['X_mean']
         obj._X_std     = npz['X_std']
         obj._D         = obj._X_mean.shape[0]
-        obj._W_q_dense = npz['W_q_dense']
-        obj._W_scale   = npz['W_scale']
+        if 'W_int' in npz:
+            obj._set_int_W(npz['W_int'], npz['W_scale'])
+        else:  # files written before integer storage: float W_q_dense
+            obj._set_int_W(*obj._int_from_float(npz['W_q_dense'],
+                                                npz['W_scale']))
         obj._restore_extra_state(npz)
         obj._fitted    = True
-        # A reloaded model has no full-precision reference available
-        # (it was never saved); quantization_error() falls back to
-        # comparing the quantised model against itself in that case.
+        # A reloaded model has no full-precision reference (never saved).
         obj._W_fp      = None
-        if obj.use_sparse_w:
-            from scipy.sparse import csc_matrix
-            dtype = np.float32 if obj.use_float32 else np.float64
-            obj._W_sparse = csc_matrix(obj._W_q_dense.astype(dtype))
         return obj

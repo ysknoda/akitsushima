@@ -54,7 +54,7 @@ _ELM_KEYS = (
     "w_corr_length_search",
 )
 _QELM_KEYS = ("max_exponent", "n_bits", "levels", "n_levels", "p_zero",
-              "use_sparse_w", "matmul")
+              "use_sparse_w", "matmul", "w_memory")
 
 
 def _elm_options(model_type, ml):
@@ -158,18 +158,54 @@ def _structures_and_descriptor(desc_cfg, csv_path, poscar_dir, species, verbose)
     )
 
 
-def _descriptor_table(desc_cfg, csv_path, poscar_dir, ml, species, verbose):
-    """Structures (fit layout) -> ACSF table.  Returns (y, lab, w, X,
-    descriptor)."""
+def _physics(ml, species):
+    """(PairBaseline or None, physics_config JSON) from mlip.baseline and
+    mlip.isolated_atom_energy (ADR-0014)."""
+    import json
+
+    from ..fitting.physics import PairBaseline
+
+    b_cfg, iso = ml.get("baseline"), ml.get("isolated_atom_energy")
+    if not b_cfg and not iso:
+        return None, ""
+    base = PairBaseline(species, b_cfg) if b_cfg else None
+    cfg = {}
+    if base is not None:
+        cfg["baseline"] = base.config()
+    if iso:
+        cfg["isolated_atom_energy"] = {str(k): float(v) for k, v in iso.items()}
+    return base, json.dumps(cfg)
+
+
+def _report_baseline(base, structs):
+    d = base.min_pair_distance(structs)
+    print(
+        f"  Baseline    : {[t['type'] for t in base.terms]}  r_outer="
+        f"{base.r_max} A  (shortest distance in the data: {d:.3f} A)"
+    )
+
+
+def _descriptor_table(desc_cfg, csv_path, poscar_dir, ml, species, verbose,
+                      baseline=None):
+    """Structures (fit layout) -> ACSF table, labels minus the pair
+    baseline (``baseline``, or the one of mlip.baseline when None).
+    Returns (y, lab, w, X, descriptor, baseline, physics_config)."""
     from ..fitting.descriptors import build_table
 
     structs, desc = _structures_and_descriptor(
         desc_cfg, csv_path, poscar_dir, species, verbose
     )
+    cfg = ""
+    if baseline is None:
+        baseline, cfg = _physics(ml, desc.species)
+        if baseline is not None and verbose:
+            _report_baseline(baseline, structs)
+    if baseline is not None:
+        structs = baseline.subtract(structs)
     y, lab, w, X = build_table(
         structs, desc, r0=ml.get("r0", 1.0), eps0=ml.get("eps0", 0.01)
     )
-    return y, lab, w, X, desc
+    return y, lab, w, X, desc, baseline, cfg
 
 
 def _build_atomic_model(model_type, ml, verbose):
@@ -318,8 +354,20 @@ def cmd_mlip(args) -> int:
             f"  Descriptor  : ACSF  r_cut={desc.r_cut} A  species="
             f"{desc.species}  per atom={desc.n_per_atom}"
         )
+        try:
+            base, model.physics_config = _physics(ml_cfg, desc.species)
+        except (ValueError, KeyError) as exc:
+            print(f"ERROR: mlip.baseline: {exc}")
+            return 1
+        if base is not None:
+            _report_baseline(base, structs)
+            structs = base.subtract(structs)
         t1 = _time.perf_counter()
-        model.fit(structs, desc, weight_csv=ml_cfg.get("weight_csv"), **fit_kw)
+        try:
+            model.fit(structs, desc, weight_csv=ml_cfg.get("weight_csv"), **fit_kw)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
         sections.append(
             (f"atom-centred {model_type.upper()} fitting", _time.perf_counter() - t1)
         )
@@ -331,6 +379,8 @@ def cmd_mlip(args) -> int:
             test_structs, _ = _structures_and_descriptor(
                 desc, test_csv, tdir, desc.species, False
             )
+            if base is not None:
+                test_structs = base.subtract(test_structs)
     elif desc_cfg:
         poscar_dir = struct_cfg.get(
             "poscar_dir", os.path.dirname(os.path.abspath(training_csv))
@@ -338,9 +388,13 @@ def cmd_mlip(args) -> int:
         print(
             f"\nTraining data : {training_csv}  (structures, POSCARs in {poscar_dir})"
         )
-        y, lab, w, X, desc = _descriptor_table(
-            desc_cfg, training_csv, poscar_dir, ml_cfg, pot_cfg.get("species"), verbose
-        )
+        try:
+            y, lab, w, X, desc, base, model.physics_config = _descriptor_table(
+                desc_cfg, training_csv, poscar_dir, ml_cfg,
+                pot_cfg.get("species"), verbose)
+        except (ValueError, KeyError) as exc:
+            print(f"ERROR: mlip.baseline: {exc}")
+            return 1
         print(
             f"  Descriptor  : ACSF  r_cut={desc.r_cut} A  species="
             f"{desc.species}  D={desc.n_features}"
@@ -362,7 +416,11 @@ def cmd_mlip(args) -> int:
         # set before fit: w_correlation reads the channel
         # layout from it (ADR-0013)
         model.descriptor_config = desc.to_json()
-        model.fit(y, lab, X, weights=w, **fit_kw, **extra)
+        try:
+            model.fit(y, lab, X, weights=w, **fit_kw, **extra)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
+            return 1
         model.descriptor_config = desc.to_json()
         sections.append((f"{model_type.upper()} fitting", _time.perf_counter() - t1))
         test_csv = ml_cfg.get("test_csv")
@@ -370,11 +428,16 @@ def cmd_mlip(args) -> int:
             tdir = ml_cfg.get(
                 "test_poscar_dir", os.path.dirname(os.path.abspath(test_csv))
             )
-            ty, tl, _, tX, _ = _descriptor_table(
-                desc, test_csv, tdir, ml_cfg, desc.species, False
+            ty, tl, _, tX, *_ = _descriptor_table(
+                desc, test_csv, tdir, ml_cfg, desc.species, False, baseline=base
             )
             test_table = (ty, tl, tX)
     else:
+        if ml_cfg.get("baseline") or ml_cfg.get("isolated_atom_energy"):
+            print("ERROR: mlip.baseline / isolated_atom_energy need in-package "
+                  "descriptors (mlip.descriptor): the baseline is computed "
+                  "from the structures (ADR-0014).")
+            return 1
         print(f"\nTraining data : {training_csv}  (descriptor CSV)")
         model.fit_csv(training_csv, **fit_kw)
         sections.append((f"{model_type.upper()} fitting", _time.perf_counter() - t0))

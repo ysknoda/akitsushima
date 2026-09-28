@@ -161,6 +161,8 @@ class NNModel:
             raise ValueError(f"NNModel: optimizer must be 'adam' or 'lbfgs', "
                              f"got {optimizer!r}.")
         self.descriptor_config = ""   # see ELMModel.descriptor_config
+        # physics-informed parts (ADR-0014): pair baseline, isolated atom
+        self.physics_config = ""
 
         if device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -240,6 +242,12 @@ class NNModel:
     def fit(self, *args, **kwargs) -> 'NNModel':
         """Train the network; see :meth:`_fit` for the arguments.  With
         ``deterministic=True`` the run is bit-reproducible for a seed."""
+        from ..physics import physics_from_config
+        if physics_from_config(self.physics_config)[1]:
+            raise ValueError(
+                "NNModel: isolated_atom_energy is supported by elm / qelm "
+                "(tabular with one species, atom-centred) and the "
+                "atom-centred nn (ADR-0014).")
         if not self.deterministic:
             return self._fit(*args, **kwargs)
         n_thr = torch.get_num_threads()
@@ -618,6 +626,7 @@ class NNModel:
             'row_independent'  : self.row_independent,
             'direct_link'      : self.direct_link,
             'descriptor_config': self.descriptor_config,
+            'physics_config'   : self.physics_config,
         }, p)
         if self.verbose:
             print(f"  NNModel saved -> {p}")
@@ -650,6 +659,7 @@ class NNModel:
         # A checkpoint written before 0.2.0a3 holds a row-independent model.
         obj.row_independent   = bool(ckpt.get('row_independent', True))
         obj.descriptor_config = str(ckpt.get('descriptor_config', ''))
+        obj.physics_config    = str(ckpt.get('physics_config', ''))
         obj._fitted = True
         return obj
 

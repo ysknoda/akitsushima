@@ -157,6 +157,8 @@ class LinearModel:
         # There is no row-independent form: every row is exact.
         self.row_independent = False
         self.descriptor_config = ""  # see ELMModel.descriptor_config
+        # physics-informed parts (ADR-0014): pair baseline, isolated atom
+        self.physics_config = ""
 
         self.coef_: np.ndarray | None = None  # w on raw d
         self.intercept_: float = 0.0  # b
@@ -369,6 +371,12 @@ class LinearModel:
         Fit on a training-format table (see ELMModel.fit for the arguments;
         ``columns`` are the descriptor column names, used by smooth_ridge).
         """
+        from ..physics import physics_from_config
+        if physics_from_config(self.physics_config)[1]:
+            raise ValueError(
+                "LinearModel: isolated_atom_energy is supported by elm / qelm "
+                "(tabular with one species, atom-centred) and the "
+                "atom-centred nn (ADR-0014).")
         labels = np.array([str(c).strip().upper() for c in labels])
         N, D = X.shape
         w_unit = (
@@ -574,6 +582,7 @@ class LinearModel:
             X_std=self._X_std,
             cov_std=(self._cov_std if self._cov_std is not None else np.zeros((0, 0))),
             descriptor_config=np.array(self.descriptor_config),
+            physics_config=np.array(self.physics_config),
         )
         if self.verbose:
             print(f"  LinearModel saved -> {p}")
@@ -597,5 +606,6 @@ class LinearModel:
         obj._X_mean, obj._X_std = z["X_mean"], z["X_std"]
         obj._cov_std = z["cov_std"] if z["cov_std"].size else None
         obj.descriptor_config = str(z["descriptor_config"])
+        obj.physics_config = str(z["physics_config"]) if "physics_config" in z else ""
         obj._fitted = True
         return obj

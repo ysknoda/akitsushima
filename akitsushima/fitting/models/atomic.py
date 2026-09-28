@@ -29,7 +29,7 @@ import time as _time
 import numpy as np
 
 from .csv_io import load_weights_csv, structure_grouped_split
-from .elm import ELMModel, pca_whitening
+from .elm import ELMModel, pca_whitening, solve_constrained
 from .quantized_elm import QuantizedELMModel
 
 __all__ = ["AtomicData", "AtomicELMModel", "AtomicQELMModel"]
@@ -221,6 +221,8 @@ class AtomicELMModel:
         self.unit_kw = dict(unit_kw)
         self.species: list = []
         self.descriptor_config = ""
+        # physics-informed parts (ADR-0014): pair baseline, isolated atom
+        self.physics_config = ""
         self.units: list = []
         self._X_P: list = []
         # (scale factor, correlation length) of the units being drawn
@@ -261,6 +263,25 @@ class AtomicELMModel:
         """Column offsets of the species blocks (the blocks differ in
         width when PCA whitening keeps different numbers of directions)."""
         return np.concatenate([[0], np.cumsum([u._n_out() for u in self.units])])
+
+    def _iso_constraint(self, off, m):
+        """(C, e): one row per species, eps_s(G = 0) = E_atom,s, or
+        (None, None) without isolated_atom_energy (ADR-0014)."""
+        from ..physics import physics_from_config
+
+        _, iso = physics_from_config(self.physics_config)
+        if not iso:
+            return None, None
+        missing = [s for s in self.species if s not in iso]
+        if missing:
+            raise ValueError(
+                f"{type(self).__name__}: isolated_atom_energy has no entry "
+                f"for {missing}."
+            )
+        C = np.zeros((len(self.units), m))
+        for s, u in enumerate(self.units):
+            C[s, off[s] : off[s + 1]] = u._zero_row()
+        return C, np.array([float(iso[e]) for e in self.species])
 
     def _unit_rows(self, u, J, mask_atoms, mask_ent):
         """Contributions of one species' atoms: E-row sum over the atoms,
@@ -400,14 +421,14 @@ class AtomicELMModel:
                 hid[off[s] : off[s] + nh] = True
             jitter = 1e-12 * float(np.mean(np.diag(G)))
 
+            # isolated-atom limit eps_s(G = 0) = E_atom,s (ADR-0014)
+            iso = self._iso_constraint(off, m)
+
             def _solve(reg):
                 pen = np.where(hid, reg, jitter if self.direct_link else reg)
                 Gp = G.copy()
                 Gp[np.diag_indices(m)] += pen
-                try:
-                    return sla.cho_solve(sla.cho_factor(Gp, lower=True), rhs)
-                except np.linalg.LinAlgError:
-                    return sla.lstsq(Gp, rhs)[0]
+                return solve_constrained(Gp, rhs, *iso)
 
             if need_val:
                 Gv, rv, ttv = _normal(val)
@@ -546,7 +567,11 @@ class AtomicELMModel:
             raise RuntimeError(f"{type(self).__name__}: model has not been fitted.")
         arr = {}
         for s, u in enumerate(self.units):
-            arr[f"W_{s}"] = u._W
+            if getattr(u, "_W_int", None) is not None:  # QELM: integers + scales
+                arr[f"W_int_{s}"] = u._W_int
+                arr[f"W_scale_{s}"] = u._W_scale
+            else:
+                arr[f"W_{s}"] = u._W
             arr[f"b_{s}"] = u._b if u._b is not None else np.zeros(0)
             arr[f"beta_{s}"] = u._beta
             arr[f"gamma_{s}"] = u._gamma if u._gamma is not None else np.zeros(0)
@@ -575,6 +600,7 @@ class AtomicELMModel:
             X_std=self._X_std,
             hyper=np.array(json.dumps(hyper)),
             descriptor_config=np.array(self.descriptor_config),
+            physics_config=np.array(self.physics_config),
             **arr,
         )
 
@@ -590,6 +616,7 @@ class AtomicELMModel:
         obj.species = [str(x) for x in z["species"]]
         obj._X_mean, obj._X_std = z["X_mean"], z["X_std"]
         obj.descriptor_config = str(z["descriptor_config"])
+        obj.physics_config = str(z["physics_config"]) if "physics_config" in z else ""
         Dc = obj._X_mean.shape[1]
         obj.units = []
         for s in range(len(obj.species)):
@@ -602,7 +629,12 @@ class AtomicELMModel:
                 **obj.unit_kw,
             )
             u._X_mean, u._X_std, u._D = obj._X_mean[s], obj._X_std[s], Dc
-            u._W = z[f"W_{s}"]
+            if f"W_int_{s}" in z:
+                u._set_int_W(z[f"W_int_{s}"], z[f"W_scale_{s}"])
+            elif hasattr(u, "_set_int_W"):  # QELM file with float W
+                u._set_int_W(*u._int_from_float(z[f"W_{s}"]))
+            else:
+                u._W = z[f"W_{s}"]
             b = z[f"b_{s}"]
             u._b = b if b.size else None
             u._beta = z[f"beta_{s}"]

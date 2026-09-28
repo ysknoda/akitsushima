@@ -102,6 +102,15 @@ class MLIPForceField:
         self.descriptor = descriptor_from_config(model.descriptor_config)
         self.r_cut = float(self.descriptor.r_cut)
         self.atom_centred = bool(getattr(model, "atom_centred", False))
+        from .physics import physics_from_config
+
+        # fixed pair baseline added to the learned part (ADR-0014)
+        self.baseline = physics_from_config(
+            getattr(model, "physics_config", ""))[0]
+        if self.baseline is not None and self.baseline.r_max > self.r_cut:
+            raise ValueError(
+                f"MLIP engine: the baseline's r_outer ({self.baseline.r_max} "
+                f"A) exceeds the descriptor cutoff ({self.r_cut} A).")
 
     @classmethod
     def from_file(cls, path: str) -> "MLIPForceField":
@@ -132,6 +141,10 @@ class MLIPForceField:
         eps, g = self.model.atomic_energy_and_gradient(J.G, J.sp)
         centre = J.centre
         dUdv = np.einsum("mak,mk->ma", J.dGdv, g[centre])
+        if self.baseline is not None:
+            *_, e_b, d_b = self.baseline.from_entries(
+                J.sp, centre, J.nbj, J.vec, J.volume)
+            eps, dUdv = eps + e_b, dUdv + d_b
         return SiteTerms(np.asarray(eps, float), centre, J.nbj.astype(np.int64),
                          np.asarray(J.vec, float), dUdv)
 
@@ -140,7 +153,12 @@ class MLIPForceField:
             J = self.descriptor.atomic_jacobian(lattice, positions, atom_types)
             eps, g = self.model.atomic_energy_and_gradient(J.G, J.sp)
             forces, stress = J.forces_and_stress(g)
-            return float(eps.sum()), forces, stress
+            energy = float(eps.sum())
+            if self.baseline is not None:
+                Eb, Fb, Sb, _, _ = self.baseline.from_entries(
+                    J.sp, J.centre, J.nbj, J.vec, J.volume)
+                energy, forces, stress = energy + Eb, forces + Fb, stress + Sb
+            return energy, forces, stress
         d, XF, XS = self.descriptor.structure_table(lattice, positions, atom_types)
         N = len(atom_types)
         f, g = self.model.energy_and_gradient(d)
@@ -148,6 +166,9 @@ class MLIPForceField:
         forces = N * (XF @ g)
         stress = N * (XS @ g)
         stress = 0.5 * (stress + stress.T)
+        if self.baseline is not None:
+            Eb, Fb, Sb = self.baseline.compute(lattice, positions, atom_types)
+            energy, forces, stress = energy + Eb, forces + Fb, stress + Sb
         return float(energy), forces, stress
 
 

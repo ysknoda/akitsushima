@@ -273,3 +273,43 @@ Moved here from docs/future-work.md (recorded 2026-09-25, ADR-0004).
 docs/future-work.md is removed.  Its FW-2 (additive per-atom LightGBM
 energy model) and FW-4 (force / stress row subsampling for LightGBM) were
 dropped with LightGBM (ADR-0012).
+
+## 11. Second-derivative data and constraints (C, recorded 2026-09-28)
+
+Loss terms on second derivatives of the energy, studied at the user's
+request.
+
+**What they add, and what is already automatic.**
+
+- **Hessian / force constants** Phi_{ia,jb} = d2E / dr_ia dr_jb (DFT
+  finite displacements, phonons).  This is new information per
+  structure: the curvature, not only the slope.
+  - ELM / QELM: every Hessian element is linear in the output weights
+    (beta, gamma), so the closed-form solve remains.  It needs second
+    derivatives of the ACSF (d2G / dr dr) and h''(z), neither of which
+    is implemented.
+  - NN: double back-propagation (create_graph through the force); costly
+    but standard.
+- **Elastic tensor** C_abcd = (1/V) d2E / d eps_ab d eps_cd.
+  - The clamped-ion part is linear in the ELM weights, like the Hessian.
+  - The relaxed-ion tensor C - Lambda Phi^+ Lambda^T (the internal
+    relaxation term) is not linear in them.  For the ELM it would need an
+    iterative (Gauss-Newton) outer loop.
+- **Constraints that hold by construction.**  The acoustic sum rule
+  (sum_j Phi_{ia,jb} = 0), Hessian symmetry (Phi_{ia,jb} = Phi_{jb,ia}),
+  stress symmetry and the rotational (Born-Huang) invariance conditions
+  hold exactly for every model here:
+  - E depends only on relative positions (ASR).
+  - Phi is the second derivative of one scalar (symmetry, by Schwarz).
+  - The descriptor is rotation invariant (rotational conditions; at a
+    non-equilibrium geometry they involve the forces / stress, which the
+    model also supplies consistently).
+  As losses they would be zero.  They matter as checks and as filters on
+  reference data: DFT finite-difference force constants violate ASR and
+  symmetry through numerical noise.  Symmetrising those labels is the
+  right place.  They would need losses only for a model that predicts
+  the Hessian with a separate head, which none does.
+
+**Open questions:** ACSF second derivatives (cost, memory: N x 3 x N x 3
+per structure); which data (phonon Hessians, elastic constants from
+DFT); weights of Hessian rows in the ADR-0004 rule.

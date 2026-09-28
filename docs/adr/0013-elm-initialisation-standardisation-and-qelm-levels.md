@@ -295,3 +295,118 @@ less than the float64 W (e.g. GeSn ac N_h 2000: 0.90 MB against
 the PCA map (0.76 MB) then becomes a large share.  This needs a compact
 save format (int8 levels + scales, no duplicate W, `_W_fp` optional), a
 change of the QELM file format that has not been made yet.
+
+## QELM integer storage (user request 2026-09-28)
+
+**Implementation.**  The quantised W is held as integer levels K and
+column scales s, W = K * s exactly (K int8; int16 when a level exceeds
+127, i.e. pow2 with max_exponent 7..14, now the allowed range).
+
+- Files store `W_int` and `W_scale` only: no float W, no duplicate, no
+  full-precision draw.  The atom-centred file stores `W_int_s` /
+  `W_scale_s` per species.
+- `w_memory: float64` (default) keeps a dense float W for the products,
+  as before.  `w_memory: int8` keeps K and s only and forms X W as
+  (X K) * s on every call.  numpy casts K to float inside the product,
+  so a transient float copy exists during a call.
+- The full-precision draw is kept only with `keep_fp: true`, which only
+  `quantization_error` needs; without it that method now raises instead
+  of comparing the model with itself.  The CSC copy is built only for
+  `matmul: sparse`.
+- Files with a float W still load.  In the tabular form, `W_q_dense` is
+  converted with its stored scales.  In the atom-centred form, which
+  stored no scales, s_j = max|W[:, j]| / kmax: the largest entry of a
+  column always sits on the top level.  The conversion checks that the
+  result is exactly integer.
+
+**Verification** (tests/test_elm_options.py, +6 tests, 32 in total):
+- For pow2, ternary and uniform: W equals K * s bit for bit, and the file
+  holds int8 levels and no float W.
+- The reloaded model predicts the same to 1e-12.
+- `w_memory: int8` keeps no float W, and its predictions, engine E / F / S
+  match float64 mode to 1e-9.
+- Atom-centred int8 mode:
+  - The same fitted model gives the same result through the int path and
+    the float path (1e-10).
+  - Training in the two modes differs only by product rounding amplified
+    by the solve (2e-7 on random labels).
+  - After save / load, forces and stress equal fourth-order finite
+    differences.
+- Old-format files load to the same integer levels (tabular and
+  atom-centred).
+- max_exponent 8 gives int16; `quantization_error` needs `keep_fp`.
+
+**Storage and speed, same conditions** (example/mlip/adr0013/memory.md;
+data, descriptor, N_h, seed, reg 1e6 and PCA equal; MB = 1e6 bytes; one
+process):
+
+| data / form | N_h | ELM file / memory | QELM int8 file / memory | ELM / QELM int8 engine ms | F / sigma ELM / QELM |
+|---|---|---|---|---|---|
+| Si / ac | 400 | 0.372 / 0.363 | 0.124 / 0.114 | 5.79 / 5.54 | 1.71 / 1.71 |
+| Si / ac | 2000 | 1.550 / 1.540 | 0.307 / 0.296 | 7.07 / 7.18 | 1.79 / 1.71 |
+| GeSn / ac | 400 | 2.192 / 2.186 | 0.978 / 0.971 | 18.25 / 17.39 | 1.87 / 1.81 |
+| GeSn / ac | 2000 | 7.824 / 7.818 | 1.753 / 1.746 | 18.67 / 20.29 | 1.96 / 2.01 |
+| GeSn / tab | 400 | 2.946 / 2.933 | 1.731 / 1.715 | 23.23 / 22.64 | 1.92 / 1.89 |
+| GeSn / tab | 2000 | 8.552 / 8.539 | 2.467 / 2.451 | 32.63 / 36.68 | 2.81 / 2.94 |
+
+- Files and in-memory models are 1.7-5.2x smaller than the ELM's.
+- The W itself is 7.4x smaller (int8 plus one scale per column).
+- The fit time is unchanged, and an engine call is at most 12 % slower
+  (GeSn tab N_h 2000).
+- The float64 memory mode is 6-13 % larger than the ELM, because it keeps
+  both copies of W; its file is as small as in int8 mode.
+- Once W is compressed, the PCA whitening map (float64, D x D per species)
+  is the largest part: 1.5 of 2.5 MB in GeSn tab.  Storing it in float32
+  would halve that; not done, since it is part of every ELM model.
+
+## Quantised atom-centred NN: study (2026-09-28, example/mlip/adr0013/nn_quant.py)
+
+**Method.**  Post-training quantisation (PTQ) of a trained
+`AtomicNNModel` ([64, 64], softplus, deterministic, default PCA
+standardisation not applied: the NN keeps z-score).  Every hidden Linear
+weight matrix is quantised per output row, with a symmetric scale.  The
+biases and the direct link stay in float.  The quantised network is
+still smooth in its input, so its forces remain exact derivatives of its
+energy; only accuracy is at stake.  Data as in the evaluation (sigma /
+10), one seed.  Results are test RMSE / sigma, E / F / S:
+
+| data | float | int8 (+-127) | pow2 (max_exponent 3, p_zero 0.5) | ternary (p_zero 0.5) | weights float64 / int8 | all parameters |
+|---|---|---|---|---|---|---|
+| SW Si | 2.18 / 2.83 / 1.89 | 6.48 / 2.85 / 2.00 | 144 / 13.2 / 29.3 | 461 / 12.5 / 14.8 | 79 / 10 KB | 81 KB |
+| SW GeSn | 2.99 / 2.56 / 1.49 | 3.49 / 2.56 / 1.46 | 130 / 9.5 / 6.6 | 254 / 10.7 / 19.0 | 290 / 36 KB | 295 KB |
+
+**Findings.**
+- **int8 PTQ keeps forces and stress** (F unchanged) but shifts
+  energies: E grows 3x on Si (to 1.3 meV/atom).  The shift is a nearly
+  constant energy offset from the rounding.  A cheap fix is to re-solve
+  the last layer (and the direct link) by linear least squares with the
+  quantised hidden layers frozen -- the ELM solve.  Not tried here.
+- **pow2 and ternary PTQ destroy the trained network.**  Unlike the ELM,
+  where W is random and quantised before the output layer is solved, an
+  NN's trained weights carry the fit.  Coarse levels would need
+  quantisation-aware training (straight-through estimator), with the
+  forces as double-backprop through the quantiser -- not justified for
+  the gain below.
+- **Little to save.**  The whole NN is 81-295 KB, already 4-7x smaller
+  than an ELM with N_h 400 (0.37-2.2 MB); int8 would save 70-260 KB.  The
+  memory case for quantisation is the ELM's large random W, which QELM
+  now covers.
+
+**Conclusion.**  A quantised NN is feasible (int8 PTQ, plus a last-layer
+re-solve for the energy offset), but its memory benefit is small.  It is
+not implemented; recorded as an option.
+
+**Decision (user, 2026-09-28): a quantised NN is not recommended and not
+implemented.**  The reasons are the study above:
+- The NN's parameters are already small.
+- Coarse levels would need quantisation-aware training.
+- int8 PTQ shifts the energy.
+Quantisation stays the QELM's role.  `w_memory: int8` is the QELM
+default (same date).
+
+**PCA and memory.**  With W in int8, the whitening map is the largest part
+of a QELM file: D x D float64 per species, e.g. 1.52 of 2.47 MB for GeSn
+tabular N_h 2000.  `standardize: zscore` stores two D-vectors instead,
+which brings that file to about 0.95 MB.  The cost is the PCA accuracy
+gain (7 % force error on average here).  Storing the map in float32
+would halve it without giving up whitening; not done.

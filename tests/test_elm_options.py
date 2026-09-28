@@ -298,3 +298,111 @@ def test_cli_passes_the_options_to_the_models():
     assert e.w_correlation == "radial" and not hasattr(e, "levels")
     a = _build_atomic_model("qelm", ml, False)
     assert a.unit_kw["levels"] == "ternary" and a.unit_kw["standardize"] == "pca"
+
+
+# ------------------------------------------------------ QELM integer storage
+
+
+@pytest.mark.parametrize("levels", ["pow2", "ternary", "uniform"])
+def test_qelm_file_holds_integer_levels_and_int8_memory_mode(si_table, levels, tmp_path):
+    structs, ac, y, lab, w, X = si_table
+    kw = dict(n_hidden=30, levels=levels, n_levels=7, verbose=False)
+    m = QuantizedELMModel(w_memory="float64", **kw).fit(y, lab, X, weights=w)
+    m.descriptor_config = ac.to_json()
+    # W is exactly integer levels times column scales
+    np.testing.assert_array_equal(m._W, m._W_int * m._W_scale)
+    assert m._W_int.dtype == np.int8 and m._W_fp is None and m._W_sparse is None
+    path = str(tmp_path / "q.npz")
+    m.save(path)
+    z = np.load(path)
+    assert "W" not in z.files and "W_q_dense" not in z.files
+    assert z["W_int"].dtype == np.int8
+    r = load_mlip_model(path)
+    np.testing.assert_allclose(r.predict_table(lab, X), m.predict_table(lab, X),
+                               rtol=0, atol=1e-12)
+    # int8 in memory: no float W kept, same predictions and engine
+    i8 = QuantizedELMModel(w_memory="int8", **kw).fit(y, lab, X, weights=w)
+    assert i8._W is None and i8._W_int.nbytes * 8 == m._W.nbytes
+    np.testing.assert_allclose(i8.predict_table(lab, X), m.predict_table(lab, X),
+                               rtol=0, atol=1e-9)
+    i8.descriptor_config = ac.to_json()
+    s = structs[2]
+    E1, F1, S1 = MLIPForceField(i8)(s["lattice"], s["positions"], s["atom_types"])
+    E0, F0, S0 = MLIPForceField(m)(s["lattice"], s["positions"], s["atom_types"])
+    assert E1 == pytest.approx(E0, abs=1e-9)
+    np.testing.assert_allclose(F1, F0, atol=1e-9)
+    np.testing.assert_allclose(S1, S0, atol=1e-10)
+
+
+def test_atomic_qelm_int8_storage_memory_mode_and_engine(tmp_path):
+    structs = _random_structs(12, 0)
+    kw = dict(n_hidden=24, r0=0.1, eps0=0.01, reg=1e-6, verbose=False)
+    m = AtomicQELMModel(**kw).fit(structs, _acsf())  # int8 by default
+    assert all(u._W is None and u._W_int.dtype == np.int8 for u in m.units)
+    ref = AtomicQELMModel(w_memory="float64", **kw).fit(structs, _acsf())
+    s = structs[1]
+    J = _acsf().atomic_jacobian(s["lattice"], s["positions"], s["atom_types"])
+    # training in the two modes differs only by product rounding, amplified
+    # by the solve (random labels, reg 1e-6): 2e-7 absolute here
+    np.testing.assert_allclose(m._predict_structure(J), ref._predict_structure(J),
+                               rtol=1e-5, atol=1e-6)
+    # the same fitted model through the float path gives the same result
+    p_int = m._predict_structure(J)
+    for u in m.units:
+        u._W = u._W_int * u._W_scale
+    np.testing.assert_allclose(m._predict_structure(J), p_int, rtol=0, atol=1e-10)
+    for u in m.units:
+        u._W = None
+    path = str(tmp_path / "a.npz")
+    m.save(path)
+    z = np.load(path)
+    assert not any(k.startswith("W_") and not k.startswith(("W_int", "W_scale"))
+                   for k in z.files)
+    m2 = load_mlip_model(path)
+    assert all(u._W is None for u in m2.units)
+    np.testing.assert_allclose(m2._predict_structure(J), m._predict_structure(J),
+                               atol=1e-12)
+    _fd4_check(MLIPForceField(m2), s["lattice"], s["positions"], s["atom_types"], 3e-5)
+
+
+def test_qelm_files_with_float_w_still_load(si_table, tmp_path):
+    """Files written before integer storage: tabular (W and W_q_dense in
+    float64, with W_scale) and atom-centred (W_s only, no scales)."""
+    structs, ac, y, lab, w, X = si_table
+    m = QuantizedELMModel(n_hidden=20, levels="uniform", n_levels=9,
+                          verbose=False).fit(y, lab, X, weights=w)
+    path = str(tmp_path / "old.npz")
+    m.save(path)
+    d = dict(np.load(path))
+    Wq = d.pop("W_int") * d["W_scale"]
+    d.update(W=Wq, W_q_dense=Wq)
+    for k in ("w_memory", "X_P", "elm_options"):
+        d.pop(k)
+    d["standardize"] = np.array("x")  # ignored key
+    np.savez(path, **d)
+    old = QuantizedELMModel.load(path)
+    np.testing.assert_array_equal(old._W_int, m._W_int)
+    a = AtomicQELMModel(n_hidden=16, verbose=False).fit(structs[:8], ac)
+    ap = str(tmp_path / "old_a.npz")
+    a.save(ap)
+    d = dict(np.load(ap))
+    for s_ in range(len(a.units)):
+        d[f"W_{s_}"] = d.pop(f"W_int_{s_}") * d.pop(f"W_scale_{s_}")
+    np.savez(ap, **d)
+    a2 = AtomicQELMModel.load(ap)
+    for u, v in zip(a.units, a2.units):
+        np.testing.assert_array_equal(u._W_int, v._W_int)
+        np.testing.assert_allclose(u._W_scale, v._W_scale, rtol=1e-14)
+
+
+def test_qelm_wide_levels_use_int16_and_fp_reference_is_opt_in(si_table):
+    structs, ac, y, lab, w, X = si_table
+    m = QuantizedELMModel(n_hidden=10, max_exponent=8, verbose=False)
+    m.fit(y, lab, X, weights=w)
+    assert m._W_int.dtype == np.int16 and np.abs(m._W_int).max() == 256
+    with pytest.raises(RuntimeError, match="keep_fp"):
+        m.quantization_error(X[lab == "E"], y[lab == "E"])
+    k = QuantizedELMModel(n_hidden=10, keep_fp=True, w_memory="int8", verbose=False)
+    k.fit(y, lab, X, weights=w)
+    assert k.quantization_error(X, y)["rmse_delta"] > 0
+    assert k._W is None  # restored after the full-precision pass

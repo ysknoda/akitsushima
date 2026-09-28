@@ -16,6 +16,7 @@ References
   ELM : Huang et al., Neurocomputing 70, 489 (2006)
   LSQR: Paige & Saunders, ACM TOMS 8, 43 (1982)
 """
+import json
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -28,6 +29,30 @@ from .csv_io import (
 )
 
 __all__ = ["ELMModel", "pca_whitening"]
+
+
+def solve_constrained(Gp: np.ndarray, rhs: np.ndarray, C, e) -> np.ndarray:
+    """
+    Minimiser of c^T Gp c - 2 rhs . c subject to C c = e (C: (k, m)),
+    through the KKT system [[Gp, C^T], [C, 0]] [c; lam] = [rhs; e].  The
+    constraint rows are scaled to the size of Gp's diagonal first, which
+    changes nothing in the solution but keeps the system balanced
+    (ADR-0014, isolated-atom limit).  Without C: the plain Cholesky solve.
+    """
+    import scipy.linalg as _sla
+    if C is None:
+        try:
+            return _sla.cho_solve(_sla.cho_factor(Gp, lower=True), rhs)
+        except np.linalg.LinAlgError:
+            return _sla.lstsq(Gp, rhs)[0]
+    m, k = len(rhs), len(e)
+    sc = np.sqrt(max(float(np.mean(np.diag(Gp))), 1e-300))
+    K = np.zeros((m + k, m + k))
+    K[:m, :m] = Gp
+    K[:m, m:] = sc * C.T
+    K[m:, :m] = sc * C
+    return _sla.solve(K, np.r_[rhs, sc * np.asarray(e, float)],
+                      assume_a='sym')[:m]
 
 
 def pca_whitening(Xz: np.ndarray, eps: float = 1e-3,
@@ -351,6 +376,8 @@ class ELMModel:
         # (JSON string; empty for external CSV descriptors).  Needed to
         # run the model as a relax/md engine (ADR-0004, decision 6).
         self.descriptor_config = ""
+        # physics-informed parts (ADR-0014): pair baseline, isolated atom
+        self.physics_config = ""
 
         # Set by fit()
         self._W    : Optional[np.ndarray] = None
@@ -779,17 +806,21 @@ class ELMModel:
     # ------------------------------------------------------------------
     #  Chain-rule design rows (ADR-0004, decision 1)
     # ------------------------------------------------------------------
+    def _w_shape(self):
+        """(D', n) of the hidden weights (QELM may hold them as integers)."""
+        return self._W.shape
+
     def _W_eff(self) -> np.ndarray:
         """Dense hidden-layer weights actually used by _hidden()."""
         return self._W
 
     def _n_hid(self) -> int:
-        return (2 * self._W.shape[1] if self.activation == 'rff'
-                else self._W.shape[1])
+        return (2 * self._w_shape()[1] if self.activation == 'rff'
+                else self._w_shape()[1])
 
     def _n_lin(self) -> int:
         """Number of direct-link weights (0 without direct_link)."""
-        return self._W.shape[0] if self.direct_link else 0
+        return self._w_shape()[0] if self.direct_link else 0
 
     def _n_out(self) -> int:
         """Number of output weights: hidden units, direct-link weights,
@@ -1065,6 +1096,9 @@ X_n = X / X_std, each followed by the PCA map with standardize 'pca').
                 print(f'  Running LSQR (maxiter={self.lsqr_maxiter}) ...')
             use_direct = (self.solver == 'direct'
                           or (self.solver == 'auto' and N_out <= 6000))
+            if not use_direct and self._iso_constraint() is not None:
+                raise ValueError("ELMModel: isolated_atom_energy needs the "
+                                 "direct solver (solver: direct).")
             t_lsqr0 = _time.perf_counter()
             if use_direct and self.reg_search and n_val:
                 # Choose reg on the structure-grouped validation split;
@@ -1147,6 +1181,39 @@ X_n = X / X_std, each followed by the PCA map with standardize 'pca').
 
         return self
 
+    def _iso_constraint(self):
+        """(C, e) of the isolated-atom limit f(0) = E_atom (ADR-0014), or
+        None.  Tabular form: an E row of the zero descriptor; only for one
+        species (for several, d = 0 says nothing about composition)."""
+        from ..physics import physics_from_config
+        _, iso = physics_from_config(self.physics_config)
+        if not iso:
+            return None
+        if self.row_independent:
+            raise ValueError("ELMModel: isolated_atom_energy needs the chain "
+                             "rule (row_independent: false).")
+        species = (json.loads(self.descriptor_config)["species"]
+                   if self.descriptor_config else [])
+        if len(species) != 1:
+            raise ValueError(
+                "ELMModel: isolated_atom_energy in the tabular form needs "
+                "in-package descriptors of one species (d = 0 does not fix "
+                "the composition); use form: atom_centred (ADR-0014).")
+        if species[0] not in iso:
+            raise ValueError(f"ELMModel: isolated_atom_energy has no entry "
+                             f"for {species[0]}.")
+        return self._zero_row()[None, :], np.array([float(iso[species[0]])])
+
+    def _zero_row(self) -> np.ndarray:
+        """Output-weight row of the energy at a zero descriptor:
+        [h(z0), x0 (direct link), 1], x0 the standardised zero vector."""
+        x0 = self._normalise(np.zeros((1, self._X_mean.shape[0])))
+        parts = [self._hidden_from_Z(self._preact(x0))[0]]
+        if self.direct_link:
+            parts.append(x0[0])
+        parts.append([1.0])
+        return np.concatenate(parts)
+
     def _penalty(self, m: int) -> np.ndarray:
         """
         Diagonal ridge penalty of the direct solve.  Without direct_link:
@@ -1190,11 +1257,9 @@ X_n = X / X_std, each followed by the PCA map with standardize 'pca').
                 pen[self._n_hid():] = 1e-12 * float(np.mean(np.diag(G)))
             Gp = G.copy()
             Gp[np.diag_indices(m)] += pen
-            try:
-                return _sla.cho_solve(_sla.cho_factor(Gp, lower=True), rhs)
-            except np.linalg.LinAlgError:
-                return _sla.lstsq(Gp, rhs)[0]
+            return solve_constrained(Gp, rhs, *iso)
 
+        iso = self._iso_constraint() or (None, None)
         if regs:
             res = []
             for r in regs:
@@ -1540,7 +1605,8 @@ X_n = X / X_std, each followed by the PCA map with standardize 'pca').
                     gamma             = (self._gamma if self._gamma is not None
                                          else np.zeros(0)),
                     row_independent   = np.array(self.row_independent),
-                    descriptor_config = np.array(self.descriptor_config))
+                    descriptor_config = np.array(self.descriptor_config),
+                    physics_config    = np.array(self.physics_config))
 
     def _restore_extra_state(self, npz) -> None:
         # A file written before 0.2.0a3 holds a row-independent model.
@@ -1552,6 +1618,8 @@ X_n = X / X_std, each followed by the PCA map with standardize 'pca').
         self._gamma = (npz['gamma'] if self.direct_link else None)
         self.descriptor_config = (str(npz['descriptor_config'])
                                   if 'descriptor_config' in npz else "")
+        self.physics_config = (str(npz['physics_config'])
+                               if 'physics_config' in npz else "")
         if 'X_P' in npz and npz['X_P'].size:
             self._P = npz['X_P']
         if 'elm_options' not in npz:  # saved before ADR-0013: z-score

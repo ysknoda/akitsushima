@@ -283,10 +283,12 @@ G_i for the atom-centred one, one set of weights per species).  For the
 ELM this is the random-vector functional-link (RVFL) network: W and b are
 random and fixed, and beta, gamma and beta_0 are solved together in one
 least-squares system.  The linear part the data contain is then fitted
-exactly, and the hidden layer only has to learn the non-linear remainder;
-outside the training data the model falls back towards that linear
-model instead of towards the saturated hidden units, which extrapolates
-more gracefully.  Regularisation differs by model:
+exactly, and the hidden layer only has to learn the non-linear remainder.
+Outside the training data the model falls back towards that linear
+model instead of towards the saturated hidden units.  That is gentle for
+small excursions, but the linear term is unbounded: for close contacts
+(a bond pushed to 1.2 A) it runs away by hundreds of eV, more so with
+the PCA whitening (ADR-0014).  Regularisation differs by model:
 
 - ELM / QELM: `reg` (and `reg_search`) acts on the hidden-layer weights
   beta only; gamma and beta_0 get only a relative jitter (1e-12 of the
@@ -314,8 +316,24 @@ unit centred on a training input), `w_correlation: radial` with
 `w_corr_length(_search)` (G2 weights correlated along r_s; in-package
 ACSF only; implies z-score).  QELM:
 `levels: pow2 | ternary | uniform`, `max_exponent` (formerly `n_bits`),
-`n_levels`, `p_zero`, `matmul: dense | sparse`; accuracy matches the ELM,
+`n_levels`, `p_zero`, `matmul: dense | sparse`, `w_memory: int8 | float64`
+(default int8: W held and saved as integer levels plus column scales,
+files and memory 1.7-5.2x smaller than the ELM's); accuracy matches the ELM,
 W storage shrinks, the sparse product is not faster in numpy.
+
+**Physics-informed parts (`docs/adr/0014`).**
+`mlip.baseline: {type: zbl, r_inner, r_outer}` (or `born_mayer` with
+per-pair `A`, `rho`; a list of terms) is a fixed short-range repulsion,
+switched off smoothly between r_inner and r_outer.  It is subtracted
+from the labels and added back by the engine (Delta-learning).  Choose
+r_outer below the shortest distance in the data; it is printed.
+`mlip.isolated_atom_energy: {Si: 0.0}` makes every atom-centred energy
+equal the isolated-atom energy when an atom has no neighbour within the
+cutoff: exactly for ELM / QELM (a constrained solve; tabular form for
+one species) and the atom-centred NN.  In ADR-0014's tests the isolated-
+atom limit was exact at little cost.  The baseline gave the NN a
+physical repulsion under compression, but did not tame the ELM / QELM,
+whose direct-link term runs away there (see above).
 
 With `mlip.descriptor` set (ACSF), `training_csv` is a structure list in the
 `fit` layout above and the descriptors are computed in-package and stored
