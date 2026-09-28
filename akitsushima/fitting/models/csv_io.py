@@ -1,5 +1,5 @@
 """CSV loaders shared by every ML-potential model (ELM, QuantizedELM, NN,
-LightGBM): the common 4-column training-data format, the optional
+linear): the common 4-column training-data format, the optional
 block-wise user-weight file, and the structure-grouped train/val split
 that every model's ``fit()`` uses to avoid leaking a structure into both
 splits (see :func:`structure_grouped_split`).
@@ -560,8 +560,8 @@ def structure_grouped_split(labels       : Sequence,
     Both index arrays are sorted ascending (the original file order is
     preserved within each split).  Nothing downstream depends on the rows
     being shuffled: ELM solves one LSQR system over all training rows, NN
-    re-shuffles minibatches every epoch with ``torch.randperm``, and
-    LightGBM is order-independent.  Keeping file order makes a split
+    re-shuffles minibatches every epoch with ``torch.randperm``, and the
+    linear model's normal equations are order-independent.  Keeping file order makes a split
     reproducible and inspectable.
 
     Edge cases

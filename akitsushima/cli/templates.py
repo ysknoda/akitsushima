@@ -530,7 +530,7 @@ _YAML_ELM_DEFAULT = """\
 # akitsushima  --  Machine-learning potential fitting
 # Usage: akitsushima mlip mlip.yaml
 #
-# Available mlip.model choices: elm | qelm | nn | linear | lgbm
+# Available mlip.model choices: elm | qelm | nn | linear
 # The section below shows the default (ELM) configuration in full,
 # followed by commented-out examples for the other model types.
 # Keys not relevant to the selected model are ignored.
@@ -538,7 +538,7 @@ _YAML_ELM_DEFAULT = """\
 # Model form (ADR-0004): elm / qelm / nn learn E/N = f(d) and fit every
 # F and S row as N grad f(d) . X (chain rule), so E, F and S come from one
 # energy function; linear is E/N = w . d + b (exact without the chain
-# rule).  lgbm regresses each row on its own and is not a force field.
+# rule).
 # Row weight on the squared residual: w_cat * w_unit^2 * w_user.
 #
 # Training data -- either
@@ -560,7 +560,7 @@ potential:
 
 mlip:
   output_dir: ./mlip_output
-  model:      elm            # elm | qelm | nn | linear | lgbm
+  model:      elm            # elm | qelm | nn | linear
   n_hidden:   512
   activation: tanh
   solver:     auto           # auto | direct | lsqr
@@ -649,40 +649,6 @@ mlip:
 #   seed:          42
 #   verbose:       true
 #   test_csv:      null
-
-# ----------------------------------------------------------------------
-# Example: model: lgbm  (LightGBM, with Optuna hyperparameter search
-#                        always run as a standard part of fitting)
-# ----------------------------------------------------------------------
-# mlip:
-#   output_dir: ./mlip_output
-#   model:      lgbm
-#   w_energy:   1.0
-#   w_forces:   0.1
-#   w_stress:   10.0
-#   # Fixed (non-optimised) LightGBM parameters, merged with the
-#   # Optuna-selected values (learning_rate, num_leaves, max_depth,
-#   # min_data_in_leaf, bagging_fraction, feature_fraction, lambda_l1,
-#   # lambda_l2, max_bin) before training.  min_gain_to_split is fixed
-#   # at 0 (ADR-0004).
-#   lgbm_params:
-#     objective:       regression
-#     boosting:        gbdt
-#     num_iterations:  100000   # early stopping ends training
-#     bagging_freq:    1
-#     min_data_in_bin: 3
-#     min_gain_to_split: 0.0
-#     metric:          rmse
-#     seed:            0
-#     verbosity:       -1
-#   optuna_trials:  100
-#   optuna_timeout: null      # seconds, null = no timeout
-#   optuna_storage: null      # e.g. sqlite:///lgbm_study.db (resumable)
-#   label_feature:  true      # row label (E/F/S) as a categorical feature
-#   early_stopping_rounds: 100
-#   seed:    42
-#   verbose: true
-#   test_csv: null
 """
 
 _YAML_TSA_DEFAULT = """\

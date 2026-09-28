@@ -12,8 +12,7 @@ F9/F9b (ELMModel's numerical stress fallback reconstructing displaced
 positions with the wrong matrix convention, and a separate factor-of-2
 step-size bug), F10 (ScaledForceEngine strain-clamp row/column
 convention), F12 (allow_pickle=True removal, verified via save/load
-round-trips), F14 (LightGBM Optuna search reusing a Dataset across trials
-that vary max_bin), and S13 (missing _load_potential_json plus a
+round-trips), and S13 (missing _load_potential_json plus a
 JSON-schema mismatch between what cmd_fit's save path writes and what the
 JSON reload path expects).
 """
@@ -686,51 +685,6 @@ def test_quantized_elm_save_load_round_trip_without_pickle(tmp_path):
     np.testing.assert_allclose(reloaded.predict(X), model.predict(X))
 
 
-def test_lightgbm_save_load_round_trip_without_pickle(tmp_path, monkeypatch):
-    from akitsushima.fitting.models import LightGBMModel
-    from akitsushima.utils.optional_lightgbm import HAS_LIGHTGBM, HAS_OPTUNA
-
-    if not (HAS_LIGHTGBM and HAS_OPTUNA):
-        pytest.skip("lightgbm/optuna not installed")
-
-    # Environment note (found while writing this test, not a bug in this
-    # codebase's Python code): importing akitsushima (which imports numba
-    # and mpi4py for the classical engine) in the *same process* as
-    # LightGBM's own OpenMP-based training reproducibly segfaults inside
-    # lightgbm's C extension (__init_from_np2d) on this machine -- but
-    # only when LightGBM's OpenMP thread pool is actually allowed to run
-    # multi-threaded; forcing OMP_NUM_THREADS=1 (verified to avoid the
-    # crash) isolates it to a native OpenMP runtime conflict between
-    # numba's and LightGBM's respective thread pools, not a Python-level
-    # bug. This is a pre-existing risk of the original script's own
-    # dependency footprint (torch+lightgbm+optuna+numba+mpi4py all
-    # importable together), not something introduced by the package
-    # split; a normal CLI invocation of `fit --potential lightgbm` should
-    # avoid it in practice by not also importing the numba-based engine
-    # in the same process (see the Phase 5 CLI lazy-import plan).
-    monkeypatch.setenv("OMP_NUM_THREADS", "1")
-
-    n, D = 60, 3
-    rng = np.random.default_rng(0)
-    X = rng.normal(size=(n, D))
-    y = X[:, 0] + 0.5 * X[:, 1]
-    labels = np.array(["E"] * n, dtype=object)
-
-    model = LightGBMModel(optuna_trials=2, early_stopping_rounds=5, verbose=False, seed=0)
-    model.fit(y, labels, X, val_fraction=0.2)
-    path = str(tmp_path / "lgbm_model")
-    model.save(path)
-
-    with np.load(path + ".npz") as npz:
-        for key in npz.files:
-            assert npz[key].dtype != object
-
-    reloaded = LightGBMModel.load(path)
-    # The row label is a model feature since 0.2.0a3 (ADR-0004).
-    np.testing.assert_allclose(reloaded.predict(X, labels),
-                               model.predict(X, labels))
-
-
 # ===========================================================================
 # S12/F13: make_force_fn's .kind/.engine attributes; compute_all() thin
 # wrapper equivalence
@@ -885,7 +839,6 @@ def test_structure_grouped_split_refuses_to_split_a_single_structure():
 @pytest.mark.parametrize("model_module", [
     "akitsushima.fitting.models.elm",
     "akitsushima.fitting.models.nn",
-    "akitsushima.fitting.models.lightgbm_model",
 ])
 def test_every_model_routes_its_split_through_the_grouped_helper(
         model_module, tmp_path, monkeypatch):
@@ -893,27 +846,12 @@ def test_every_model_routes_its_split_through_the_grouped_helper(
     F17 regression, at the level of the callers.
 
     Fixing ``csv_io.structure_grouped_split`` achieves nothing for a model
-    that still does its own row-wise shuffle -- and indeed ELM, NN and
-    LightGBM each carried their own copy of that shuffle.  This asserts
+    that still does its own row-wise shuffle -- and indeed ELM, NN (and the
+    since removed LightGBM) each carried their own copy of that shuffle.  This asserts
     every model module actually imported the leak-free helper into its own
     namespace, which is what makes the monkeypatched spy below fire.
     """
     import importlib
-
-    # OMP_NUM_THREADS must be pinned BEFORE lightgbm is first imported,
-    # not just before LightGBMModel is constructed.  numba and lightgbm
-    # each bring their own OpenMP runtime, and loading both unpinned in
-    # one process aborts with SIGABRT (the F15 conflict documented for
-    # this package).  The env var only takes effect while the OpenMP
-    # runtime is still uninitialised, so setting it after
-    # import_module() -- as this test originally did -- is too late.
-    # The main dev environment hid this: earlier LightGBM tests in this
-    # file already pin the variable and leave lightgbm in sys.modules,
-    # so import_module() here was a cache hit.  A clean environment
-    # (e.g. the pip_preparation install smoke test) imports it here for
-    # the first time and aborts the whole pytest process.
-    if model_module.endswith("lightgbm_model"):
-        monkeypatch.setenv("OMP_NUM_THREADS", "1")
 
     mod = importlib.import_module(model_module)
     assert hasattr(mod, "structure_grouped_split"), (
@@ -935,14 +873,10 @@ def test_every_model_routes_its_split_through_the_grouped_helper(
 
     if model_module.endswith("elm"):
         m = mod.ELMModel(n_hidden=8, reg=1e-3, verbose=False, seed=0)
-    elif model_module.endswith("nn"):
+    else:
         pytest.importorskip("torch")
         m = mod.NNModel(hidden_layers=[4], epochs=1, batch_size=8,
                         verbose=False, seed=0)
-    else:
-        pytest.importorskip("lightgbm")
-        pytest.importorskip("optuna")
-        m = mod.LightGBMModel(optuna_trials=1, verbose=False, seed=0)
 
     m.fit_csv(str(csv_path), val_fraction=0.34)
 

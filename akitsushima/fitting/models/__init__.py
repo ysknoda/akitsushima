@@ -1,23 +1,19 @@
 """ML-potential model classes.
 
-``NNModel`` and ``LightGBMModel`` are resolved lazily (PEP 562 module
+``NNModel`` and ``AtomicNNModel`` are resolved lazily (PEP 562 module
 ``__getattr__``) rather than imported eagerly here.
 
 Rationale (found during Phase 3 testing, not a correctness bug): merely
-*importing* ``lightgbm``/``optuna``/``torch`` into the same process as an
-already-active numba ``parallel=True`` kernel is enough to destabilise
-this codebase's OpenMP runtime on at least one development machine (a
-reproducible segfault inside LightGBM's C extension, and independently
-inside a numba-compiled kernel, depending on import order -- root-caused
-to numba's and LightGBM's respective OpenMP thread pools coexisting in
-one process, confirmed by the crash disappearing under
-``OMP_NUM_THREADS=1``). ``ELMModel``/``QuantizedELMModel`` only need
-scipy (a hard dependency already used throughout the engine), so they
-stay eager; ``NNModel``/``LightGBMModel`` need optional, OpenMP-based
-native libraries that most users of the classical/ELM force-field path
-never touch, so importing ``akitsushima.fitting`` (or ``.models``) no
-longer drags them in unless a caller actually asks for
-``NNModel``/``LightGBMModel`` by name.
+*importing* an OpenMP-based native library (``torch``; formerly also
+``lightgbm``, removed in ADR-0012) into the same process as an
+already-active numba ``parallel=True`` kernel was enough to destabilise
+this codebase's OpenMP runtime on at least one development machine
+(root-caused to two OpenMP thread pools coexisting in one process,
+confirmed by the crash disappearing under ``OMP_NUM_THREADS=1``).
+``ELMModel``/``QuantizedELMModel``/``LinearModel`` only need scipy, so
+they stay eager; the NN models need torch, which most users of the
+classical/ELM path never touch, so importing ``akitsushima.fitting`` (or
+``.models``) does not drag it in unless a caller asks for them by name.
 """
 from .atomic import AtomicELMModel, AtomicQELMModel
 from .csv_io import load_mlip_csv, load_weights_csv
@@ -30,7 +26,6 @@ __all__ = [
     "QuantizedELMModel",
     "LinearModel",
     "NNModel",
-    "LightGBMModel",
     "AtomicELMModel",
     "AtomicQELMModel",
     "AtomicNNModel",
@@ -40,7 +35,6 @@ __all__ = [
 
 _LAZY = {
     "NNModel": ".nn",
-    "LightGBMModel": ".lightgbm_model",
     "AtomicNNModel": ".atomic_nn",
 }
 

@@ -1,6 +1,6 @@
 """Feedforward neural-network machine-learning potential (Adam-trained
 multilayer perceptron), sharing the same CSV descriptor format as
-ELMModel / QuantizedELMModel / LightGBMModel.
+ELMModel / QuantizedELMModel / LinearModel.
 """
 from typing import Optional
 
@@ -57,7 +57,7 @@ class NNModel:
       w_user : optional user-defined block weight from a weights.csv
                file (see load_weights_csv).
 
-    This is the same rule as ELMModel and LightGBMModel and as the
+    This is the same rule as ELMModel and LinearModel and as the
     classical ``fit`` (w_cat x w_unit^2).
 
     Parameters

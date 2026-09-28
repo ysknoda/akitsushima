@@ -1,8 +1,8 @@
 """Phase 7 acceptance test: the top-level `akitsushima` package's public
 API, including the exact Quick Start example from its own module
-docstring, must work -- and NNModel/LightGBMModel must stay lazy
-(F15/E15-adjacent: importing akitsushima alone, or using any of its
-non-NN/LightGBM classes, must never pull in torch or lightgbm).
+docstring, must work -- and NNModel must stay lazy (F15/E15-adjacent:
+importing akitsushima alone, or using any of its non-NN classes, must
+never pull in torch).
 """
 import subprocess
 import sys
@@ -191,14 +191,14 @@ def test_top_level_symbol_is_exported(name):
     assert name in akitsushima.__all__
 
 
-def test_nn_and_lightgbm_are_lazy_at_top_level(tmp_path):
+def test_nn_is_lazy_at_top_level(tmp_path):
     """F15 regression, verified at the top-level package too: importing
     akitsushima, or touching any of its other classes, must not import
-    torch/lightgbm; only explicitly accessing NNModel/LightGBMModel may.
+    torch; only explicitly accessing NNModel may.
 
     Run in a genuinely fresh subprocess rather than in-process: within
     the shared pytest session, other test modules (test_fitting.py's own
-    NNModel/LightGBMModel tests) legitimately import torch/lightgbm for
+    NNModel tests) legitimately import torch for
     their own purposes, and Python's sys.modules cache is process-wide,
     not per-test -- so an in-process "assert torch not in sys.modules"
     here would depend on test execution order rather than on whether
@@ -228,13 +228,10 @@ def test_nn_and_lightgbm_are_lazy_at_top_level(tmp_path):
         "import sys\n"
         "import akitsushima\n"
         "assert 'torch' not in sys.modules, 'torch imported too eagerly'\n"
-        "assert 'lightgbm' not in sys.modules, 'lightgbm imported too eagerly'\n"
         "_ = akitsushima.NNModel\n"
         + ("assert 'torch' in sys.modules, 'NNModel access did not import torch'\n"
            if has_torch else "")
-        + "assert 'lightgbm' not in sys.modules, "
-        "'accessing NNModel must not import lightgbm'\n"
-        "print('OK')\n"
+        + "print('OK')\n"
     )
     result = subprocess.run([sys.executable, "-c", script],
                            capture_output=True, text=True, timeout=60,

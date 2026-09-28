@@ -19,10 +19,10 @@
 > whose derivatives give the F and S rows (chain rule; `row_independent:
 > true` restores the old per-row form), all models weight the squared
 > residual by w_cat x w_unit^2 x w_user (the ELM Uncertainty Weighting is
-> gone), and LightGBM uses the row label as a feature, standardises each
-> label and searches a new space. ELM / QELM now add a direct linear term
-> by default (`direct_link`), and NN defaults to softplus with a direct
-> linear term. LightGBM files from earlier versions must be refitted.
+> gone). ELM / QELM now add a direct linear term by default
+> (`direct_link`), and NN defaults to softplus with a direct linear term.
+> LightGBM has since been removed (ADR-0012): trees give no conservative
+> force, so it could never drive a solver.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -79,7 +79,6 @@ O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 - `QuantizedELMModel` — ELM with quantised hidden-layer weights
 - `LinearModel` — linear model: OLS, ridge, smoothness-penalised ridge, LASSO, Elastic Net, PLS, Bayesian ridge, ARD
 - `NNModel` — PyTorch feed-forward network (lazily imported)
-- `LightGBMModel` — Gradient-boosted trees + Optuna search (lazily imported)
 - `AtomicELMModel` / `AtomicQELMModel` / `AtomicNNModel` — atom-centred (Behler-Parrinello) models E = sum_i eps_s(G_i), one function per species (ADR-0005)
 - `ACSF` — atom-centred symmetry functions G2 / G4 / G5 with analytic position and cell derivatives
 
@@ -124,15 +123,14 @@ optional extra, installed as needed:
 pip install -e ".[numba]"       # JIT-compiled potential kernels
 pip install -e ".[mpi]"         # multi-rank parallelism (requires mpi4py/mpirun)
 pip install -e ".[torch]"       # NNModel
-pip install -e ".[lightgbm]"    # LightGBMModel + Optuna hyperparameter search
 pip install -e ".[yaml]"        # YAML config files for the CLI
 pip install -e ".[plotting]"    # matplotlib output (NEB/phonon/relax plots)
 pip install -e ".[all]"         # everything above
 ```
 
-`NNModel` and `LightGBMModel` are imported lazily — `import akitsushima`,
-and every other class in the package, never pulls in `torch` or `lightgbm`
-unless you actually reference one of those two classes.
+`NNModel` / `AtomicNNModel` are imported lazily — `import akitsushima`,
+and every other class in the package, never pulls in `torch` unless you
+actually reference one of them.
 
 ## Quick start
 
@@ -190,7 +188,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `esm`    | Effective screening medium |
 | `phonon` | Phonon band structure, DOS, Debye temperature, free energy |
 | `kappa`  | Thermal conductivity (Green-Kubo + optional Slack-Debye) |
-| `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear / LightGBM) |
+| `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
 | `fit`    | Fit a classical potential (LJ / Morse / Born-Mayer / Buckingham / Stillinger-Weber / Tersoff) |
 
 ### Fitting a classical potential
@@ -272,9 +270,35 @@ X = -(1/V) dd/dT.  Per `docs/adr/0004`:
   per-row regression, which is not a force field.
 - **linear** is E/N = w . d + b; with d the per-atom average of atomic
   descriptors it is an atom-centred linear potential.
-- **lgbm** regresses each row on its own (label as a feature); trees give
-  no conservative force, so it is not a force field.
 - Every model weights the squared residual by w_cat x w_unit^2 x w_user.
+
+**Direct linear term (`direct_link`, on by default for ELM / QELM / NN).**
+Besides the hidden layer, the input descriptor enters the output linearly:
+
+    ELM / QELM :  f(x) = beta . g(W x + b) + gamma . x + beta_0
+    NN         :  f(x) = MLP(x) + w . x
+
+with x the standardised descriptor (d for the tabular form, the atom's
+G_i for the atom-centred one, one set of weights per species).  For the
+ELM this is the random-vector functional-link (RVFL) network: W and b are
+random and fixed, and beta, gamma and beta_0 are solved together in one
+least-squares system.  The linear part the data contain is then fitted
+exactly, and the hidden layer only has to learn the non-linear remainder;
+outside the training data the model falls back towards that linear
+model instead of towards the saturated hidden units, which extrapolates
+more gracefully.  Regularisation differs by model:
+
+- ELM / QELM: `reg` (and `reg_search`) acts on the hidden-layer weights
+  beta only; gamma and beta_0 get only a relative jitter (1e-12 of the
+  mean diagonal) that keeps the normal equations definite.  A large reg
+  therefore shrinks the model towards the linear model it contains, not
+  towards zero.
+- NN: the linear weights w start at zero and are trained with the rest;
+  Adam's `weight_decay` applies to all parameters alike.
+
+`direct_link: false` gives the plain ELM (reg on every output weight) and
+the plain MLP.  With the direct term the ELM has D + 1 more fitted
+weights per species (D descriptor components), the NN D more.
 
 With `mlip.descriptor` set (ACSF), `training_csv` is a structure list in the
 `fit` layout above and the descriptors are computed in-package and stored

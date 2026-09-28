@@ -32,7 +32,7 @@ __all__ = ["MLIPForceField", "load_mlip_model"]
 
 
 def load_mlip_model(path: str):
-    """Load an ELM / QELM / NN / linear / LightGBM model file by content."""
+    """Load an ELM / QELM / NN / linear model file by content."""
     if not os.path.isfile(path):
         raise FileNotFoundError(f"MLIP model file not found: '{path}'")
     if path.endswith(".pt"):
@@ -55,9 +55,9 @@ def load_mlip_model(path: str):
 
         return getattr(atomic, cls).load(path)
     if "model_str" in keys:
-        from .models.lightgbm_model import LightGBMModel
-
-        return LightGBMModel.load(path)
+        raise ValueError(
+            f"'{path}' is a LightGBM model file; LightGBM was removed from "
+            f"akitsushima (ADR-0012: trees give no conservative force).")
     if cls == "LinearModel":
         from .models.linear import LinearModel
 
@@ -82,13 +82,6 @@ class MLIPForceField:
 
     def __init__(self, model):
         name = type(model).__name__
-        if name == "LightGBMModel":
-            raise ValueError(
-                "MLIP engine: a LightGBM model cannot drive a solver -- trees "
-                "are piecewise constant, so -dE/dr is zero almost everywhere "
-                "and the model gives no conservative force (ADR-0004, "
-                "decision 3)."
-            )
         if getattr(model, "row_independent", True):
             raise ValueError(
                 f"MLIP engine: this {name} was trained row-independently "
@@ -103,7 +96,7 @@ class MLIPForceField:
                 f"external CSV; akitsushima cannot recompute them for a new "
                 f"structure.  Train on in-package descriptors (mlip: "
                 f"descriptor: ...) to use it as an engine "
-                f"(external descriptors at inference: docs/future-work.md FW-1)."
+                f"(external descriptors at inference: docs/adr/0010 item 9)."
             )
         self.model = model
         self.descriptor = descriptor_from_config(model.descriptor_config)

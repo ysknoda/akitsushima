@@ -1,5 +1,5 @@
 """``akitsushima mlip`` -- fit a machine-learning interatomic potential
-(ELM / QELM / NN / linear / LightGBM) from a YAML config.
+(ELM / QELM / NN / linear) from a YAML config.
 
 Two kinds of training data (ADR-0004):
 
@@ -36,7 +36,6 @@ _MODEL_FILE = {
     "elm": "elm_model.npz",
     "qelm": "qelm_model.npz",
     "nn": "nn_model.pt",
-    "lgbm": "lgbm_model.npz",
     "linear": "linear_model.npz",
 }
 
@@ -70,22 +69,10 @@ def _build_model(model_type, ml, verbose):
             optimizer=ml.get("optimizer", "adam"),
             **common,
         )
-    if model_type == "lgbm":
-        from ..fitting import LightGBMModel
-
-        return LightGBMModel(
-            r0=ml.get("r0", 1.0),
-            eps0=ml.get("eps0", 0.01),
-            lgbm_params=ml.get("lgbm_params", None),
-            optuna_trials=ml.get("optuna_trials", 100),
-            optuna_timeout=ml.get("optuna_timeout", None),
-            optuna_storage=ml.get("optuna_storage", None),
-            optuna_study_name=ml.get("optuna_study_name", "akitsushima_lgbm"),
-            label_feature=ml.get("label_feature", True),
-            early_stopping_rounds=ml.get("early_stopping_rounds", 100),
-            seed=ml.get("seed", 42),
-            **common,
-        )
+    if model_type in ("lgbm", "lightgbm"):
+        raise ValueError(
+            "mlip.model lgbm was removed (ADR-0012): trees give no "
+            "conservative force, so a LightGBM model is no force field.")
     if model_type == "linear":
         from ..fitting import LinearModel
 
@@ -203,7 +190,7 @@ def _build_atomic_model(model_type, ml, verbose):
     raise ValueError(
         f"mlip.form 'atom_centred' supports model elm, qelm or nn, got "
         f"'{model_type}' (a linear tabular model already is atom-centred, "
-        f"ADR-0004 decision 9; LightGBM gives no force, ADR-0005 decision 2)."
+        f"ADR-0004 decision 9)."
     )
 
 
@@ -258,9 +245,6 @@ def cmd_mlip(args) -> int:
             ("device", "auto"),
         ):
             print(f"  {k:<13}: {ml_cfg.get(k, d)}")
-    elif model_type == "lgbm":
-        for k in ("optuna_trials", "optuna_timeout", "optuna_storage", "lgbm_params"):
-            print(f"  {k:<14}: {ml_cfg.get(k)}")
     elif model_type == "linear":
         for k, d in (("method", "ridge"), ("alpha", 1.0e-6), ("alpha_search", None)):
             print(f"  {k:<13}: {ml_cfg.get(k, d)}")
@@ -392,7 +376,6 @@ def cmd_mlip(args) -> int:
     print(f"  Model saved : {model_path}")
     engine = (
         bool(desc_cfg)
-        and model_type != "lgbm"
         and not getattr(model, "row_independent", True)
     )
     print(

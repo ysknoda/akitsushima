@@ -81,7 +81,6 @@ __all__ = [
     "QuantizedELMModel",
     "LinearModel",
     "NNModel",
-    "LightGBMModel",
     "AtomicELMModel",
     "AtomicQELMModel",
     "AtomicNNModel",
@@ -89,12 +88,10 @@ __all__ = [
     "load_weights_csv",
 ]
 
-# NNModel / LightGBMModel are resolved lazily -- see fitting/models/__init__.py
-# for why (avoids an eager torch / lightgbm+optuna import, and the OpenMP
-# runtime conflict with numba that motivated it, for every caller who never
-# touches those two model types).
-_LAZY = {"NNModel": "models", "LightGBMModel": "models",
-         "AtomicNNModel": "models"}
+# NNModel / AtomicNNModel are resolved lazily -- see fitting/models/__init__.py
+# for why (avoids an eager torch import, and the OpenMP runtime conflict
+# with numba that motivated it, for every caller who never touches them).
+_LAZY = {"NNModel": "models", "AtomicNNModel": "models"}
 
 
 def __getattr__(name):

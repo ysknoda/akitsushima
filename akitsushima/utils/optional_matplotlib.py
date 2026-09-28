@@ -1,6 +1,6 @@
 """Optional matplotlib detection, isolated in its own module so that
-importing it never drags in any *other* optional dependency (torch,
-lightgbm, optuna) -- see optional_lightgbm.py / optional_torch.py for why
+importing it never drags in any *other* optional dependency (torch) --
+see optional_torch.py for why
 that isolation matters.
 """
 import warnings

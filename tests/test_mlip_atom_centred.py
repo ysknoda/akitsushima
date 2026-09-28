@@ -351,8 +351,9 @@ def test_cli_atom_centred_refuses_models_without_forces(tmp_path, monkeypatch, c
             }
         )
     )
+    # (lgbm itself was removed, ADR-0012; any non-force model is refused)
     assert _DISPATCH["mlip"](_ns(tmp_path / "m.yaml")) == 1
-    assert "LightGBM" in capsys.readouterr().out
+    assert "elm, qelm or nn" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- NN (last)

@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  esm       Effective Screening Medium\n"
             "  phonon    Phonon band structure, DOS, Debye T, free energy\n"
             "  kappa     Thermal conductivity (Green-Kubo + Slack-Debye)\n"
-            "  mlip      Fit a machine-learning potential (ELM/QELM/NN/LightGBM)\n"
+            "  mlip      Fit a machine-learning potential (ELM/QELM/NN/linear)\n"
             "  fit       Fit a classical potential "
             "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n\n"
             "Examples\n"
@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("esm",    "Effective Screening Medium")
     _add("phonon", "Phonon band structure, DOS, Debye temperature, free energy")
     _add("kappa",  "Thermal conductivity (Green-Kubo + optional Slack-Debye)")
-    _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/LightGBM)")
+    _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
 
     p_fit = sub.add_parser(
         "fit", help="Fit a classical potential "

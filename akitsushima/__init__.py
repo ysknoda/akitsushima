@@ -31,7 +31,6 @@ Force fields
     NNModel          -- PyTorch feedforward network (lazy import)
     AtomicELMModel, AtomicQELMModel, AtomicNNModel
                      -- atom-centred (Behler-Parrinello) models (ADR-0005)
-    LightGBMModel    -- Gradient-boosted trees + Optuna search (lazy import)
 
 Simulation capabilities
 -----------------------
@@ -176,7 +175,7 @@ __all__ = [
     "MieParameterSet", "YukawaParameterSet",
     "StillingerWeberParameterSet", "TersoffParameterSet",
     "ExternalFileEngine", "ScaledForceEngine",
-    "ELMModel", "QuantizedELMModel", "LinearModel", "NNModel", "LightGBMModel",
+    "ELMModel", "QuantizedELMModel", "LinearModel", "NNModel",
     "AtomicELMModel", "AtomicQELMModel", "AtomicNNModel",
     # solvers
     "GeometryOptimiser", "NVTSimulation", "NVESimulation", "NPTSimulation",
@@ -190,16 +189,14 @@ __all__ = [
     "parse_poscar", "write_poscar",
 ]
 
-# NNModel / LightGBMModel are resolved lazily, all the way up from
+# NNModel / AtomicNNModel are resolved lazily, all the way up from
 # fitting/models/__init__.py through fitting/__init__.py to here -- see
-# fitting/models/__init__.py for why (avoids an eager torch / lightgbm+
-# optuna import -- and the OpenMP runtime conflict with numba that
-# motivated it in the first place, see engine's own F15 bug-fix note --
-# for every caller who never touches those two model types, including
-# everyone who just does `import akitsushima` for the classical/engine
-# functionality above).
-_LAZY = {"NNModel": "fitting", "LightGBMModel": "fitting",
-         "AtomicNNModel": "fitting"}
+# fitting/models/__init__.py for why (avoids an eager torch import -- and
+# the OpenMP runtime conflict with numba that motivated it, see engine's
+# own F15 bug-fix note -- for every caller who never touches them,
+# including everyone who just does `import akitsushima` for the
+# classical/engine functionality above).
+_LAZY = {"NNModel": "fitting", "AtomicNNModel": "fitting"}
 
 
 def __getattr__(name):
