@@ -17,7 +17,7 @@ recorded separately in ADR-0005, because it is implemented second.
 ## Background: what the tabular data format means
 
 The `mlip` CSV (`load_mlip_csv`; produced by the user's
-`atomic_descriptor_ver2.0.0.py`, see `docs/future-work.md` FW-1) holds, per
+`atomic_descriptor_ver2.0.0.py`, see ADR-0010 item 9, formerly FW-1) holds, per
 structure with N atoms, one E row, 3N F rows and 6 S rows, in that order:
 
 - E row: target E/N [eV/atom]; descriptor d = the per-atom-averaged structure
@@ -237,11 +237,13 @@ the unweighted fit (A0) is the weighting, which decision 2 changes.
 
 - Atom-centred model E = sum_i eps(X_i): ADR-0005.
 - The comparison of the tabular and atom-centred approaches: ADR-0005.
-- External descriptors / porting `atomic_descriptor_ver2.0.0.py`: FW-1.
+- External descriptors / porting `atomic_descriptor_ver2.0.0.py`: FW-1
+  (now ADR-0010 item 9).
 - An additive per-atom LightGBM energy model (custom objective, gradient of
   each atom = its structure's residual), usable for energy-only
-  Delta-learning: FW-2.
-- Group LASSO, principal-component regression and Huber regression: FW-3.
+  Delta-learning: FW-2 (dropped with LightGBM, ADR-0012).
+- Group LASSO, principal-component regression and Huber regression: FW-3
+  (now ADR-0010 item 10).
 
 ## Consequences
 
@@ -489,7 +491,7 @@ per batch), not the row count.  Consequences:
   time per epoch from 477 to 396 ms (256 rows) and from 131 to 64 ms
   (2000 rows).
 - Subsampling F/S rows would save little here; it matters for LightGBM
-  (cost grows with rows; FW-4) and for the atom-centred model (ADR-0005,
+  (cost grows with rows; FW-4, dropped with LightGBM in ADR-0012) and for the atom-centred model (ADR-0005,
   decision 5).
 
 Comparison (`example/mlip/adr0004/nn_batch_scan.py`; defaults otherwise:

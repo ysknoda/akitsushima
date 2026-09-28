@@ -69,7 +69,7 @@ soon as ADR-0004 is implemented; the full comparison runs after this ADR.
   per-atom ACSF, same G2/G4 parameters). Isolates the model form.
 - (ii) Tabular with the user's `atomic_descriptor_ver2.0.0.py` descriptors
   (RDF/ADF/ODF) against atom-centred ACSF: the combination each would be used
-  with. Accuracy and training time only; an engine for (ii) needs FW-1.
+  with. Accuracy and training time only; an engine for (ii) needs FW-1 (now ADR-0010 item 9).
 
 **Models**: tabular ELM, QELM, NN (chain rule) and LightGBM (row-independent);
 atom-centred ELM, QELM, NN. LightGBM is left out of item (d).
