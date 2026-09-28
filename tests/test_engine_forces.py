@@ -1668,3 +1668,71 @@ def test_sw_two_body_check_handles_absent_and_zero_A_records():
     del missing[("Y", "X", "X")]
     with pytest.raises(ValueError, match="does not"):
         StillingerWeberPotential(missing, species=["X", "Y"])
+
+
+def _fd4(fun, x0, h):
+    """Fourth-order central difference of a scalar function along one coordinate."""
+    return (fun(x0 - 2 * h) - 8 * fun(x0 - h) + 8 * fun(x0 + h) - fun(x0 + 2 * h)) / (12 * h)
+
+
+@pytest.mark.parametrize("m, gam, dr", [(3.0, 1.0, 0.3), (3.0, 0.7, -0.4), (1.0, 1.3, -0.2)])
+def test_tersoff_zeta_term_gradient_is_analytic(m, gam, dr):
+    """ADR-0015: _te_zterm_grad equals fourth-order differences of the zeta
+    term to 1e-9, for m = 1 and 3, gamma != 1 and either sign of r_ij - r_ik,
+    with r_ik inside the cutoff switch (so dfc enters)."""
+    from akitsushima.engine.tersoff import _te_zterm_grad, _te_zterm_scalar_multi
+
+    rng = np.random.default_rng(3)
+    rik = rng.normal(size=3)
+    rik *= 2.85 / np.linalg.norm(rik)            # inside the switch R +/- D
+    rij = rng.normal(size=3)
+    rij *= (2.85 + dr) / np.linalg.norm(rij)
+    par = (2.85, 0.15, 4.8, 2.1, -0.6, 1.3, m, gam)
+    g = _te_zterm_grad(*rij, *rik, *par)
+    for n in range(6):
+        v0 = np.concatenate([rij, rik])
+
+        def z(x):
+            v = v0.copy()
+            v[n] = x
+            return _te_zterm_scalar_multi(*v, *par)
+
+        assert abs(g[n] - _fd4(z, v0[n], 1e-4)) < 1e-9, (n, g[n])
+
+
+def test_tersoff_two_species_forces_stress_are_exact_derivatives():
+    """ADR-0015: with the analytic zeta gradient the two-species Tersoff
+    forces and stress equal fourth-order differences of the energy to 2e-9
+    eV/A (and 1e-9 eV/A^3) on a rattled, sheared cell.  The central
+    differences used before missed by up to 1.0e-7 eV/A on this cell."""
+    from akitsushima.engine import TersoffPotential
+
+    s = randomly_perturbed(diamond_si_dict(2), magnitude=0.08, seed=7)
+    shear = np.array([[1, 0.03, -0.02], [0.01, 1, 0.04], [0, -0.03, 1]]) * (4.4 / 5.431)
+    lat, pos = s["lattice"] @ shear, s["positions"] @ shear
+    types = (["Al"] * 4 + ["N"] * 4) * 8
+    common = dict(A=1258.567263, B=453.228512, lambda1=2.434869, lambda2=1.71768, R=2.55, D=0.15)
+    params = {  # Karaaslan et al., Phys. Rev. Applied 13, 034027 (2020), Table I
+        ("Al", "N", "N"): dict(common, beta=2.133047e-06, n=0.598233, lambda3=1.186759,
+                               c=19110.741778, d=10.88209, h=-0.972662),
+        ("N", "Al", "Al"): dict(common, beta=2.496023e-06, n=1.220882, lambda3=1.100709,
+                                c=27568.039128, d=8.292436, h=-0.816226),
+    }
+    pot = TersoffPotential(params, species=["Al", "N"])
+    _, f, st = pot.compute(lat, pos, types)
+    h = 2e-3
+    for i in (0, 5, 38):
+        for d in range(3):
+            def e(x):
+                p = pos.copy()
+                p[i, d] = x
+                return pot.compute(lat, p, types)[0]
+            assert abs(f[i, d] + _fd4(e, pos[i, d], h)) < 2e-9, (i, d)
+    frac = pos @ np.linalg.inv(lat)
+    vol = abs(np.linalg.det(lat))
+    for a, b in ((0, 0), (0, 1), (2, 1)):
+        def e_eps(x):
+            t = np.eye(3)
+            t[a, b] += x
+            return pot.compute(lat @ t, frac @ (lat @ t), types)[0]
+        assert abs(st[a, b] + _fd4(e_eps, 0.0, h) / vol) < 1e-9, (a, b)

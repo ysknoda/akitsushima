@@ -107,9 +107,8 @@ def _te_zterm_scalar(rijx, rijy, rijz, rikx, riky, rikz,
     Scalar Tersoff zeta angular/exponential term for one (i;j,k) triplet,
     given the relative-displacement vectors r_ij and r_ik.
 
-    This is a plain, Numba-nopython-compatible scalar function used as the
-    building block for the numerical (central-difference) 3-body force
-    derivation in _te_3body_force_numpy / _te_3body_force_numpy_par.
+    Its gradient is _te_zterm_grad (analytic since ADR-0015; the 3-body
+    force kernels used central differences of this function before).
     """
     r_ij = math.sqrt(rijx * rijx + rijy * rijy + rijz * rijz)
     r_ik = math.sqrt(rikx * rikx + riky * riky + rikz * rikz)
@@ -159,6 +158,54 @@ if _HAS_NUMBA:
     _te_zterm_scalar_multi = _numba_njit(_te_zterm_scalar_multi)  # noqa: F811
 
 
+def _te_zterm_grad(rijx, rijy, rijz, rikx, riky, rikz,
+                   R, D, c_t, d_t, h_t, l3, m, gam):
+    """
+    Analytic gradient of one zeta term
+    z = gam * fc(r_ik) * g(cos theta) * exp(l3^m (r_ij - r_ik)^m)
+    with respect to the relative vectors r_ij and r_ik (ADR-0015).
+
+    Returns (dz/drij_x, dz/drij_y, dz/drij_z, dz/drik_x, dz/drik_y,
+    dz/drik_z).  This replaces the central differences (step 1e-6 A) the
+    kernels used before, whose truncation and round-off left the forces
+    ~1e-7 eV/A off the energy derivative (ADR-0007); m is 1 or 3 as in
+    LAMMPS, so (r_ij - r_ik)^(m-1) is real for either sign.
+    """
+    r_ij = math.sqrt(rijx * rijx + rijy * rijy + rijz * rijz)
+    r_ik = math.sqrt(rikx * rikx + riky * riky + rikz * rikz)
+    fc_ik = _te_fc(r_ik, R, D)
+    if fc_ik == 0.0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    dfc_ik = _te_dfc_scalar(r_ik, R, D)
+    inv_ij = 1.0 / r_ij
+    inv_ik = 1.0 / r_ik
+    cos_t = (rijx * rikx + rijy * riky + rijz * rikz) * inv_ij * inv_ik
+    hc = h_t - cos_t
+    q = d_t * d_t + hc * hc
+    g_t = 1.0 + c_t * c_t / (d_t * d_t) - c_t * c_t / q
+    dg = -2.0 * c_t * c_t * hc / (q * q)          # dg / dcos
+    u = r_ij - r_ik
+    ex = _nb_exp(l3**m * u**m)
+    dex = ex * m * l3**m * u**(m - 1.0)           # d ex / du
+    # d cos / d r_ij = r_ik/(|r_ij||r_ik|) - cos r_ij/|r_ij|^2 (and j <-> k)
+    a_j = gam * fc_ik * dg * ex
+    b_j = gam * fc_ik * g_t * dex * inv_ij
+    b_k = gam * (dfc_ik * g_t * ex - fc_ik * g_t * dex) * inv_ik
+    ii_k = inv_ij * inv_ik
+    cj = cos_t * inv_ij * inv_ij
+    ck = cos_t * inv_ik * inv_ik
+    return (a_j * (rikx * ii_k - cj * rijx) + b_j * rijx,
+            a_j * (riky * ii_k - cj * rijy) + b_j * rijy,
+            a_j * (rikz * ii_k - cj * rijz) + b_j * rijz,
+            a_j * (rijx * ii_k - ck * rikx) + b_k * rikx,
+            a_j * (rijy * ii_k - ck * riky) + b_k * riky,
+            a_j * (rijz * ii_k - ck * rikz) + b_k * rikz)
+
+
+if _HAS_NUMBA:
+    _te_zterm_grad = _numba_njit(_te_zterm_grad)  # noqa: F811
+
+
 def _te_3body_force_numpy(p_start, p_end,
                            idx_i, idx_j, rij_arr, r_arr,
                            fc_arr, fa_arr, dbij_ij, dbij_ji,
@@ -167,9 +214,8 @@ def _te_3body_force_numpy(p_start, p_end,
                            R, D, c_t, d_t, h_t, l3, m):
     """
     Tersoff 3-body force/stress correction from d(bond-order)/d(position),
-    computed via central finite differences of _te_zterm_scalar.
+    with the zeta-term gradient from _te_zterm_grad (analytic, ADR-0015).
     """
-    hh = 1e-6
     for p in range(p_start, p_end):
         ii = idx_i[p]
         jj = idx_j[p]
@@ -195,18 +241,8 @@ def _te_3body_force_numpy(p_start, p_end,
                     continue
                 coeff = 0.5 * fc_ij * fa_ij * dbi
 
-                dzj0 = (_te_zterm_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzj1 = (_te_zterm_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzj2 = (_te_zterm_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk0 = (_te_zterm_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk1 = (_te_zterm_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk2 = (_te_zterm_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
+                dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m, 1.0)
 
                 Fj0 = -coeff * dzj0
                 Fj1 = -coeff * dzj1
@@ -255,18 +291,8 @@ def _te_3body_force_numpy(p_start, p_end,
                     continue
                 coeff = 0.5 * fc_ij * fa_ij * dbj
 
-                dzi0 = (_te_zterm_scalar(rjix + hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix - hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzi1 = (_te_zterm_scalar(rjix, rjiy + hh, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy - hh, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzi2 = (_te_zterm_scalar(rjix, rjiy, rjiz + hh, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz - hh, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk0 = (_te_zterm_scalar(rjix, rjiy, rjiz, rjkx + hh, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz, rjkx - hh, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk1 = (_te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky + hh, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky - hh, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk2 = (_te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky, rjkz + hh, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky, rjkz - hh, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
+                dzi0, dzi1, dzi2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rjix, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m, 1.0)
 
                 Fi0 = -coeff * dzi0
                 Fi1 = -coeff * dzi1
@@ -316,7 +342,6 @@ def _te_3body_force_numpy_par(p_start, p_end,
     n_threads = _numba.config.NUMBA_NUM_THREADS
     forces_t = np.zeros((n_threads, N, 3))
     stress_t = np.zeros((n_threads, 3, 3))
-    hh = 1e-6
 
     for p in _numba.prange(p_start, p_end):
         tid = _numba.get_thread_id()
@@ -344,18 +369,8 @@ def _te_3body_force_numpy_par(p_start, p_end,
                     continue
                 coeff = 0.5 * fc_ij * fa_ij * dbi
 
-                dzj0 = (_te_zterm_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzj1 = (_te_zterm_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzj2 = (_te_zterm_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk0 = (_te_zterm_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk1 = (_te_zterm_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk2 = (_te_zterm_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
+                dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz, R, D, c_t, d_t, h_t, l3, m, 1.0)
 
                 Fj0 = -coeff * dzj0
                 Fj1 = -coeff * dzj1
@@ -404,18 +419,8 @@ def _te_3body_force_numpy_par(p_start, p_end,
                     continue
                 coeff = 0.5 * fc_ij * fa_ij * dbj
 
-                dzi0 = (_te_zterm_scalar(rjix + hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix - hh, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzi1 = (_te_zterm_scalar(rjix, rjiy + hh, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy - hh, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzi2 = (_te_zterm_scalar(rjix, rjiy, rjiz + hh, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz - hh, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk0 = (_te_zterm_scalar(rjix, rjiy, rjiz, rjkx + hh, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz, rjkx - hh, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk1 = (_te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky + hh, rjkz, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky - hh, rjkz, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
-                dzk2 = (_te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky, rjkz + hh, R, D, c_t, d_t, h_t, l3, m)
-                        - _te_zterm_scalar(rjix, rjiy, rjiz, rjkx, rjky, rjkz - hh, R, D, c_t, d_t, h_t, l3, m)) / (2 * hh)
+                dzi0, dzi1, dzi2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rjix, rjiy, rjiz, rjkx, rjky, rjkz, R, D, c_t, d_t, h_t, l3, m, 1.0)
 
                 Fi0 = -coeff * dzi0
                 Fi1 = -coeff * dzi1
@@ -614,7 +619,6 @@ def _te_multi_pass3_numpy(p_start, p_end,
     them within a single per-pair loop body (the 3-body correction reuses
     fc_ij/fa computed for the 2-body term of the SAME pair)."""
     energy = 0.0
-    hh = 1e-6
     for p in range(p_start, p_end):
         ii = idx_i[p]
         jj = idx_j[p]
@@ -680,18 +684,8 @@ def _te_multi_pass3_numpy(p_start, p_end,
                 gam = tri_gam[si, sj, sk]
                 coeff = 0.5 * fc_ij * fa * dbi
 
-                dzj0 = (_te_zterm_scalar_multi(rijx + hh, rijy, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rijx - hh, rijy, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzj1 = (_te_zterm_scalar_multi(rijx, rijy + hh, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rijx, rijy - hh, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzj2 = (_te_zterm_scalar_multi(rijx, rijy, rijz + hh, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rijx, rijy, rijz - hh, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzk0 = (_te_zterm_scalar_multi(rijx, rijy, rijz, rikx + hh, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rijx, rijy, rijz, rikx - hh, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzk1 = (_te_zterm_scalar_multi(rijx, rijy, rijz, rikx, riky + hh, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rijx, rijy, rijz, rikx, riky - hh, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzk2 = (_te_zterm_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz + hh, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz - hh, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
+                dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
 
                 Fj0 = -coeff * dzj0
                 Fj1 = -coeff * dzj1
@@ -751,18 +745,8 @@ def _te_multi_pass3_numpy(p_start, p_end,
                 gam = tri_gam[sj, si, sk]
                 coeff = 0.5 * fc_ij * fa * dbj
 
-                dzi0 = (_te_zterm_scalar_multi(rjix + hh, rjiy, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rjix - hh, rjiy, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzi1 = (_te_zterm_scalar_multi(rjix, rjiy + hh, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rjix, rjiy - hh, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzi2 = (_te_zterm_scalar_multi(rjix, rjiy, rjiz + hh, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rjix, rjiy, rjiz - hh, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzk0 = (_te_zterm_scalar_multi(rjix, rjiy, rjiz, rjkx + hh, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rjix, rjiy, rjiz, rjkx - hh, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzk1 = (_te_zterm_scalar_multi(rjix, rjiy, rjiz, rjkx, rjky + hh, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rjix, rjiy, rjiz, rjkx, rjky - hh, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
-                dzk2 = (_te_zterm_scalar_multi(rjix, rjiy, rjiz, rjkx, rjky, rjkz + hh, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
-                        - _te_zterm_scalar_multi(rjix, rjiy, rjiz, rjkx, rjky, rjkz - hh, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)) / (2 * hh)
+                dzi0, dzi1, dzi2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rjix, rjiy, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
 
                 Fi0 = -coeff * dzi0
                 Fi1 = -coeff * dzi1
@@ -929,41 +913,17 @@ class TersoffPotential:
         to the positions of atoms j and k (position of i follows from
         translation invariance: dz/dpos_i = -(dz/dpos_j + dz/dpos_k)).
 
-        Computed via central finite differences of the SCALAR zeta term
-        directly with respect to the components of the relative vectors
-        rij_v, rik_v (rather than via an error-prone hand-derived
-        analytic chain-rule expression through r_ij, r_ik, cos(theta)).
+        Analytic (_te_zterm_grad, ADR-0015); the i-k cutoff is fc(r; R, D).
 
         Parameters
         ----------
-        fc_func : callable(r) -> (fc, dfc) for the i-k pair cutoff.
+        fc_func : unused; kept so existing callers need not change.
         """
-        def _zterm(rij, rik):
-            r_ij = float(np.linalg.norm(rij))
-            r_ik = float(np.linalg.norm(rik))
-            fc_ik, _ = fc_func(r_ik)
-            if fc_ik == 0.0:
-                return 0.0
-            cos_t = float(np.dot(rij, rik)) / (r_ij * r_ik)
-            g_t = 1.0 + c_t**2 / d_t**2 - c_t**2 / (d_t**2 + (h_t - cos_t)**2)
-            return gam * fc_ik * g_t * math.exp(l3**m * (r_ij - r_ik)**m)
-
-        h = 1e-6
-        dz_dposj = np.zeros(3)
-        dz_dposk = np.zeros(3)
-        for d_ in range(3):
-            rp = rij_v.copy()
-            rp[d_] += h
-            rm = rij_v.copy()
-            rm[d_] -= h
-            dz_dposj[d_] = (_zterm(rp, rik_v) - _zterm(rm, rik_v)) / (2 * h)
-        for d_ in range(3):
-            rp = rik_v.copy()
-            rp[d_] += h
-            rm = rik_v.copy()
-            rm[d_] -= h
-            dz_dposk[d_] = (_zterm(rij_v, rp) - _zterm(rij_v, rm)) / (2 * h)
-        return dz_dposj, dz_dposk
+        g = _te_zterm_grad(float(rij_v[0]), float(rij_v[1]), float(rij_v[2]),
+                           float(rik_v[0]), float(rik_v[1]), float(rik_v[2]),
+                           float(R), float(D), float(c_t), float(d_t),
+                           float(h_t), float(l3), float(m), float(gam))
+        return np.array(g[:3]), np.array(g[3:])
 
     # ------------------------------------------------------------------
     def site_terms(self, lattice, positions, atom_types):
@@ -1177,13 +1137,9 @@ class TersoffPotential:
         np.add.at(forces, jj_loc, -fij)
         stress -= np.einsum('ki,kj->ij', fij, rij_loc)
 
-        # 3-body force corrections from dbij. See _te_3body_force_numpy's
-        # docstring for why the position gradient of the zeta term is
-        # computed via central finite differences (of the scalar zeta
-        # term w.r.t. the relative-vector components) rather than a
-        # hand-derived analytic chain-rule expression, and why this
-        # correction is dispatched to the JIT-parallel kernel whenever
-        # numba_on is True (it is typically the dominant cost of a
+        # 3-body force corrections from dbij (zeta-term gradient analytic,
+        # _te_zterm_grad, ADR-0015); dispatched to the JIT-parallel kernel
+        # whenever numba_on is True (it is typically the dominant cost of a
         # Tersoff force evaluation).
         if numba_on:
             fc_full = np.zeros(P)
@@ -1713,3 +1669,4 @@ class TersoffPotential:
             stress = _mpi_allreduce_sum(stress)
         stress /= volume
         return energy, forces, stress
+
