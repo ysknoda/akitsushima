@@ -40,6 +40,28 @@ _MODEL_FILE = {
 }
 
 
+# ELM / QELM options passed on only when given (ADR-0013; the model
+# defaults apply otherwise).
+_ELM_KEYS = (
+    "w_init_scale",
+    "w_init_scale_search",
+    "bias_init",
+    "standardize",
+    "pca_eps",
+    "pca_drop",
+    "w_correlation",
+    "w_corr_length",
+    "w_corr_length_search",
+)
+_QELM_KEYS = ("max_exponent", "n_bits", "levels", "n_levels", "p_zero",
+              "use_sparse_w", "matmul")
+
+
+def _elm_options(model_type, ml):
+    keys = _ELM_KEYS + (_QELM_KEYS if model_type == "qelm" else ())
+    return {k: ml[k] for k in keys if k in ml}
+
+
 def _build_model(model_type, ml, verbose):
     common = dict(
         w_energy=ml.get("w_energy", 1.0),
@@ -102,6 +124,7 @@ def _build_model(model_type, ml, verbose):
         if model_type == "elm":
             kw["solver"] = ml.get("solver", "auto")
         kw["reg_search"] = ml.get("reg_search", None)
+        kw.update(_elm_options(model_type, ml))
         return cls(**kw)
     raise ValueError(
         f"mlip.model must be one of {sorted(_MODEL_FILE)}, got '{model_type}'."
@@ -186,6 +209,7 @@ def _build_atomic_model(model_type, ml, verbose):
             reg=ml.get("reg", 1e-6),
             reg_search=ml.get("reg_search", None),
             **common,
+            **_elm_options(model_type, ml),
         )
     raise ValueError(
         f"mlip.form 'atom_centred' supports model elm, qelm or nn, got "
@@ -335,6 +359,9 @@ def cmd_mlip(args) -> int:
             )
         t1 = _time.perf_counter()
         extra = {"columns": desc.feature_names()} if model_type == "linear" else {}
+        # set before fit: w_correlation reads the channel
+        # layout from it (ADR-0013)
+        model.descriptor_config = desc.to_json()
         model.fit(y, lab, X, weights=w, **fit_kw, **extra)
         model.descriptor_config = desc.to_json()
         sections.append((f"{model_type.upper()} fitting", _time.perf_counter() - t1))

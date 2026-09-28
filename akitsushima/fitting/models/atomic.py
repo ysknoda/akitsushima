@@ -29,7 +29,7 @@ import time as _time
 import numpy as np
 
 from .csv_io import load_weights_csv, structure_grouped_split
-from .elm import ELMModel
+from .elm import ELMModel, pca_whitening
 from .quantized_elm import QuantizedELMModel
 
 __all__ = ["AtomicData", "AtomicELMModel", "AtomicQELMModel"]
@@ -136,15 +136,34 @@ def _prepare(model, structures, descriptor, weight_csv, val_fraction, val_seed):
     Dc = desc.n_per_atom
     mean, std = np.zeros((n_sp, Dc)), np.ones((n_sp, Dc))
     Gs = [data.jac(k) for k in tr]
+    kw = getattr(model, "unit_kw", {})
+    # default pca (ADR-0013), zscore with w_correlation radial
+    method = kw.get("standardize") or (
+        "zscore" if kw.get("w_correlation") == "radial" else "pca"
+    )
+    pca = method == "pca"
+    P, G_train = [], []
     for s in range(n_sp):
         Gsp = np.concatenate([J.G[J.sp == s] for J in Gs])
         if len(Gsp):
             mean[s] = Gsp.mean(axis=0)
             sd = Gsp.std(axis=0)
             std[s] = np.where(sd < 1e-12, 1.0, sd)
+        # ADR-0013: per-species whitening map; training atoms kept for
+        # bias_init 'data' (dropped after the fit)
+        P.append(
+            pca_whitening(
+                (Gsp - mean[s]) / std[s], kw.get("pca_eps", 1e-3), kw.get("pca_drop", 0.0)
+            )
+            if pca and len(Gsp)
+            else None
+        )
+        G_train.append(Gsp)
     model.species = list(desc.species)
     model.descriptor_config = desc.to_json()
     model._X_mean, model._X_std = mean, std
+    model._X_P = P
+    model._G_train = G_train
     return data, y, lab, w_row, sid, ptr, tr, val
 
 
@@ -203,6 +222,9 @@ class AtomicELMModel:
         self.species: list = []
         self.descriptor_config = ""
         self.units: list = []
+        self._X_P: list = []
+        # (scale factor, correlation length) of the units being drawn
+        self._trial = (1.0, float(self.unit_kw.get("w_corr_length", 0.2)))
         self._fitted = False
 
     # ------------------------------------------------------------------
@@ -217,12 +239,28 @@ class AtomicELMModel:
             **self.unit_kw,
         )
         u._X_mean, u._X_std, u._D = self._X_mean[s], self._X_std[s], Dc
-        u._init_hidden(Dc)
+        u._P = self._X_P[s] if self._X_P else None
+        u.descriptor_config = self.descriptor_config
+        if u.w_correlation == "radial":
+            u._groups = u._groups_from_config(per_atom=True)
+            if not u._groups:
+                raise ValueError(
+                    "AtomicELMModel: w_correlation needs G2 "
+                    "channels that differ in r_s (ADR-0013)."
+                )
+        u._w_scale_factor, u.w_corr_length = self._trial
+        G_s = getattr(self, "_G_train", None)
+        X_ref = (
+            u._normalise(G_s[s]) if u.bias_init == "data" and G_s is not None else None
+        )
+        u._init_hidden(Dc if u._P is None else u._P.shape[1], X_ref)
         return u
 
     @property
-    def _n_out_s(self) -> int:
-        return self.units[0]._n_out()
+    def _off(self) -> np.ndarray:
+        """Column offsets of the species blocks (the blocks differ in
+        width when PCA whitening keeps different numbers of directions)."""
+        return np.concatenate([[0], np.cumsum([u._n_out() for u in self.units])])
 
     def _unit_rows(self, u, J, mask_atoms, mask_ent):
         """Contributions of one species' atoms: E-row sum over the atoms,
@@ -242,9 +280,9 @@ class AtomicELMModel:
         if n_ent:
             loc = np.cumsum(mask_atoms) - 1  # atom -> row of Z
             Zm = np.repeat(Z[loc[J.centre[mask_ent]]], 3, axis=0)
-            P = (J.dGdv[mask_ent] / u._X_std).reshape(3 * n_ent, -1)
+            P = u._scale_dir(J.dGdv[mask_ent]).reshape(3 * n_ent, -1)
             nh = u._n_hid()
-            R.reshape(3 * n_ent, -1)[:, :nh] = u._hidden_dir(Zm, P @ u._W_eff())
+            R.reshape(3 * n_ent, -1)[:, :nh] = u._hidden_dir(Zm, u._xw(P))
             if self.direct_link:
                 R.reshape(3 * n_ent, -1)[:, nh : nh + P.shape[1]] = P
         return e_row, R
@@ -256,9 +294,8 @@ class AtomicELMModel:
         from scipy.sparse import csr_matrix
 
         N = len(J.sp)
-        n_o = self._n_out_s
-        n_sp = len(self.units)
-        A = np.zeros((1 + 3 * N + 6, n_sp * n_o))
+        off = self._off
+        A = np.zeros((1 + 3 * N + 6, off[-1]))
         cen = J.centre
         for s, u in enumerate(self.units):
             ma = J.sp == s
@@ -266,7 +303,8 @@ class AtomicELMModel:
                 continue
             me = ma[cen]
             e_row, R = self._unit_rows(u, J, ma, me)
-            blk = slice(s * n_o, (s + 1) * n_o)
+            blk = slice(off[s], off[s + 1])
+            n_o = off[s + 1] - off[s]
             A[0, blk] = e_row / N
             # F_j = -(sum_{m -> j} R_m - sum_{m of j} R_m)
             n_ent = len(R)
@@ -310,11 +348,10 @@ class AtomicELMModel:
             self, structures, descriptor, weight_csv, val_fraction, val_seed
         )
         Dc = data.descriptor.n_per_atom
-        self.units = [self._make_unit(s, Dc) for s in range(len(self.species))]
-        m = len(self.units) * self._n_out_s
         t1 = _time.perf_counter()
 
         def _normal(structs):
+            m = self._off[-1]
             G, r, tt = np.zeros((m, m)), np.zeros(m), 0.0
             for k in structs:
                 J = data.jac(k)
@@ -327,38 +364,88 @@ class AtomicELMModel:
                 tt += float(np.sum(w * t * t))
             return 0.5 * (G + G.T), r, tt
 
-        G, rhs, _ = _normal(tr)
-        t_build = _time.perf_counter() - t1
-        nh, n_o = self.units[0]._n_hid(), self._n_out_s
-        hid = np.zeros(m, bool)
-        for s in range(len(self.units)):
-            hid[s * n_o : s * n_o + nh] = True
-        jitter = 1e-12 * float(np.mean(np.diag(G)))
+        kw = self.unit_kw
+        regs = self.reg_search or [self.reg]
+        factors = kw.get("w_init_scale_search") or [1.0]
+        if factors is True:
+            factors = [0.5, 1.0, 2.0, 4.0, 8.0]
+        lengths = (
+            kw.get("w_corr_length_search")
+            if kw.get("w_correlation") == "radial" and kw.get("w_corr_length_search")
+            else [kw.get("w_corr_length", 0.2)]
+        )
+        cand = [(float(f), float(ell)) for f in factors for ell in lengths]
+        if (len(cand) > 1 or len(regs) > 1) and not len(val):
+            if len(cand) > 1:
+                raise ValueError(
+                    "AtomicELMModel: w_init_scale_search / w_corr_length_search "
+                    "need a validation split."
+                )
+            regs = [self.reg]
+        need_val = bool(len(val)) and (len(cand) > 1 or len(regs) > 1)
 
-        def _solve(reg):
+        def _trial(fl):
+            """Units for one (scale factor, correlation length); the
+            normal equations; the reg search."""
             import scipy.linalg as sla
 
-            pen = np.where(hid, reg, jitter if self.direct_link else reg)
-            Gp = G.copy()
-            Gp[np.diag_indices(m)] += pen
-            try:
-                return sla.cho_solve(sla.cho_factor(Gp, lower=True), rhs)
-            except np.linalg.LinAlgError:
-                return sla.lstsq(Gp, rhs)[0]
+            self._trial = fl
+            self.units = [self._make_unit(s, Dc) for s in range(len(self.species))]
+            off = self._off
+            m = off[-1]
+            G, rhs, _ = _normal(tr)
+            nh = self.units[0]._n_hid()
+            hid = np.zeros(m, bool)
+            for s in range(len(self.units)):
+                hid[off[s] : off[s] + nh] = True
+            jitter = 1e-12 * float(np.mean(np.diag(G)))
 
-        if self.reg_search and len(val):
-            Gv, rv, ttv = _normal(val)
+            def _solve(reg):
+                pen = np.where(hid, reg, jitter if self.direct_link else reg)
+                Gp = G.copy()
+                Gp[np.diag_indices(m)] += pen
+                try:
+                    return sla.cho_solve(sla.cho_factor(Gp, lower=True), rhs)
+                except np.linalg.LinAlgError:
+                    return sla.lstsq(Gp, rhs)[0]
+
+            if need_val:
+                Gv, rv, ttv = _normal(val)
             res = []
-            for reg in self.reg_search:
+            for reg in regs:
                 c = _solve(reg)
-                res.append((reg, float(c @ Gv @ c - 2 * c @ rv + ttv)))
-                if self.verbose:
-                    print(f"  reg {reg:10.3g}: weighted val loss {res[-1][1]:.6e}")
-            self.reg = min(res, key=lambda x: x[1])[0]
-            self.reg_search_results_ = res
-        coef = _solve(self.reg)
+                vl = float(c @ Gv @ c - 2 * c @ rv + ttv) if need_val else 0.0
+                res.append((reg, vl, c))
+            return min(res, key=lambda x: x[1]), res
+
+        self._trial = cand[0]
+        search = []
+        for fl in cand:
+            best, res = _trial(fl)
+            search.append((fl, best, res))
+            if self.verbose and (len(cand) > 1 or len(res) > 1):
+                for reg, vl, _ in res:
+                    print(
+                        f"  scale x{fl[0]:g}  l={fl[1]:g}  reg {reg:10.3g}: "
+                        f"weighted val loss {vl:.6e}"
+                    )
+        fl, best, res = min(search, key=lambda x: x[1][1])
+        if len(cand) > 1:
+            best, res = _trial(fl)  # rebuild the winning units
+            self.hyper_search_results_ = [
+                (f, ell, b[0], b[1]) for (f, ell), b, _ in search
+            ]
+        t_build = _time.perf_counter() - t1
+        self.reg = float(best[0])
+        if len(res) > 1:
+            self.reg_search_results_ = [(r, vl) for r, vl, _ in res]
+        coef = best[2]
+        off = self._off
+        for u in self.units:
+            u.reg = self.reg
+        self._G_train = None
         for s, u in enumerate(self.units):
-            u._beta, u._gamma, u._beta0 = u._split_coef(coef[s * n_o : (s + 1) * n_o])
+            u._beta, u._gamma, u._beta0 = u._split_coef(coef[off[s] : off[s + 1]])
             u._fitted = True
         self._fitted = True
         self.fit_time_ = {
@@ -399,11 +486,11 @@ class AtomicELMModel:
                 up = (-np.sin(Z) * b[:n] + np.cos(Z) * b[n:]) / np.sqrt(n)
             else:
                 up = u._dact(Z) * u._beta
-            gn = up @ u._W_eff().T
+            gn = u._uwT(up)
             if self.direct_link:
                 e = e + xn @ u._gamma
                 gn = gn + u._gamma
-            eps[ma], g[ma] = e, gn / u._X_std
+            eps[ma], g[ma] = e, u._to_raw(gn)
         return eps, g
 
     def _predict_structure(self, J):
@@ -464,6 +551,8 @@ class AtomicELMModel:
             arr[f"beta_{s}"] = u._beta
             arr[f"gamma_{s}"] = u._gamma if u._gamma is not None else np.zeros(0)
             arr[f"beta0_{s}"] = np.array(u._beta0)
+            arr[f"X_P_{s}"] = u._P if u._P is not None else np.zeros((0, 0))
+            arr[f"options_{s}"] = np.array(json.dumps(u._options()))
         hyper = dict(
             n_hidden=self.n_hidden,
             activation=self.activation,
@@ -495,6 +584,8 @@ class AtomicELMModel:
         z = np.load(p)
         hyper = json.loads(str(z["hyper"]))
         unit_kw = hyper.pop("unit_kw", {})
+        if "n_bits" in unit_kw:  # files written before ADR-0013
+            unit_kw["max_exponent"] = unit_kw.pop("n_bits")
         obj = cls(verbose=verbose, **hyper, **unit_kw)
         obj.species = [str(x) for x in z["species"]]
         obj._X_mean, obj._X_std = z["X_mean"], z["X_std"]
@@ -518,29 +609,54 @@ class AtomicELMModel:
             gm = z[f"gamma_{s}"]
             u._gamma = gm if gm.size else None
             u._beta0 = float(z[f"beta0_{s}"])
+            if f"X_P_{s}" in z and z[f"X_P_{s}"].size:
+                u._P = z[f"X_P_{s}"]
+            if f"options_{s}" not in z:  # saved before ADR-0013: z-score
+                u.standardize = "zscore"
+            else:
+                o = json.loads(str(z[f"options_{s}"]))
+                u._w_scale_factor = float(o.pop("w_scale_factor", 1.0))
+                for k, v in o.items():
+                    setattr(u, k, v)
             u._fitted = True
             obj.units.append(u)
+        obj._X_P = [u._P for u in obj.units]
         obj._fitted = True
         return obj
 
 
 class AtomicQELMModel(AtomicELMModel):
-    """Atom-centred ELM whose species units are QuantizedELMModel (power-
-    of-two hidden weights); n_bits, p_zero and use_sparse_w are passed to
-    the units."""
+    """Atom-centred ELM whose species units are QuantizedELMModel
+    (quantised hidden weights); max_exponent, p_zero, use_sparse_w and the
+    other QELM options (levels, n_levels, matmul) are passed to the
+    units."""
 
     _unit_cls = QuantizedELMModel
 
     def __init__(
         self,
         *args,
-        n_bits: int = 3,
+        max_exponent: int = 3,
         p_zero: float = 0.5,
         use_sparse_w: bool = True,
         **kw,
     ):
+        if "n_bits" in kw:
+            import warnings
+
+            warnings.warn(
+                "AtomicQELMModel: n_bits is deprecated, use max_exponent "
+                "(ADR-0013).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            max_exponent = kw.pop("n_bits")
         super().__init__(
-            *args, n_bits=n_bits, p_zero=p_zero, use_sparse_w=use_sparse_w, **kw
+            *args,
+            max_exponent=max_exponent,
+            p_zero=p_zero,
+            use_sparse_w=use_sparse_w,
+            **kw,
         )
 
 

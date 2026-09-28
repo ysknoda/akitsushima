@@ -624,7 +624,7 @@ def test_quantized_elm_quantization_error_is_nonzero():
     y = X[:, 0] * 2.0 - X[:, 1] + 0.1 * rng.normal(size=n)
     labels = np.array(["E"] * n, dtype=object)
 
-    model = QuantizedELMModel(n_hidden=64, n_bits=1, p_zero=0.7,
+    model = QuantizedELMModel(n_hidden=64, max_exponent=1, p_zero=0.7,
                                reg=1e-4, verbose=False, seed=1)
     model.fit(y, labels, X, val_fraction=0.0)
 
@@ -672,7 +672,7 @@ def test_quantized_elm_save_load_round_trip_without_pickle(tmp_path):
     y = X[:, 0] + 0.5 * X[:, 1]
     labels = np.array(["E"] * n, dtype=object)
 
-    model = QuantizedELMModel(n_hidden=8, n_bits=2, reg=1e-3, verbose=False, seed=0)
+    model = QuantizedELMModel(n_hidden=8, max_exponent=2, reg=1e-3, verbose=False, seed=0)
     model.fit(y, labels, X, val_fraction=0.0)
     path = str(tmp_path / "qelm_model")
     model.save(path)

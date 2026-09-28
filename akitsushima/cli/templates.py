@@ -579,6 +579,25 @@ mlip:
   seed:       42
   verbose:    true
   test_csv:   null           # same kind of file as training_csv
+  # ELM / QELM options (ADR-0013; also for form: atom_centred).  Default:
+  # PCA whitening of the descriptor; the other options are off:
+  # w_init_scale_search: [0.5, 1, 2, 4, 8]  # factors on the Glorot scale of
+  #                            # W, b, picked on the validation split
+  # bias_init:     normal      # normal | data (b = -W . x_k, unit centred
+  #                            # on a training input)
+  # standardize:   pca         # pca (default: whitening, pca_eps added to
+  # pca_eps:       1.0e-3      # the correlation-matrix eigenvalues) | zscore
+  # pca_drop:      0.0         # drop directions below pca_drop * max
+  #                            # eigenvalue (0: keep all, recommended)
+  # w_correlation: none        # none | radial: G2 weights correlated along
+  # w_corr_length: 0.2         # r_s [A] (in-package ACSF only)
+  # w_corr_length_search: [0.1, 0.2, 0.4, 0.8]   # (radial implies zscore)
+  # qelm only:
+  # levels:        pow2        # pow2 | ternary | uniform
+  # max_exponent:  3           # pow2: {0, +-1, ..., +-2^n} (formerly n_bits)
+  # n_levels:      3           # uniform: odd number of levels {-k..k}
+  # p_zero:        0.5         # fraction of each column set to zero
+  # matmul:        dense       # dense | sparse (CSC product)
   # (b) in-package descriptor.  Example for Si with Stillinger-Weber
   # labels: r_cut = a * sigma = 1.80 * 2.0951 = 3.771 A (SW's own cutoff,
   # Stillinger & Weber, PRB 31, 5262 (1985)); radial G2 centred every

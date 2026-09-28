@@ -270,8 +270,10 @@ def test_elm_energy_is_fitted_near_its_noise_with_stress_rows_present():
         p = model.predict(Xt)
         return np.sqrt(np.mean((p[e] - yt[e]) ** 2)) / 0.05
 
+    # z-score: the test is about the weighting rule, measured (below)
+    # with the standardisation it was written for
     kw = dict(n_hidden=256, reg=1e-6, verbose=False, row_independent=True,
-              r0=1.0, eps0=0.01)
+              r0=1.0, eps0=0.01, standardize="zscore")
     new = ratio_E(ELMModel(**kw))
     old_model = ELMModel(**kw)
     old_model._row_weights = (lambda lab_, wu, wus:
@@ -726,7 +728,7 @@ def test_rvfl_with_large_reg_reduces_to_the_linear_model():
     m = ELMModel(n_hidden=50, reg=1e12, direct_link=True, verbose=False)
     m.fit(y, lab, X, weights=w)
     assert np.abs(m._beta).max() < 1e-6
-    np.testing.assert_allclose(m._gamma / m._X_std, wt, atol=1e-6)
+    np.testing.assert_allclose(m._to_raw(m._gamma), wt, atol=1e-6)
 
 
 def test_elm_reg_search_picks_from_the_validation_split():

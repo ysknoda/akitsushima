@@ -27,7 +27,32 @@ from .csv_io import (
     structure_grouped_split,
 )
 
-__all__ = ["ELMModel"]
+__all__ = ["ELMModel", "pca_whitening"]
+
+
+def pca_whitening(Xz: np.ndarray, eps: float = 1e-3,
+                  drop_rel: float = 0.0) -> np.ndarray:
+    """
+    Whitening map P (D, D') of z-scored inputs Xz (n, D): x~ = x_z P with
+    P = U (Lambda + eps)^(-1/2), U, Lambda the eigenpairs of the
+    correlation matrix Xz^T Xz / n, largest first (Lambda clipped at 0).
+    Directions with Lambda <= drop_rel * max(Lambda) are dropped; the
+    default keeps all of them (the map is then a full rotation and eps
+    alone bounds the gain).  Why not drop: the statistics come from the
+    structure descriptors, while force rows (their derivatives) have
+    weight in directions where the descriptors hardly vary -- dropping at
+    1e-6 max(Lambda) kept 19 of 90 Si directions and raised the force
+    error from 1.9 to 5.2 sigma (ADR-0013).  With eps = 0 directions at
+    or below 1e-12 max(Lambda) are dropped to avoid dividing by zero.
+    """
+    C = Xz.T @ Xz / max(len(Xz), 1)
+    lam, U = np.linalg.eigh(0.5 * (C + C.T))
+    o = np.argsort(lam)[::-1]
+    lam, U = np.clip(lam[o], 0.0, None), U[:, o]
+    lmax = max(float(lam[0]), 1e-300)
+    rel = drop_rel if drop_rel > 0 else (1e-12 if eps <= 0 else -1.0)
+    keep = lam > rel * lmax
+    return U[:, keep] / np.sqrt(lam[keep] + eps)
 
 
 class ELMModel:
@@ -143,7 +168,15 @@ class ELMModel:
                  row_independent : bool  = False,
                  solver          : str   = 'auto',
                  direct_link     : bool  = True,
-                 reg_search      : Optional[list] = None):
+                 reg_search      : Optional[list] = None,
+                 w_init_scale_search = None,
+                 bias_init       : str   = 'normal',
+                 standardize     : Optional[str] = None,
+                 pca_eps         : float = 1e-3,
+                 pca_drop        : float = 0.0,
+                 w_correlation   : str   = 'none',
+                 w_corr_length   : float = 0.2,
+                 w_corr_length_search: Optional[list] = None):
         """
         Parameters
         ----------
@@ -217,6 +250,34 @@ class ELMModel:
             output weights, LSQR otherwise.  The chain-rule system mixes
             rows of very different scale; LSQR then often stops at its
             iteration limit (flag 7) short of the minimum.
+
+        Options of ADR-0013 (all off by default)
+        ----------------------------------------
+        w_init_scale_search : list of float, True or None
+            Factors on the base scale of W and b (``w_init_scale`` or the
+            Glorot value); each is tried and the one with the lowest
+            weighted validation loss is kept (jointly with ``reg_search``).
+            True means [0.5, 1, 2, 4, 8].
+        bias_init  : 'normal' (default) | 'data'
+            'data': each unit is centred on a random training input x_k,
+            b = -W . x_k (standardised inputs; not with 'rff').
+        standardize : 'pca' | 'zscore'  (default: 'pca', or 'zscore' with
+            w_correlation 'radial', which needs the channel layout)
+            'pca' (default since ADR-0013): z-score, then PCA whitening
+            x~ = (Lambda + pca_eps)^(-1/2) U^T x_z from the training
+            statistics (stored in the model; all directions kept, see
+            ``pca_drop``).  F and S rows get the same linear map without
+            the mean.  'zscore': per-feature standardisation only (the
+            default before ADR-0013; models saved before it load as such).
+        pca_eps    : float, added to the correlation-matrix eigenvalues.
+        pca_drop   : float, drop directions with eigenvalue <= pca_drop *
+            max (default 0: keep all; see :func:`pca_whitening`).
+        w_correlation : 'none' (default) | 'radial'
+            'radial': the weights of the G2 channels of one (species, eta)
+            group are drawn with correlation exp(-(r_s,k - r_s,l)^2 /
+            (2 w_corr_length^2)) (unit variance kept).  In-package ACSF
+            only (needs ``descriptor_config`` before fit).
+        w_corr_length : float [A]; w_corr_length_search : candidates [A].
         """
         from scipy.sparse.linalg import lsqr as _lsqr, LinearOperator as _LO
         self._lsqr = _lsqr
@@ -249,6 +310,43 @@ class ELMModel:
         self.direct_link      = bool(direct_link)
         self.reg_search       = ([float(r) for r in reg_search]
                                  if reg_search else None)
+        if w_init_scale_search is True:
+            w_init_scale_search = [0.5, 1.0, 2.0, 4.0, 8.0]
+        self.w_init_scale_search = ([float(f) for f in w_init_scale_search]
+                                    if w_init_scale_search else None)
+        if bias_init not in ('normal', 'data'):
+            raise ValueError(
+                f"ELMModel: bias_init must be 'normal' or 'data', got "
+                f"{bias_init!r}.")
+        if standardize is None:
+            standardize = 'zscore' if w_correlation == 'radial' else 'pca'
+        if standardize not in ('zscore', 'pca'):
+            raise ValueError(
+                f"ELMModel: standardize must be 'zscore' or 'pca', got "
+                f"{standardize!r}.")
+        if w_correlation not in ('none', 'radial'):
+            raise ValueError(
+                f"ELMModel: w_correlation must be 'none' or 'radial', got "
+                f"{w_correlation!r}.")
+        self.bias_init        = bias_init
+        self.standardize      = standardize
+        self.pca_eps          = float(pca_eps)
+        self.pca_drop         = float(pca_drop)
+        self.w_correlation    = w_correlation
+        self.w_corr_length    = float(w_corr_length)
+        self.w_corr_length_search = ([float(v) for v in w_corr_length_search]
+                                     if w_corr_length_search else None)
+        if standardize == 'pca' and w_correlation == 'radial':
+            raise ValueError(
+                "ELMModel: w_correlation acts on the ACSF channel layout, "
+                "which PCA whitening mixes; use it with standardize: zscore "
+                "(ADR-0013).")
+        if bias_init == 'data' and self.activation == 'rff':
+            raise ValueError("ELMModel: bias_init 'data' does not apply to "
+                             "'rff' (no bias).")
+        self._w_scale_factor  = 1.0
+        self._P               = None   # PCA whitening map (D, D') or None
+        self._groups          = None   # radial channel groups (ADR-0013)
         # Descriptor the model was trained on, when generated in-package
         # (JSON string; empty for external CSV descriptors).  Needed to
         # run the model as a relax/md engine (ADR-0004, decision 6).
@@ -430,26 +528,107 @@ class ELMModel:
             Z = X_norm @ self._W + self._b
         return self._act(Z)
 
-    def _init_hidden(self, D: int) -> None:
-        """Draw the fixed random hidden layer (W, b) for input width D."""
+    def _init_hidden(self, D: int, X_ref: Optional[np.ndarray] = None) -> None:
+        """
+        Draw the fixed random hidden layer (W, b) for input width D:
+        W, b ~ N(0, s^2), s = (w_init_scale or sqrt(2 / (D + N_h))) times
+        the selected search factor; W correlated along r_s with
+        w_correlation 'radial'; W passed through :meth:`_finish_W` (the
+        quantisation of QELM); with bias_init 'data', b = -W . x_k for a
+        random row x_k of ``X_ref`` (standardised training inputs).
+        """
         rng = np.random.default_rng(self.seed)
         if self.activation == 'rff':
             N_omega = max(1, self.n_hidden // 2)
             gamma   = (self.rff_gamma if self.rff_gamma is not None
                        else float(np.sqrt(D / 2.0)))
-            self._W    = rng.standard_normal((D, N_omega)) / gamma
-            self._b    = None
-        else:
-            if self.w_init_scale is not None:
-                scale = float(self.w_init_scale)
-            else:
-                scale = float(np.sqrt(2.0 / (D + self.n_hidden)))
-            self._W    = rng.standard_normal((D, self.n_hidden)) * scale
-            self._b    = rng.standard_normal(self.n_hidden) * scale
+            Z = rng.standard_normal((D, N_omega))
+            if self.w_correlation == 'radial':
+                Z = self._correlate(Z)
+            self._W = self._finish_W(Z / gamma * self._w_scale_factor)
+            self._b = None
+            return
+        scale = (float(self.w_init_scale) if self.w_init_scale is not None
+                 else float(np.sqrt(2.0 / (D + self.n_hidden))))
+        scale *= self._w_scale_factor
+        Z = rng.standard_normal((D, self.n_hidden))
+        if self.w_correlation == 'radial':
+            Z = self._correlate(Z)
+        self._W = self._finish_W(Z * scale)
+        self._b = rng.standard_normal(self.n_hidden) * scale
+        if self.bias_init == 'data':
+            if X_ref is None or len(X_ref) == 0:
+                raise ValueError("ELMModel: bias_init 'data' needs the "
+                                 "training inputs.")
+            k = rng.integers(len(X_ref), size=self.n_hidden)
+            self._b = -np.einsum('kd,dk->k', X_ref[k], self._W_eff())
+
+    def _finish_W(self, W: np.ndarray) -> np.ndarray:
+        """Hook for QuantizedELMModel; the ELM keeps W as drawn."""
+        return W
+
+    def _correlate(self, Z: np.ndarray) -> np.ndarray:
+        """Correlate the rows of a standard-normal draw Z (D, n) inside
+        each radial group: Z[idx] <- L Z[idx], L L^T = K, K_kl =
+        exp(-(r_s,k - r_s,l)^2 / (2 l^2)); K_kk = 1 keeps the variance."""
+        if not self._groups:
+            raise ValueError(
+                "ELMModel: w_correlation 'radial' needs in-package ACSF "
+                "descriptors with G2 channels that differ in r_s; external "
+                "descriptor tables carry no channel layout (ADR-0013).")
+        Z = Z.copy()
+        ell = self.w_corr_length
+        for idx, rs in self._groups:
+            K = np.exp(-(rs[:, None] - rs[None, :]) ** 2 / (2.0 * ell * ell))
+            L = np.linalg.cholesky(K + 1e-10 * np.eye(len(rs)))
+            Z[idx] = L @ Z[idx]
+        return Z
+
+    def _groups_from_config(self, per_atom: bool):
+        """Radial channel groups of the in-package ACSF (None when the
+        descriptor is external)."""
+        if not self.descriptor_config:
+            return None
+        from ..descriptors import descriptor_from_config
+        desc = descriptor_from_config(self.descriptor_config)
+        return desc.radial_groups(per_atom=per_atom)
 
     def _normalise(self, X: np.ndarray) -> np.ndarray:
-        """Z-score normalise using statistics from fit()."""
-        return (X - self._X_mean) / self._X_std
+        """Model input x_n: z-score with the fit() statistics, then the
+        PCA whitening map when standardize is 'pca'."""
+        Xn = (X - self._X_mean) / self._X_std
+        return Xn if self._P is None else Xn @ self._P
+
+    def _scale_dir(self, X: np.ndarray) -> np.ndarray:
+        """The same linear map without the mean, for derivative rows
+        (last axis = descriptor)."""
+        Xd = X / self._X_std
+        return Xd if self._P is None else Xd @ self._P
+
+    def _to_raw(self, g: np.ndarray) -> np.ndarray:
+        """Gradient with respect to x_n -> gradient with respect to the
+        raw descriptor (last axis)."""
+        if self._P is not None:
+            g = g @ self._P.T
+        return g / self._X_std
+
+    def _fit_input_stats(self, X_stat: np.ndarray) -> None:
+        """Mean, standard deviation and (standardize 'pca') the whitening
+        map from the training inputs."""
+        self._X_mean = X_stat.mean(axis=0)
+        self._X_std  = X_stat.std(axis=0)
+        self._X_std[self._X_std < 1e-12] = 1.0
+        self._P = (pca_whitening((X_stat - self._X_mean) / self._X_std,
+                                 self.pca_eps, self.pca_drop)
+                   if self.standardize == 'pca' else None)
+
+    def _xw(self, X: np.ndarray) -> np.ndarray:
+        """X @ W with the effective hidden weights (2-D X)."""
+        return X @ self._W_eff()
+
+    def _uwT(self, U: np.ndarray) -> np.ndarray:
+        """U @ W^T (back to the input space)."""
+        return U @ self._W_eff().T
 
     # ------------------------------------------------------------------
     #  LinearOperator builders
@@ -641,7 +820,7 @@ class ELMModel:
 
     def _preact(self, X_norm: np.ndarray) -> np.ndarray:
         """Z = X_norm W (+ b), float64, with the effective weights."""
-        Z = X_norm @ self._W_eff()
+        Z = self._xw(X_norm)
         if self.activation != 'rff':
             Z = Z + self._b
         return Z
@@ -665,9 +844,10 @@ class ELMModel:
         (hidden units, then the E-row bias):
 
             E row : [ h(z_s),                          d_n,           1 ]
-            F/S   : [ N_s h'(z_s) (*) ((X / X_std) W), N_s X / X_std,  0 ]
+            F/S   : [ N_s h'(z_s) (*) (X_n W),          N_s X_n,       0 ]
 
-(the middle block only with direct_link; d_n = (d - mean) / X_std).
+(the middle block only with direct_link; d_n = (d - mean) / X_std and
+X_n = X / X_std, each followed by the PCA map with standardize 'pca').
 
         z_s is the pre-activation of the row's structure descriptor d_s.
         An F row's X is -dd/dr and an S row's X is -(1/V) dd/dT, so these
@@ -684,9 +864,9 @@ class ELMModel:
             A[isE, -1] = 1.0
         isD = ~isE
         if isD.any():
-            Xd = X_rows[isD] / self._X_std
+            Xd = self._scale_dir(X_rows[isD])
             Nd = n_at[sid_rows[isD]][:, None]
-            V = Xd @ self._W_eff()
+            V = self._xw(Xd)
             A[isD, :nh] = self._hidden_dir(Zs[sid_rows[isD]], V) * Nd
             if nl:
                 A[isD, nh:nh + nl] = Xd * Nd
@@ -821,45 +1001,25 @@ class ELMModel:
         else:
             tr_struct = np.unique(sid[idx_train])
             X_stat = X[e_row[tr_struct]]
-        self._X_mean = X_stat.mean(axis=0)
-        self._X_std  = X_stat.std(axis=0)
-        self._X_std[self._X_std < 1e-12] = 1.0
+        self._fit_input_stats(X_stat)
         self._D = D
-
-        # Initialise random hidden layer (fixed)
-        self._init_hidden(D)
+        if self.w_correlation == 'radial':
+            self._groups = self._groups_from_config(per_atom=False)
+            if not self._groups:
+                raise ValueError(
+                    "ELMModel: w_correlation needs in-package "
+                    "ACSF descriptors (descriptor_config set before fit) "
+                    "with G2 channels that differ in r_s (ADR-0013).")
+        X_ref = (self._normalise(X_stat) if self.bias_init == 'data'
+                 else None)
+        Dn = D if self._P is None else self._P.shape[1]
+        if self.verbose and self._P is not None:
+            print(f'  PCA whitening: {D} -> {Dn} input directions '
+                  f'(pca_eps={self.pca_eps:g})')
 
         mult_tr = np.sqrt(w_row[idx_train])
         t_vec   = mult_tr * targets[idx_train]
         N_tr    = len(idx_train)
-        N_out   = self._n_out()
-
-        if self.verbose:
-            print('  Row weights w_cat * w_unit^2 * w_user (training set):')
-            for c in ('E', 'F', 'S'):
-                mask = labels[idx_train] == c
-                if mask.any():
-                    wc = w_row[idx_train][mask]
-                    print(f'    [{c}]  mean={wc.mean():.4e}  '
-                          f'min={wc.min():.4e}  max={wc.max():.4e}')
-            print(f'  Building LinearOperator (N_eq={N_tr}  N_out={N_out}) ...')
-
-        t_build0 = _time.perf_counter()
-        if self.row_independent:
-            X_tr_n = self._normalise(X[idx_train])
-            if self.full_matrix_free:
-                A = self._build_operator_full_mf(X_tr_n, mult_tr)
-            else:
-                A = self._build_operator_cached(X_tr_n, mult_tr)
-        else:
-            Zs = self._structure_Z(X, e_row)
-            rows = (X[idx_train], labels[idx_train], sid[idx_train])
-            A = self._build_chain_operator(rows, Zs, n_at, mult_tr)
-        t_build = _time.perf_counter() - t_build0
-
-        if self.verbose:
-            print(f'  Operator ready in {t_build*1000:.0f} ms')
-            print(f'  Running LSQR (maxiter={self.lsqr_maxiter}) ...')
 
         def _sub(idx):
             return dict(labels=labels[idx], X=X[idx],
@@ -868,29 +1028,94 @@ class ELMModel:
                         n_atoms=(None if n_atoms is None
                                  else np.asarray(n_atoms)[idx]))
 
-        use_direct = (self.solver == 'direct'
-                      or (self.solver == 'auto' and N_out <= 6000))
-        t_lsqr0 = _time.perf_counter()
-        if use_direct and self.reg_search and n_val:
-            # Choose reg on the structure-grouped validation split; A^T A
-            # is accumulated once and re-solved per candidate.
-            def _val_loss(coef):
-                self._beta, self._gamma, self._beta0 = self._split_coef(coef)
-                self._fitted = True
-                p = self.predict_table(**_sub(idx_val))
-                return float(np.sum(w_row[idx_val] * (p - targets[idx_val]) ** 2))
-            result = self._solve_direct(A, t_vec, regs=self.reg_search,
-                                        val_loss=_val_loss)
-        elif use_direct:
-            result = self._solve_direct(A, t_vec)
-        else:
-            result = self._lsqr(A, t_vec,
-                                damp     = np.sqrt(self.reg),
-                                iter_lim = self.lsqr_maxiter,
-                                atol     = self.lsqr_atol,
-                                btol     = self.lsqr_atol,
-                                show     = False)
-        t_lsqr  = _time.perf_counter() - t_lsqr0
+        def _val_loss(coef):
+            self._beta, self._gamma, self._beta0 = self._split_coef(coef)
+            self._fitted = True
+            p = self.predict_table(**_sub(idx_val))
+            return float(np.sum(w_row[idx_val] * (p - targets[idx_val]) ** 2))
+
+        def _run():
+            """Draw the hidden layer, build the system and solve it."""
+            self._init_hidden(Dn, X_ref)
+            N_out = self._n_out()
+            if self.verbose:
+                print('  Row weights w_cat * w_unit^2 * w_user (training set):')
+                for c in ('E', 'F', 'S'):
+                    mask = labels[idx_train] == c
+                    if mask.any():
+                        wc = w_row[idx_train][mask]
+                        print(f'    [{c}]  mean={wc.mean():.4e}  '
+                              f'min={wc.min():.4e}  max={wc.max():.4e}')
+                print(f'  Building LinearOperator (N_eq={N_tr}  '
+                      f'N_out={N_out}) ...')
+            t_build0 = _time.perf_counter()
+            if self.row_independent:
+                X_tr_n = self._normalise(X[idx_train])
+                if self.full_matrix_free:
+                    A = self._build_operator_full_mf(X_tr_n, mult_tr)
+                else:
+                    A = self._build_operator_cached(X_tr_n, mult_tr)
+            else:
+                Zs = self._structure_Z(X, e_row)
+                rows = (X[idx_train], labels[idx_train], sid[idx_train])
+                A = self._build_chain_operator(rows, Zs, n_at, mult_tr)
+            t_build = _time.perf_counter() - t_build0
+            if self.verbose:
+                print(f'  Operator ready in {t_build*1000:.0f} ms')
+                print(f'  Running LSQR (maxiter={self.lsqr_maxiter}) ...')
+            use_direct = (self.solver == 'direct'
+                          or (self.solver == 'auto' and N_out <= 6000))
+            t_lsqr0 = _time.perf_counter()
+            if use_direct and self.reg_search and n_val:
+                # Choose reg on the structure-grouped validation split;
+                # A^T A is accumulated once and re-solved per candidate.
+                result = self._solve_direct(A, t_vec, regs=self.reg_search,
+                                            val_loss=_val_loss)
+            elif use_direct:
+                result = self._solve_direct(A, t_vec)
+            else:
+                result = self._lsqr(A, t_vec,
+                                    damp     = np.sqrt(self.reg),
+                                    iter_lim = self.lsqr_maxiter,
+                                    atol     = self.lsqr_atol,
+                                    btol     = self.lsqr_atol,
+                                    show     = False)
+            return result, use_direct, _time.perf_counter() - t_lsqr0
+
+        # Scale factor / correlation length: one fit per candidate, the
+        # lowest weighted validation loss wins (ADR-0013), then the winner
+        # is fitted again below.
+        cand = [(f, ell)
+                for f in (self.w_init_scale_search or [self._w_scale_factor])
+                for ell in (self.w_corr_length_search
+                            if self.w_correlation == 'radial'
+                            and self.w_corr_length_search
+                            else [self.w_corr_length])]
+        if len(cand) > 1:
+            if not n_val:
+                raise ValueError("ELMModel: w_init_scale_search / "
+                                 "w_corr_length_search need a validation "
+                                 "split (val_fraction > 0).")
+            verbose, self.verbose = self.verbose, False
+            reg0 = self.reg
+            res = []
+            for f, ell in cand:
+                self._w_scale_factor, self.w_corr_length = f, ell
+                self.reg = reg0
+                r = _run()[0]
+                res.append((f, ell, self.reg, _val_loss(r[0])))
+            self.verbose = verbose
+            self.hyper_search_results_ = res
+            best = min(res, key=lambda x: x[-1])
+            self._w_scale_factor, self.w_corr_length = best[0], best[1]
+            self.reg = reg0
+            if self.verbose:
+                for f, ell, rg, vl in res:
+                    print(f'  scale x{f:g}  l={ell:g}  reg={rg:g}: '
+                          f'weighted val loss {vl:.6e}')
+                print(f'  selected scale x{best[0]:g}  l={best[1]:g}')
+
+        result, use_direct, t_lsqr = _run()
 
         coef = result[0]
         self._beta, self._gamma, self._beta0 = self._split_coef(coef)
@@ -1074,16 +1299,15 @@ class ELMModel:
                 "whose derivative gives its force rows (ADR-0004).")
         z = self._preact(self._normalise(d[None, :]))       # (1, n_h')
         f = float(self._hidden_from_Z(z)[0] @ self._beta + self._beta0)
-        # grad = sum_k beta_k dh_k/dd = W (h'(z) (*) beta) / X_std
+        # grad over x_n = sum_k beta_k dh_k/dx_n = W (h'(z) (*) beta),
+        # mapped back to the raw descriptor by _to_raw
         Dn = self._W_eff().shape[0]
-        g = np.empty(Dn)
-        eye = np.eye(Dn) / self._X_std[:, None]             # directions
-        V = eye @ self._W_eff()                              # (D, n_w)
-        g[:] = self._hidden_dir(np.repeat(z, Dn, axis=0), V) @ self._beta
+        V = self._xw(np.eye(Dn))                             # (D', n_w)
+        g = self._hidden_dir(np.repeat(z, Dn, axis=0), V) @ self._beta
         if self.direct_link and self._gamma is not None:
             f += float(self._normalise(d[None, :])[0] @ self._gamma)
-            g += self._gamma / self._X_std
-        return f, g
+            g = g + self._gamma
+        return f, self._to_raw(g)
 
     # ------------------------------------------------------------------
     def fit_csv(self,
@@ -1296,9 +1520,22 @@ class ELMModel:
         if self.verbose:
             print(f"  ELMModel saved -> {path}.npz")
 
+    def _options(self) -> dict:
+        """ADR-0013 options, with the values the searches selected."""
+        return dict(bias_init=self.bias_init, standardize=self.standardize,
+                    pca_eps=self.pca_eps, pca_drop=self.pca_drop,
+                    w_correlation=self.w_correlation,
+                    w_corr_length=self.w_corr_length,
+                    w_scale_factor=self._w_scale_factor)
+
     def _extra_state(self) -> dict:
-        """Arrays added in 0.2.0a3 (chain rule, ADR-0004)."""
-        return dict(beta0             = np.array(self._beta0),
+        """Arrays added in 0.2.0a3 (chain rule, ADR-0004) and the
+        ADR-0013 options (the whitening map X_P)."""
+        import json as _json
+        return dict(X_P               = (self._P if self._P is not None
+                                         else np.zeros((0, 0))),
+                    elm_options       = np.array(_json.dumps(self._options())),
+                    beta0             = np.array(self._beta0),
                     direct_link       = np.array(self.direct_link),
                     gamma             = (self._gamma if self._gamma is not None
                                          else np.zeros(0)),
@@ -1315,6 +1552,16 @@ class ELMModel:
         self._gamma = (npz['gamma'] if self.direct_link else None)
         self.descriptor_config = (str(npz['descriptor_config'])
                                   if 'descriptor_config' in npz else "")
+        if 'X_P' in npz and npz['X_P'].size:
+            self._P = npz['X_P']
+        if 'elm_options' not in npz:  # saved before ADR-0013: z-score
+            self.standardize = 'zscore'
+        else:
+            import json as _json
+            o = _json.loads(str(npz['elm_options']))
+            self._w_scale_factor = float(o.pop('w_scale_factor', 1.0))
+            for k, v in o.items():
+                setattr(self, k, v)
 
     @classmethod
     def load(cls, path: str, verbose: bool = False) -> 'ELMModel':
@@ -1360,7 +1607,7 @@ class ELMModel:
         obj._beta    = npz['beta']
         obj._X_mean  = npz['X_mean']
         obj._X_std   = npz['X_std']
-        obj._D       = obj._W.shape[0]
+        obj._D       = obj._X_mean.shape[0]
         obj._restore_extra_state(npz)
         obj._fitted  = True
         return obj

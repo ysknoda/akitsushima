@@ -1,7 +1,9 @@
-"""Power-of-2 weight quantization ELM: multiply-free inference via
-per-column power-of-two + zero-sparsified hidden-layer weights.
+"""Quantised-weight ELM: hidden-layer weights rounded per column to a
+small level set (powers of two by default, ternary or uniform integers,
+ADR-0013) and partly zeroed.
 """
 import time as _time
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -16,23 +18,34 @@ class QuantizedELMModel(ELMModel):
     Power-of-2 weight quantization ELM.
 
     Each entry of the hidden-layer weight matrix W is rounded to the
-    nearest signed power of two (times a per-column scale s_j):
+    nearest level of a small set (times a per-column scale s_j):
 
-        levels(n) = { -2^n, ..., -2, -1, 0, 1, 2, ..., 2^n }
+        levels 'pow2'    : {0, +-1, +-2, ..., +-2^n}, n = max_exponent,
+                           s_j = max|W[:, j]| / 2^n  (default; 2n + 3 levels)
+        levels 'ternary' : {-1, 0, 1}, s_j chosen so that the column keeps
+                           the variance of the raw draw
+        levels 'uniform' : {-k, ..., k}, k = (n_levels - 1) / 2,
+                           s_j = max|W[:, j]| / k  (integer arithmetic)
 
-    A fraction p_zero of the weights is forced to exactly zero, so the
-    matrix H can be stored as a scipy.sparse CSC matrix for fast,
-    multiply-free inference (products become bit shifts and adds).
+    A fraction p_zero of each column (the smallest raw magnitudes) is set
+    to exactly zero.  All levels are integers times s_j, so W also fits
+    in int8 storage (see ``quant_stats``).
 
     Parameters
     ----------
-    n_bits       : exponent range n (levels +/-1, +/-2, +/-4, ..., +/-2^n, and 0)
+    levels       : 'pow2' | 'ternary' | 'uniform'
+    max_exponent : largest power-of-two exponent n of 'pow2' (formerly
+                   ``n_bits``, which stays as a deprecated alias: it is not
+                   a bit count -- 9 levels need 4 bits)
+    n_levels     : odd number of levels of 'uniform' (>= 3)
     p_zero       : target fraction in [0, 1) of weights forced to zero
-    use_sparse_w : True = store W as CSC sparse (recommended when p_zero is high)
+    use_sparse_w : keep a CSC copy of W
+    matmul       : 'dense' (default) or 'sparse' -- the product X W of the
+                   chain-rule rows and the engine uses the CSC copy
 
     Examples
     --------
-    >>> model = QuantizedELMModel(n_hidden=512, n_bits=3, p_zero=0.5)
+    >>> model = QuantizedELMModel(n_hidden=512, max_exponent=3, p_zero=0.5)
     >>> model.fit_csv("training.csv")
     >>> model.print_quantization_report()
     """
@@ -55,13 +68,18 @@ class QuantizedELMModel(ELMModel):
                  snake_a         : float = 1.0,
                  rff_gamma       : Optional[float] = None,
                  w_init_scale    : Optional[float] = None,
-                 n_bits          : int   = 3,
+                 max_exponent    : Optional[int] = None,
                  p_zero          : float = 0.5,
                  use_sparse_w    : bool  = True,
                  verbose         : bool  = True,
                  row_independent : bool  = False,
                  direct_link     : bool  = True,
-                 reg_search      : Optional[list] = None):
+                 reg_search      : Optional[list] = None,
+                 levels          : str   = 'pow2',
+                 n_levels        : int   = 3,
+                 matmul          : str   = 'dense',
+                 n_bits          : Optional[int] = None,
+                 **elm_kw):
 
         super().__init__(
             n_hidden         = n_hidden,
@@ -85,15 +103,38 @@ class QuantizedELMModel(ELMModel):
             row_independent  = row_independent,
             direct_link      = direct_link,
             reg_search       = reg_search,
+            **elm_kw,
         )
+        if n_bits is not None:
+            warnings.warn("QuantizedELMModel: n_bits is deprecated, use "
+                          "max_exponent (ADR-0013).", DeprecationWarning,
+                          stacklevel=2)
+            if max_exponent is None:
+                max_exponent = n_bits
+        max_exponent = 3 if max_exponent is None else int(max_exponent)
         if not (0 <= p_zero < 1):
             raise ValueError(f"p_zero must be in [0, 1), got {p_zero}")
-        if n_bits < 1:
-            raise ValueError(f"n_bits must be >= 1, got {n_bits}")
+        if levels not in ('pow2', 'ternary', 'uniform'):
+            raise ValueError(f"levels must be 'pow2', 'ternary' or "
+                             f"'uniform', got {levels!r}")
+        if levels == 'pow2' and max_exponent < 1:
+            raise ValueError(f"max_exponent must be >= 1, got {max_exponent} "
+                             f"(use levels: ternary for {{-1, 0, 1}})")
+        if levels == 'uniform' and (n_levels < 3 or n_levels % 2 == 0
+                                    or n_levels > 255):
+            raise ValueError(f"n_levels must be odd, 3..255, got {n_levels}")
+        if matmul not in ('dense', 'sparse'):
+            raise ValueError(f"matmul must be 'dense' or 'sparse', got "
+                             f"{matmul!r}")
+        if matmul == 'sparse' and not use_sparse_w:
+            raise ValueError("matmul 'sparse' needs use_sparse_w.")
 
-        self.n_bits       = n_bits
+        self.levels       = levels
+        self.max_exponent = max_exponent
+        self.n_levels     = int(n_levels)
         self.p_zero       = p_zero
         self.use_sparse_w = use_sparse_w
+        self.matmul       = matmul
 
         # Filled by _quantize_W()
         self._W_scale   : Optional[np.ndarray] = None  # (N_h,) per-col scale
@@ -105,12 +146,26 @@ class QuantizedELMModel(ELMModel):
         self._W_fp: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
+    @property
+    def n_bits(self) -> int:
+        """Deprecated alias of max_exponent."""
+        return self.max_exponent
+
     @staticmethod
     def _pow2_levels(n: int) -> np.ndarray:
         """levels(n) = {-2^n, ..., -1, 0, 1, ..., 2^n}."""
         pos = [2**k for k in range(n + 1)]
         neg = [-2**k for k in range(n + 1)]
         return np.array(sorted(set(neg + [0] + pos)), dtype=np.float64)
+
+    def _level_set(self):
+        """(integer levels, kmax) of the chosen level set."""
+        if self.levels == 'pow2':
+            return self._pow2_levels(self.max_exponent), 2 ** self.max_exponent
+        if self.levels == 'ternary':
+            return np.array([-1.0, 0.0, 1.0]), 1
+        k = (self.n_levels - 1) // 2
+        return np.arange(-k, k + 1, dtype=np.float64), k
 
     # ------------------------------------------------------------------
     def _quantize_W(self, W_raw: np.ndarray) -> np.ndarray:
@@ -120,11 +175,14 @@ class QuantizedELMModel(ELMModel):
         Algorithm
         ---------
         For each column j (each hidden unit j):
-          1. scale:    s_j = max|W_raw[:,j]| / 2^n_bits
+          1. scale:    s_j = max|W_raw[:,j]| / kmax  (pow2: kmax = 2^n,
+                       uniform: kmax = k)
           2. normalise: w_scaled = W_raw[:,j] / s_j
           3. snap:     w_q = argmin_{lambda in levels} |w_scaled - lambda|
           4. sparsify: force p_zero fraction to 0 (smallest |w_scaled|)
           5. rescale:  W_q[:,j] = w_q * s_j
+        Ternary: sign of the entries kept by step 4, s_j = sqrt(sum w^2 /
+        n_kept), so that the column keeps the sum of squares of the raw draw.
 
         Parameters
         ----------
@@ -134,7 +192,7 @@ class QuantizedELMModel(ELMModel):
         -------
         W_q : (D, N_h) quantized weight matrix (powers of two, sparsified).
         """
-        levels = self._pow2_levels(self.n_bits)
+        levels, kmax = self._level_set()
         D, N_h = W_raw.shape
         W_q     = np.empty_like(W_raw)
         scales  = np.empty(N_h)
@@ -151,9 +209,23 @@ class QuantizedELMModel(ELMModel):
                 zero_counts[j] = D
                 continue
 
-            s      = max_abs / (2 ** self.n_bits)
+            if self.levels == 'ternary':
+                keep = np.ones(D, dtype=bool)
+                if self.p_zero > 0.0:
+                    thr = float(np.quantile(np.abs(col), self.p_zero))
+                    keep = np.abs(col) > thr
+                if not keep.any():
+                    keep[np.argmax(np.abs(col))] = True
+                s = float(np.sqrt(np.sum(col ** 2) / keep.sum()))
+                scales[j] = s
+                col_q = np.where(keep, np.sign(col), 0.0)
+                zero_counts[j] = int(np.sum(col_q == 0))
+                W_q[:, j] = col_q * s
+                continue
+
+            s      = max_abs / kmax
             scales[j] = s
-            col_s  = col / s                        # scaled to [-2^n, 2^n]
+            col_s  = col / s                        # scaled to [-kmax, kmax]
 
             # vectorised nearest-level snap
             idx   = np.argmin(np.abs(col_s[:, None] - levels[None, :]), axis=1)
@@ -176,7 +248,8 @@ class QuantizedELMModel(ELMModel):
         self._W_scale    = scales
         self._W_q_dense  = W_q
         self._quant_stats = {
-            "n_bits"       : self.n_bits,
+            "level_set"    : self.levels,
+            "max_exponent" : self.max_exponent,
             "p_zero"       : self.p_zero,
             "levels"       : levels.tolist(),
             "n_levels"     : len(levels),
@@ -185,6 +258,8 @@ class QuantizedELMModel(ELMModel):
             "total_elems"  : total_elems,
             "unique_W_vals": len(unique_levels),
             "W_mem_dense_MB" : W_q.nbytes / 1e6,
+            # integer levels (|level| <= 127) + one float64 scale per column
+            "W_mem_int8_MB"  : (W_q.size + 8 * N_h) / 1e6,
         }
 
         # scipy CSC sparse matrix for multiply-free inference
@@ -248,21 +323,9 @@ class QuantizedELMModel(ELMModel):
         return self._act(Z)
 
     # ------------------------------------------------------------------
-    def _init_hidden(self, D: int) -> None:
-        """Draw the raw random W (and b), then quantise W.  Called by
-        ELMModel.fit, and by the per-species units of AtomicQELMModel."""
-        rng = np.random.default_rng(self.seed)
-        if self.activation == 'rff':
-            N_omega = max(1, self.n_hidden // 2)
-            gamma   = (self.rff_gamma or float(np.sqrt(D / 2.0)))
-            W_raw   = rng.standard_normal((D, N_omega)) / gamma
-            self._b = None
-        else:
-            sc      = (float(self.w_init_scale) if self.w_init_scale
-                       else float(np.sqrt(2.0 / (D + self.n_hidden))))
-            W_raw   = rng.standard_normal((D, self.n_hidden)) * sc
-            self._b = rng.standard_normal(self.n_hidden) * sc
-
+    def _finish_W(self, W_raw: np.ndarray) -> np.ndarray:
+        """Quantise the raw draw of ELMModel._init_hidden (called by
+        ELMModel.fit and by the per-species units of AtomicQELMModel)."""
         # Bug-fix note (F8): the original never stored W_raw anywhere, so
         # quantization_error() -- whose entire purpose is to compare
         # quantised vs full-precision predictions -- could never find a
@@ -272,13 +335,24 @@ class QuantizedELMModel(ELMModel):
         # quantization_error() has something real to compare against.
         self._W_fp = W_raw.copy()
 
-        t_q0    = _time.perf_counter()
-        self._W = self._quantize_W(W_raw)
-        t_q     = _time.perf_counter() - t_q0
+        t_q0 = _time.perf_counter()
+        W_q  = self._quantize_W(W_raw)
+        t_q  = _time.perf_counter() - t_q0
         if self.verbose:
             qs = self._quant_stats
             print(f'  Quantization ({t_q*1000:.0f} ms):  '
                   f'levels={qs["levels"]}  sparsity={qs["sparsity_W"]:.3f}')
+        return W_q
+
+    def _xw(self, X: np.ndarray) -> np.ndarray:
+        if self.matmul == 'sparse' and self._W_sparse is not None:
+            return np.asarray(X @ self._W_sparse, dtype=np.float64)
+        return X @ self._W_eff()
+
+    def _uwT(self, U: np.ndarray) -> np.ndarray:
+        if self.matmul == 'sparse' and self._W_sparse is not None:
+            return np.asarray((self._W_sparse @ U.T).T, dtype=np.float64)
+        return U @ self._W_eff().T
 
     # ------------------------------------------------------------------
     def fit(self,
@@ -295,8 +369,8 @@ class QuantizedELMModel(ELMModel):
         """
         Fit and quantise the ELM.
 
-        Quantises the random hidden-layer weight matrix W to n_bits-bit
-        fixed-point, then delegates all training (weight composition,
+        Quantises the random hidden-layer weight matrix W (see
+        :meth:`_quantize_W`), then delegates all training (weight composition,
         chain-rule design rows, LSQR, score reporting) to
         :meth:`ELMModel.fit` via ``super().fit()``.  The chain-rule rows use
         the quantised W, so forces are derivatives of the quantised model.
@@ -336,11 +410,11 @@ class QuantizedELMModel(ELMModel):
         print("\n" + "=" * 58)
         print("  Quantized ELM -- report")
         print("=" * 58)
-        print(f"  n_bits      : {qs['n_bits']}")
+        print(f"  level set   : {qs['level_set']}  "
+              f"(max_exponent {qs['max_exponent']})")
         print(f"  p_zero      : {qs['p_zero']}")
         print(f"  levels      : {qs['levels']}")
-        print(f"  n_levels    : {qs['n_levels']}  "
-              f"(2n+3 = {2*qs['n_bits']+3} levels)")
+        print(f"  n_levels    : {qs['n_levels']}")
         print()
         print(f"  W sparsity  : {qs['sparsity_W']:.4f}  "
               f"({qs['total_zeros']:,} / {qs['total_elems']:,} are 0)")
@@ -355,9 +429,9 @@ class QuantizedELMModel(ELMModel):
                   f"nnz={qs['nnz_W']:,})")
         print()
         print("  Notes:")
-        print("    W_q values are of the form +/- 2^k . s_j (powers of two).")
-        print("    x . (2^k . s_j)  ==  s_j . (x << k)  (bit-shift product).")
-        print("    -> multiply-free inference via shifts and adds.")
+        print("    W_q values are integer levels times a column scale s_j.")
+        if qs['level_set'] == 'pow2':
+            print("    x . (2^k . s_j)  ==  s_j . (x << k)  (bit-shift product).")
         sp = qs['sparsity_W']
         print(f"    -> about {sp*100:.0f}% of weights are zero "
               f"({(1-sp)*100:.0f}% non-zero).")
@@ -489,7 +563,11 @@ class QuantizedELMModel(ELMModel):
                  eps0            = np.array(self.eps0),
                  # QuantizedELMModel
                  model_class     = np.array("QuantizedELMModel"),
-                 n_bits          = np.array(self.n_bits),
+                 n_bits          = np.array(self.max_exponent),
+                 max_exponent    = np.array(self.max_exponent),
+                 levels          = np.array(self.levels),
+                 n_levels        = np.array(self.n_levels),
+                 matmul          = np.array(self.matmul),
                  p_zero          = np.array(self.p_zero),
                  use_sparse_w    = np.array(self.use_sparse_w),
                  W_q_dense       = self._W_q_dense,
@@ -527,7 +605,11 @@ class QuantizedELMModel(ELMModel):
                                 else None),
             r0               = float(npz['r0'])   if 'r0'   in npz else 1.0,
             eps0             = float(npz['eps0']) if 'eps0' in npz else 1.0,
-            n_bits           = int(npz['n_bits']),
+            max_exponent     = int(npz['max_exponent'] if 'max_exponent' in npz
+                                   else npz['n_bits']),
+            levels           = str(npz['levels']) if 'levels' in npz else 'pow2',
+            n_levels         = int(npz['n_levels']) if 'n_levels' in npz else 3,
+            matmul           = str(npz['matmul']) if 'matmul' in npz else 'dense',
             p_zero           = float(npz['p_zero']),
             use_sparse_w     = bool(npz.get('use_sparse_w', True)),
             verbose          = verbose,
@@ -538,7 +620,7 @@ class QuantizedELMModel(ELMModel):
         obj._beta      = npz['beta']
         obj._X_mean    = npz['X_mean']
         obj._X_std     = npz['X_std']
-        obj._D         = obj._W.shape[0]
+        obj._D         = obj._X_mean.shape[0]
         obj._W_q_dense = npz['W_q_dense']
         obj._W_scale   = npz['W_scale']
         obj._restore_extra_state(npz)

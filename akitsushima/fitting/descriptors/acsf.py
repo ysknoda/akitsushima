@@ -334,6 +334,7 @@ def _contract(ptr, nbj, vec, dGdv, g):
                     W[b, a] += vec[m, b] * c
     return F, W
 
+
 # ---------------------------------------------------------------------------
 
 
@@ -470,6 +471,31 @@ class ACSF:
             for e, z, l, jk in self._angular
         ]
         return [f"{s}:{name}" for s in sp for name in per]
+
+    def radial_groups(self, per_atom: bool = True) -> list:
+        """
+        G2 channels that differ only in r_s: one (indices, r_s) pair per
+        (neighbour species, eta) -- and per central species block for the
+        structure descriptor (``per_atom=False``) -- with the channels
+        sorted by r_s.  Groups of one channel are left out.  Used by the
+        ELM option ``w_correlation: radial``
+        (ADR-0013).
+        """
+        n2 = len(self.g2)
+        etas = sorted({e for e, _ in self.g2})
+        per = []
+        for b in range(len(self.species)):
+            for eta in etas:
+                q = [k for k, (e, _) in enumerate(self.g2) if e == eta]
+                if len(q) < 2:
+                    continue
+                rs = np.array([self.g2[k][1] for k in q])
+                o = np.argsort(rs, kind="stable")
+                per.append((b * n2 + np.array(q)[o], rs[o]))
+        if per_atom:
+            return per
+        Dc = self.n_per_atom
+        return [(s * Dc + idx, rs) for s in range(len(self.species)) for idx, rs in per]
 
     # ------------------------------------------------------------------
     def _run(self, lattice, positions, atom_types, want_deriv):

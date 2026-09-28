@@ -300,6 +300,23 @@ more gracefully.  Regularisation differs by model:
 the plain MLP.  With the direct term the ELM has D + 1 more fitted
 weights per species (D descriptor components), the NN D more.
 
+**ELM / QELM input standardisation and options (`docs/adr/0013`).**
+By default (since ADR-0013) the descriptor is z-scored and then whitened
+with the training PCA (`standardize: pca`; all directions kept,
+`pca_eps` bounds the gain; the map is stored in the model and applied to
+F / S rows without the mean) -- in the ADR-0013 comparison this lowered
+the force error in 22 of 24 cases (by 7 % on average, up to 30 %).
+`standardize: zscore` gives the former per-feature standardisation;
+models saved before ADR-0013 load as z-score models.  Options without a
+measurable gain there: `w_init_scale_search` (factors on the Glorot
+scale of W, b, picked on the validation split), `bias_init: data` (each
+unit centred on a training input), `w_correlation: radial` with
+`w_corr_length(_search)` (G2 weights correlated along r_s; in-package
+ACSF only; implies z-score).  QELM:
+`levels: pow2 | ternary | uniform`, `max_exponent` (formerly `n_bits`),
+`n_levels`, `p_zero`, `matmul: dense | sparse`; accuracy matches the ELM,
+W storage shrinks, the sparse product is not faster in numpy.
+
 With `mlip.descriptor` set (ACSF), `training_csv` is a structure list in the
 `fit` layout above and the descriptors are computed in-package and stored
 in the model file.  Such a model then drives `relax` / `md` / ... with

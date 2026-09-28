@@ -88,6 +88,36 @@ def _fd_check(ff, lat, pos, types, h, tol_f, tol_s):
     np.testing.assert_allclose(F0.sum(axis=0), 0.0, atol=1e-9)
 
 
+def _fd4_check(ff, lat, pos, types, h, tol_f=1e-7, tol_s=1e-8):
+    """Forces and stress against the fourth-order central difference
+    (8 [f(h) - f(-h)] - [f(2h) - f(-2h)]) / 12h."""
+    E0, F0, S0 = ff(lat, pos, types)
+
+    def d4(fun):
+        return (8 * (fun(h) - fun(-h)) - (fun(2 * h) - fun(-2 * h))) / (12 * h)
+
+    for j in (0, 3):
+        for a in range(3):
+
+            def e_pos(x, j=j, a=a):
+                p = pos.copy()
+                p[j, a] += x
+                return ff(lat, p, types)[0]
+
+            assert -d4(e_pos) == pytest.approx(F0[j, a], abs=tol_f), (j, a)
+    V = abs(np.linalg.det(lat))
+    frac = pos @ np.linalg.inv(lat)
+    for a, b in [(0, 0), (1, 2), (2, 1)]:
+
+        def e_cell(x, a=a, b=b):
+            T = np.eye(3)
+            T[a, b] += x
+            return ff(lat @ T, frac @ lat @ T, types)[0]
+
+        assert -d4(e_cell) / V == pytest.approx(S0[a, b], abs=tol_s), (a, b)
+    np.testing.assert_allclose(F0.sum(axis=0), 0.0, atol=1e-9)
+
+
 # ---------------------------------------------------------------- ACSF
 
 
@@ -149,7 +179,9 @@ def test_atomic_elm_rows_equal_its_engine_and_engine_is_conservative(cls, kw, tm
     np.testing.assert_allclose(
         m._design(J) @ coef, m2._predict_structure(J), atol=1e-10
     )
-    _fd_check(ff, s["lattice"], s["positions"], s["atom_types"], 1e-5, 1e-6, 1e-7)
+    # default PCA whitening keeps near-null directions (gain up to
+    # 1/sqrt(pca_eps)): strongly curved energy, fourth-order difference
+    _fd4_check(ff, s["lattice"], s["positions"], s["atom_types"], 3e-5)
 
 
 def test_atomic_elm_recovers_a_teacher_of_its_own_form_exactly():

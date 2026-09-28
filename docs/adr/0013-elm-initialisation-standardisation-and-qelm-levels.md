@@ -1,5 +1,5 @@
 ---
-status: accepted (implementation and evaluation in progress)
+status: accepted (implemented and evaluated 2026-09-28; PCA whitening made the default, gamma_smooth removed)
 ---
 
 # ELM / QELM: random-matrix scale and bias, PCA whitening, correlated weights, QELM levels
@@ -45,10 +45,12 @@ point.  That is what the options below address.
 4. **PCA whitening** (Q34, Q39): `standardize: zscore | pca` (default
    zscore), `pca_eps`.  mu, the rotation U and the variances lambda come
    from the training data and are stored in the model; every prediction
-   uses x~ = (Lambda + eps)^(-1/2) U^T (x - mu).  Directions with lambda below
-   1e-6 * max(lambda) are dropped (numerically meaningless); the rest are
-   kept, with eps added (no cut by explained variance, which could drop
-   small components that matter for forces).  F and S rows (descriptor
+   uses x~ = (Lambda + eps)^(-1/2) U^T (x_z), x_z the z-scored input (PCA of
+   the correlation matrix).  No cut by explained variance (it could drop
+   small components that matter for forces).  **Changed after the first
+   test (see Results): directions are no longer dropped at 1e-6 *
+   max(lambda) -- all are kept, eps alone bounds the gain; `pca_drop`
+   (default 0) restores a relative cut.**  F and S rows (descriptor
    derivatives) get the same matrix without the mean, so chain-rule forces
    and stress stay energy gradients.  Atom-centred: one transform per
    species.  Caveats: a direction barely varying in training is amplified
@@ -73,10 +75,11 @@ point.  That is what the options below address.
    layout, so in-package ACSF only; an external descriptor table is an
    error.  QELM quantises the correlated draw.  No MLIP literature on this
    was checked; the evaluation decides.
-6. **Smoothness penalty on gamma** (Q46): `gamma_smooth` (default 0) adds
+6. **Smoothness penalty on gamma** (Q46): `gamma_smooth` (default 0) added
    the squared differences of the direct-link weights of adjacent r_s
    channels (same groups as item 5) to the normal equations -- the idea of
-   the tabular `smooth_ridge`.
+   the tabular `smooth_ridge`.  **Removed after the evaluation** (no gain;
+   worse where selected, see Decisions after the evaluation).
 7. **QELM levels** (Q42, Q44): `levels: pow2 | ternary | uniform`
    (default pow2).  ternary: {-1, 0, 1} * s_j, zero fraction from p_zero;
    uniform: {-k, ..., k} * s_j (integer arithmetic, e.g. int8), with
@@ -116,6 +119,179 @@ can differ:
 - **Tests**: finite-difference forces and stress per option, save / load,
   defaults unchanged (existing suite passes), full suite.
 
-## Results
+## Implementation
 
-(to be filled in after the run)
+- `ELMModel`: `_normalise` / `_scale_dir` / `_to_raw` carry the input map
+  (z-score, then the whitening map P for pca) for E rows, derivative rows
+  and engine gradients; `_init_hidden(D, X_ref)` draws W (correlated with
+  `_correlate`), passes it through `_finish_W` (QELM quantises there) and
+  sets b (normal or data-centred); `fit` loops over the (scale factor,
+  correlation length) candidates and refits the winner; `_solve_direct`
+  searches (reg, gamma_smooth) jointly on the normal equations.
+  `pca_whitening` is module level.  Model files gain `X_P` and
+  `elm_options`.
+- `ACSF.radial_groups(per_atom)`: G2 channels of one (neighbour species,
+  eta) (and central-species block for the structure descriptor), sorted
+  by r_s.
+- `QuantizedELMModel`: `levels`, `max_exponent` (`n_bits` deprecated alias,
+  DeprecationWarning; old files load), `n_levels`, `matmul` (dense | sparse
+  product in the chain rows and the engine); `W_mem_int8_MB` in the
+  quantisation stats.
+- Atom-centred models: per-species whitening maps (`X_P_s` in the file),
+  per-species column offsets (whitened widths may differ), the same
+  searches over the per-species units.
+- CLI: `mlip` passes the options (elm, qelm, atom_centred) when given;
+  `descriptor_config` is set before the tabular fit; template block.
+- Before the default was changed (Decisions after the evaluation), the
+  defaults were checked unchanged: HEAD and the new code gave the same predictions
+  for tabular ELM / QELM / reg_search and atom-centred ELM / QELM to 2e-9
+  eV (HEAD against itself differs by the same 2e-9: BLAS threading).
+
+## Verification
+
+tests/test_elm_options.py (26 tests): for 12 tabular and 6 atom-centred
+option sets, training rows = engine after save / load, engine forces and
+stress = finite differences of its energy (central, h = 1e-5; for PCA
+atom-centred a fourth-order difference, since the central one is off by
+2e-6 at h = 1e-5 and falls as h^2 -- strong curvature along the amplified
+near-null directions), sum F = 0.  Whitened training inputs have identity
+covariance; an exactly duplicated column adds no direction (pca_eps 0);
+the radial weight correlation matches the kernel (20 000 units, within
+0.03) with unit variance and independent G5 rows; every data-centred unit
+has a zero pre-activation at a training input; (gamma_smooth 1e6 cut the
+r_s roughness of gamma by > 1e3 -- test removed with the option); the scale search reports all 5 factors
+and keeps the best; ternary / uniform / pow2 level sets; refusals; CLI
+pass-through.  Full suite: 585 passed (559 before + 26).
+
+## Results (2026-09-28, example/mlip/adr0013/evaluate.py, report.md)
+
+216 fits (3 data sets x tabular / atom-centred x N_h 25, 50, 100, 400 x
+9 conditions), ~15 min on 3 processes.  Test RMSE / sigma, sigma = ADR-0004
+sigma / 10 (E 0.2 meV/atom, F 0.005 eV/A, S 0.0002 eV/A^3); reg on the
+validation split from 1e2..1e12.
+
+**First test of PCA with the agreed drop rule** (Si, tabular, N_h 25):
+structure descriptors vary in few directions (correlation eigenvalues
+fall from 1 to 1e-6 within 18 directions and to 1e-16 by 55), but the
+force rows -- derivatives of the descriptor -- carry weight in the
+directions the E-row statistics call negligible:
+
+| drop below (x max lambda) | directions kept (of 90) | E / F / S |
+|---|---|---|
+| 1e-6 (agreed) | 19 | 4.77 / 5.21 / 6.49 |
+| 1e-9 | 32 | 2.13 / 3.27 / 1.95 |
+| 1e-12 | 43 | 1.47 / 2.40 / 1.38 |
+| none (eps 1e-3 only) | 90 | 1.13 / 1.75 / 1.11 |
+| z-score (default) | 90 | 1.19 / 1.91 / 1.17 |
+
+eps between 1e-3 and 1 changes little.  The default became "keep all"
+(`pca_drop: 0`); the whole evaluation uses it.
+
+**One axis at a time: F RMSE option / default (geometric mean over N_h)**
+
+| data / form | scale search | data bias | PCA | radial corr. | gamma smooth | QELM pow2 | ternary | uniform |
+|---|---|---|---|---|---|---|---|---|
+| SW Si / tab | 0.990 | 0.996 | **0.924** | 1.003 | 1.000 | 0.998 | 0.998 | 0.996 |
+| SW Si / ac | 0.975 | 0.997 | **0.963** | 1.019 | 1.000 | 1.008 | 1.004 | 1.007 |
+| Tersoff / tab | 1.010 | 0.998 | 1.011 | 1.003 | 1.151 | 1.002 | 1.002 | 1.002 |
+| Tersoff / ac | 1.004 | 0.980 | **0.808** | 0.966 | 1.061 | 0.998 | 0.980 | 0.991 |
+| SW GeSn / tab | 0.999 | 0.994 | **0.941** | 0.997 | 1.000 | 0.999 | 0.996 | 1.001 |
+| SW GeSn / ac | 0.993 | 1.003 | **0.948** | 1.004 | 1.000 | 1.002 | 1.000 | 1.001 |
+| all | 0.995 | 0.995 | **0.930** | 0.998 | 1.034 | | | |
+
+- **PCA whitening** is the only axis above the 2 % threshold: F improves
+  in 22 of 24 (data, form, N_h) cells and E, F and S together in 19, e.g.
+  Si ac N_h 25 F 1.88 -> 1.72, GeSn ac E 1.59 -> 1.36, Tersoff ac N_h 400
+  F 9.71 -> 6.86.  F got worse in Si ac N_h 400 (1.57 -> 1.64, where the
+  default is already closest to the floor) and Tersoff tab N_h 400
+  (9.71 -> 11.27, reg picked 1e2 on a validation split dominated by
+  outliers, see below).  Cost: none
+  (one D x D eigendecomposition).  So the combination stage had nothing to
+  combine.
+- **Scale search / data bias**: < 1 % on average; the search picked 0.5
+  (12 of 24), 8 (8) or 1 (4) -- no consistent direction; 4-5x fit time.
+- **Radial correlation**: no gain (0.998); l picks spread over the whole
+  grid (0.1: 8, 1.6: 6, 0.2: 5, 0.4: 4, 0.8: 1; 1.6 A was added because
+  the first Si run picked the agreed grid's end, 0.8).
+- **gamma smooth**: never helps; 0 picked in 16 of 24 cells (no effect),
+  and where the validation split picked 1e2 / 1e4 (Tersoff) the test got
+  worse (tab 9.7 -> 11.2): the penalty fits the validation outliers.
+- **QELM level sets**: pow2, ternary and uniform (15 levels) match the ELM
+  within 1-2 % everywhere, as expected for random features of matching
+  variance.
+- **Tersoff data caveat**: at 1500 K some frames hold rare close contacts
+  (a 1.99 A bond, reference force 6.0 eV/A on one atom, predicted ~0) and
+  pairs inside Tersoff's cutoff switch (R - D .. R + D = 2.70 .. 3.00 A;
+  51 of 300 training and 18 of 100 test frames).  These dominate the RMSE
+  (validation F 16-18 sigma against test 9-10 sigma) and push reg to the
+  top of the grid in the default runs (the hidden layer then contributes
+  little).  Tersoff numbers compare options under outliers; they are not
+  a clean capacity test.
+
+**QELM product and memory** (engine call on 64 atoms, one process):
+
+| case | dense product | CSC product | W dense / CSC / int8 |
+|---|---|---|---|
+| Si ac N_h 400, p_zero 0.9 | 4.94 ms | 5.46 ms | 0.29 / 0.045 / 0.039 MB |
+| GeSn tab N_h 2000, p_zero 0.5 | 31.7 ms | 78.2 ms | 7.0 / 5.2 / 0.89 MB |
+| GeSn ac N_h 2000, p_zero 0.9 | 18.8 ms | 20.5 ms | 3.5 / 0.54 / 0.45 MB |
+
+The engine call is dominated by the ACSF (the product is a small part);
+the CSC product was never faster.  Product alone (numpy / scipy, 64 x 218
+by 218 x 2000): dense 0.8 / 0.25 / 0.27 ms, CSC 3.1 / 0.66 / 0.11 ms at
+p_zero 0.5 / 0.9 / 0.99 -- CSC wins only at 99 % zeros.  Memory does
+shrink (CSC at p_zero 0.9: 6.5x; int8 levels: 8x), and accuracy at
+p_zero 0.9 equals that at 0.5.  In this numpy implementation QELM offers
+smaller W storage, not speed.
+
+## Decisions after the evaluation (user, 2026-09-28)
+
+1. **PCA whitening is the ELM / QELM default** (tabular and atom-centred):
+   `standardize` defaults to `pca` (all directions kept, `pca_eps` 1e-3),
+   or to `zscore` when `w_correlation: radial` is set (the channel layout
+   needs unmixed inputs).  Model files written before ADR-0013 (no `X_P`
+   / `elm_options`) load as z-score models; `standardize: zscore` gives
+   the former behaviour.  Tests that were about z-score specifics now
+   say so (the M1 weighting regression test, the RVFL -> linear model
+   test compares `_to_raw(gamma)`); the atom-centred engine test uses a
+   fourth-order difference (curvature along the whitened near-null
+   directions, as above).
+2. **gamma_smooth removed** (option, search, CLI key, template, tests).
+3. **QELM kept** for its smaller W storage; memory comparison with the
+   ELM under the same conditions: see below.
+4. Scale search, data-centred bias and radial correlation stay options
+   without a recommendation.
+
+## ELM vs QELM model storage (2026-09-28, example/mlip/adr0013/memory.py, memory.md)
+
+Same data, descriptor, N_h, seed, reg (1e6) and PCA default; only the
+model class (and the QELM level set / p_zero) differs.  MB = 1e6 bytes.
+
+| data / form | N_h | ELM file / in memory | QELM (pow2, p_zero 0.5) file / in memory | QELM W as int8 + scales | ELM W (float64) |
+|---|---|---|---|---|---|
+| Si / ac | 400 | 0.372 / 0.363 | 0.373 / 0.872 | 0.039 | 0.288 |
+| Si / ac | 2000 | 1.550 / 1.540 | 1.550 / 4.084 | 0.196 | 1.440 |
+| GeSn / ac | 400 | 2.192 / 2.186 | 2.192 / 4.637 | 0.181 | 1.395 |
+| GeSn / ac | 2000 | 7.824 / 7.818 | 7.824 / 20.074 | 0.904 | 6.976 |
+| GeSn / tab | 400 | 2.946 / 2.933 | 4.347 / 5.379 | 0.178 | 1.395 |
+| GeSn / tab | 2000 | 8.552 / 8.539 | 15.547 / 20.771 | 0.888 | 6.976 |
+
+**As implemented, QELM saves no memory:**
+
+- Files: every QELM file stores W as float64.  The atom-centred file
+  equals the ELM's; the tabular file is 1.5-1.8x larger, because it
+  writes both `W` and `W_q_dense` (the same matrix).
+- In memory: 2.3-2.6x the ELM, because QELM keeps the full-precision
+  draw `_W_fp` (for `quantization_error`) and a CSC copy next to the
+  dense quantised W.
+- Level sets and p_zero do not change the stored size; only the CSC copy
+  shrinks with p_zero.
+
+**What the level structure would allow:** the levels are integers
+(|k| <= 2^max_exponent, or <= (n_levels - 1) / 2) times a per-column
+scale.  Stored as int8 plus one float64 scale per column, W takes 7-8x
+less than the float64 W (e.g. GeSn ac N_h 2000: 0.90 MB against
+6.98 MB).  The whole file would then shrink from 7.8 MB to about 1.8 MB;
+the PCA map (0.76 MB) then becomes a large share.  This needs a compact
+save format (int8 levels + scales, no duplicate W, `_W_fp` optional), a
+change of the QELM file format that has not been made yet.
