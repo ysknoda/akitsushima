@@ -22,7 +22,9 @@
 > gone). ELM / QELM now add a direct linear term by default
 > (`direct_link`), and NN defaults to softplus with a direct linear term.
 > LightGBM has since been removed (ADR-0012): trees give no conservative
-> force, so it could never drive a solver.
+> force, so it could never drive a solver. 0.2.0a4 makes Tersoff forces
+> analytic (they change by ~1e-7 eV/A) and fits multi-species Tersoff and
+> the Zhou (2004) alloy EAM (ADR-0015).
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -42,8 +44,12 @@ library.
 
 **Many-body potentials** (covalent / metallic)
 - Stillinger-Weber — 2-body + 3-body angle term (Si, Ge, H2O)
-- Tersoff — bond-order (`b_ij`) with coordination (Si, C, Ge, GaAs)
-- EAM — embedding `F(rho_i)` + pair `phi(r)`, tabulated (metals)
+- Tersoff — bond-order (`b_ij`) with coordination (Si, C, Ge, GaAs);
+  multi-species as a LAMMPS-style (i, j, k) table or through the
+  Tersoff (1989) mixing rules
+- EAM — embedding `F(rho_i)` + pair `phi(r)` (metals): the analytic
+  alloy form of Zhou, Johnson & Wadley (2004), or a setfl table
+  (LAMMPS `eam/alloy`)
 
 **Long-range Coulomb**
 - Ewald summation — vectorised, `O(N^1.5)` for N ≲ 2,000
@@ -189,7 +195,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `phonon` | Phonon band structure, DOS, Debye temperature, free energy |
 | `kappa`  | Thermal conductivity (Green-Kubo + optional Slack-Debye) |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
-| `fit`    | Fit a classical potential (LJ / Morse / Born-Mayer / Buckingham / Stillinger-Weber / Tersoff) |
+| `fit`    | Fit a classical potential (LJ / Mie / Morse / Born-Mayer / Yukawa / Buckingham / Stillinger-Weber / Tersoff / EAM) |
 
 ### Fitting a classical potential
 
@@ -233,6 +239,7 @@ Fitting runs in two stages, both driven from the config file:
 | `Nelder-Mead` | none | default; adaptive simplex; many evaluations |
 | `COBYLA`      | none | linear trust-region model |
 | `COBYQA`      | none | quadratic trust-region model |
+| `least_squares` | finite-difference Jacobian of the residuals | scipy `least_squares` (`dogbox`) on the residual vector the loss sums; squared loss only |
 
 All six respect the parameter bounds and receive the same stopping
 intent in their own option names (at most 5000 iterations -- 100 000
@@ -246,6 +253,25 @@ before any data is loaded: `BFGS` and `CG` ignore bounds, `Newton-CG`,
 provide, and scipy's bounded `Powell` returned points worse than ones
 it had itself evaluated on real fit losses.
 
+`least_squares` (ADR-0015) minimises the vector of E / F / S residuals
+whose squares the loss sums, with a Jacobian from forward differences and
+the variables rescaled by it.  It is the method for ill-conditioned fits:
+on the Ni-Al Zhou-EAM test (loss Hessian condition number ~1e11 in a
+curved valley) it reached loss 7e-14 in about 3 minutes, where
+Nelder-Mead with restarts stopped at 2.7e-4 after 8.8 hours; on the
+multi-species Tersoff tests it reached ~1e-15.  The multi-species
+`--write-config` templates use it.
+
+Three settings apply to any method:
+
+- `restarts: N` reruns the local search from the best point (Nelder-Mead
+  from a randomly rotated simplex, `restart_seed`); it stops after two
+  consecutive restarts that improve the loss by less than `restart_rtol`
+  (default 1e-3, relative).
+- `local_maxiter` caps each local run, so a slow run is restarted.
+- `time_limit_hours` ends the search on wall-clock time (sleep included)
+  and keeps the best point evaluated so far.
+
 `Nelder-Mead` is the default because it was the only method that
 reached the minimum (loss ~1e-14) on every real fit loss measured: SW Si
 from the DE result and from a 10-25% perturbed start, and the 19-variable
@@ -255,6 +281,45 @@ reached 1e-14): its finite-difference gradient and line search end early
 in narrow curved valleys and at points the loss scores as failed.  The
 price is evaluations: 800-1700 for 5 SW parameters, ~32 000 for 19.
 `COBYQA` is the next choice for a handful of parameters.
+
+#### Multi-species Tersoff and EAM (ADR-0015)
+
+The pair potentials take one record per `A-B` pair and were always
+multi-species.  Tersoff and EAM now are too:
+
+```bash
+akitsushima fit -p tersoff --write-config t.json --template tersoff1989  # Si-C
+akitsushima fit -p tersoff --write-config t.json --template records      # AlN
+akitsushima fit -p eam     --write-config e.json                         # Ni-Al
+```
+
+- **Tersoff, 1989 mixing** (`initial_tersoff: {mixing: tersoff1989,
+  elements: {...}, chi: {...}}`): per-element A, B, lambda, mu, c, d, h
+  and one chi per pair are fitted (Tersoff, Phys. Rev. B 39, 5566
+  (1989), eqs. 1a-1e); `fit_keys: [chi]` is the paper's own procedure.
+- **Tersoff, records** (a list of `i, j, k` records, the LAMMPS table):
+  the pair terms of (i, j, j) and (j, i, i) are one variable; c, d, h per
+  record, or per centre element with `tie: centre`.
+- Train on more than one coordination: Tersoff's angular parameters c
+  and d are only determined through c / d^2 when every angle is near
+  tetrahedral, and an unseen rocksalt or sheet phase then fails; adding
+  rocksalt cells to the training data fixed it (ADR-0015).  Likewise an
+  EAM needs expanded and compressed cells: Zhou's low-density embedding
+  branch (rho < 0.85 rho_e) is otherwise left undetermined.
+- In both forms **beta and n are fixed by default**: with near-tetrahedral
+  training angles they trade off almost exactly against c and d, and
+  fitted they drifted by orders of magnitude without improving the loss
+  (ADR-0015).  Add them to `fit_keys` to fit them anyway.
+- **EAM** (`initial_eam: {form: zhou2004, elements: {...} | [Ni, Al]}`):
+  A, B, alpha, beta and the embedding coefficients Fn2, Fn3, F2, F3, eta
+  per element; Fn0, Fn1, F0, F_e follow from the continuity of F and
+  dF/drho, which the paper requires.  Each fit also writes
+  `fitted.eam.alloy` (setfl), usable as `potential: {type: EAM, setfl:
+  fitted.eam.alloy}`.
+- Published tables: Tersoff (1989) Table I and Zhou (2004) Table III in
+  full (`akitsushima.engine.published_parameters`), with two misprints
+  corrected (carbon d, Al A) and the rows whose embedding function is
+  discontinuous as printed flagged (Pt, W; ADR-0015).
 
 ### Fitting a machine-learning potential
 
