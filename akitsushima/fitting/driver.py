@@ -29,7 +29,7 @@ from scipy.optimize import differential_evolution, least_squares, minimize
 from ..constants import EV_ANG3_TO_GPA
 from ..engine import compute_all_general
 from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
-from ..utils.mpi import _mpi_allreduce_sum_scalar
+from ..utils.mpi import _mpi_allreduce_sum_scalar, _mpi_rank
 from ..utils.timing import TimingCollector
 from .io_utils import _pair_to_str, save_potential
 from .loss import generic_loss_function, generic_residuals
@@ -300,6 +300,14 @@ def compute_scorecard(structures  : list,
     return sc
 
 
+def _is_root() -> bool:
+    """True on MPI rank 0 (or without MPI).  Under mpirun every rank runs
+    the whole fit -- the loss, the scorecards and the diagnostics are
+    collective and must be evaluated on all ranks -- but only rank 0
+    prints and writes files."""
+    return _mpi_rank == 0
+
+
 def print_scorecard_comparison(train_sc: ScoreCard,
                                 val_sc  : Optional[ScoreCard] = None,
                                 title   : str = "Prediction errors") -> None:
@@ -324,6 +332,8 @@ def print_scorecard_comparison(train_sc: ScoreCard,
     mid_parts.append("+" + "-" * 11)
     mid = "".join(mid_parts)
 
+    if not _is_root():
+        return
     print("\n" + sep)
     print(f"  {title}")
     print(sep)
@@ -377,6 +387,8 @@ def parity_plot_all(train_sc  : ScoreCard,
       - Per-set RMSE in the legend
     """
     if not HAS_MATPLOTLIB:
+        return
+    if not _is_root():
         return
     os.makedirs(output_dir, exist_ok=True)
 
@@ -711,6 +723,7 @@ def fit_potential(param_set      : FittableParameterSet,
     ``train_structs``, ``val_structs``, ``train_sc``, ``val_sc``.
     """
     method, local_options = resolve_local_method(method)
+    verbose = bool(verbose) and _is_root()      # rank 0 prints (MPI)
     if local_maxiter is not None:
         local_options = dict(local_options)
         for key in ("maxiter", "maxfev", "maxfun", "max_nfev"):
@@ -958,6 +971,8 @@ def print_fit_result(result: dict, potential: str) -> None:
     """
     Pretty-print fitted parameters for any potential type.
     """
+    if not _is_root():
+        return
     params = result.get("params", {})
     print("\n" + "=" * 62)
     print(f"  Fitted Parameters  [{potential.upper()}]")
@@ -1161,6 +1176,8 @@ def evaluate_diagnostics_generic(structures    : list,
         diag["val"] = _eval_set(val_structs, "val")
 
     # Print table
+    if not _is_root():
+        return diag
     print("\n  Diagnostics")
     print("  " + "-" * 54)
     for key, d in diag.items():
@@ -1245,6 +1262,8 @@ def save_fit_result_generic(result: dict,
     can read them back instead of silently falling back to a default
     that might not match what was actually fit.
     """
+    if not _is_root():
+        return
     out_path = os.path.join(output_dir, "fitted_potential.json")
     extra = {"diagnostics": diag}
     if extra_meta:

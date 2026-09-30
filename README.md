@@ -24,7 +24,8 @@
 > LightGBM has since been removed (ADR-0012): trees give no conservative
 > force, so it could never drive a solver. 0.2.0a4 makes Tersoff forces
 > analytic (they change by ~1e-7 eV/A) and fits multi-species Tersoff and
-> the Zhou (2004) alloy EAM (ADR-0015).
+> the Zhou (2004) alloy EAM (ADR-0015). 0.2.0a5 makes an MPI `fit` print
+> and write its files on rank 0 only.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

@@ -14,6 +14,7 @@ fit through this single ``fit`` command (see also F3: the CLI parser's
 ``--potential`` choices now include all six types, not just Buckingham).
 """
 import argparse
+import contextlib
 import os
 from typing import Dict
 
@@ -31,6 +32,7 @@ from ..fitting.driver import (
 from ..fitting.models.csv_io import load_mlip_csv
 from ..io.poscar import parse_poscar
 from ..solvers.config_bridge import _load_cfg, _write_cfg
+from ..utils.mpi import _mpi_rank
 from .templates import _DEFAULT_FIT_CFG, _FIT_CFG_TEMPLATES
 
 __all__ = ["cmd_fit"]
@@ -282,7 +284,22 @@ def _build_param_set(potential  : str,
 # ============================================================================
 
 def cmd_fit(args: argparse.Namespace) -> int:
-    """Handle the 'fit' sub-command (multi-potential parameter fitting)."""
+    """Handle the 'fit' sub-command (multi-potential parameter fitting).
+
+    Under mpirun every rank runs the fit (the loss and the diagnostics are
+    collective), but only rank 0 prints: the other ranks' stdout is
+    discarded, and fitting.driver writes files on rank 0 only.  A
+    --write-config template is written by rank 0 alone.
+    """
+    if _mpi_rank == 0:
+        return _cmd_fit(args)
+    if args.write_config:
+        return 0
+    with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink):
+        return _cmd_fit(args)
+
+
+def _cmd_fit(args: argparse.Namespace) -> int:
 
     potential = getattr(args, 'potential', 'buckingham') or 'buckingham'
     potential = potential.lower()
