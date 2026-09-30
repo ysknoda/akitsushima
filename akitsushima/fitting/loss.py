@@ -13,7 +13,12 @@ from typing import Optional
 import numpy as np
 
 from ..engine import compute_all_general
-from ..utils.mpi import _mpi_allreduce_sum_scalar, _mpi_domain_split, local_only
+from ..utils.mpi import (
+    _mpi_allgather_concat,
+    _mpi_allreduce_sum_scalar,
+    _mpi_domain_split,
+    local_only,
+)
 from .parameter_sets import FittableParameterSet
 
 __all__ = ["generic_loss_function"]
@@ -241,3 +246,74 @@ def generic_loss_function(x            : np.ndarray,
         return 1e30
 
     return _mpi_allreduce_sum_scalar(local_total)
+
+
+def residual_length(structures: list) -> int:
+    """Length of the vector generic_residuals returns for these structures."""
+    n = 0
+    for s in structures:
+        n += 1
+        if s.get("ref_forces") is not None:
+            n += 3 * int(s["natoms"])
+        if s.get("ref_stress") is not None:
+            n += 9
+    return n
+
+
+def generic_residuals(x            : np.ndarray,
+                      param_set   : FittableParameterSet,
+                      structures  : list,
+                      weights     : dict,
+                      r_cut       : float,
+                      ewald_alpha : Optional[float],
+                      coulomb_method: str = "ewald") -> np.ndarray:
+    """
+    Residual vector r with sum(r**2) == generic_loss_function(...) for the
+    squared loss (ADR-0015; used by local_method 'least_squares').
+
+    Per structure, in order: sqrt(w_E) N dE_per_atom; sqrt(w_F / 3N) r0
+    dF_ia (all 3N components); sqrt(w_S / 9) V eps0 dsigma_ab (all 9) --
+    each multiplied by sqrt(w_trust) c_scale, exactly the terms of the
+    loss.  Under MPI every rank evaluates its shard and the pieces are
+    concatenated in rank order, so all ranks hold the same vector.  If any
+    structure fails to evaluate, every entry is 1e15 (sum of squares
+    ~1e30 per entry, the loss's failure value).
+    """
+    n_total = residual_length(structures)
+    try:
+        params = param_set.decode(x)
+    except Exception:
+        return np.full(n_total, 1e15)
+    qs = params.get("charges")
+    engine = param_set.build_engine(params)
+    w_E = weights.get("energy", 1.0)
+    w_F = weights.get("forces", 1.0)
+    w_S = weights.get("stress", 0.1)
+    r0 = float(weights.get("r0", 1.0))
+    eps0 = float(weights.get("eps0", 1.0))
+    i0, i1 = _mpi_domain_split(len(structures))
+    local, failed = [], False
+    with local_only():
+        for s in structures[i0:i1]:
+            N = s["natoms"]
+            vol = float(s.get("volume", abs(np.linalg.det(s["lattice"]))))
+            try:
+                e, f, st = compute_all_general(
+                    s["lattice"], s["positions"], s["atom_types"], engine,
+                    charges=qs, r_cut=r_cut, ewald_alpha=ewald_alpha,
+                    coulomb_method=coulomb_method)
+            except Exception:
+                failed = True
+                break
+            c = np.sqrt(float(s.get("weight", 1.0))) * float(s.get("scale", 1.0))
+            local.append([c * np.sqrt(w_E) * N * ((e / N) - s["ref_energy"])])
+            if s.get("ref_forces") is not None:
+                local.append(c * np.sqrt(w_F / (3.0 * N)) * r0
+                             * (np.asarray(f) - s["ref_forces"]).ravel())
+            if s.get("ref_stress") is not None:
+                local.append(c * np.sqrt(w_S / 9.0) * vol * eps0
+                             * (np.asarray(st) - s["ref_stress"]).ravel())
+    if _mpi_allreduce_sum_scalar(1.0 if failed else 0.0) > 0.0:
+        return np.full(n_total, 1e15)
+    vec = np.concatenate(local) if local else np.zeros(0)
+    return _mpi_allgather_concat(vec)

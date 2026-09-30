@@ -20,17 +20,19 @@ LAMMPS ``pair_coeff.txt`` export, is preserved as the explicit-argument
 """
 import json
 import os
+import time
 from typing import Optional
 
 import numpy as np
-from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import differential_evolution, least_squares, minimize
 
 from ..constants import EV_ANG3_TO_GPA
 from ..engine import compute_all_general
 from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.mpi import _mpi_allreduce_sum_scalar
 from ..utils.timing import TimingCollector
 from .io_utils import _pair_to_str, save_potential
-from .loss import generic_loss_function
+from .loss import generic_loss_function, generic_residuals
 from .parameter_sets import FittableParameterSet
 
 __all__ = [
@@ -509,6 +511,21 @@ LOCAL_METHOD_OPTIONS = {
     # COBYLA's maxiter counts loss evaluations, not iterations.
     "COBYLA":      {"maxiter": 100_000, "tol": 1e-10},
     "COBYQA":      {"maxiter": 5000, "maxfev": 100_000, "final_tr_radius": 1e-10},
+    # ADR-0015: scipy.optimize.least_squares, method 'dogbox' (bounds
+    # honoured), on the residual vector whose squares the loss sums
+    # (loss.generic_residuals), 2-point finite-difference Jacobian,
+    # x_scale='jac'.  On the Ni-Al Zhou-EAM fit the loss Hessian had a
+    # condition number 1e11-1e14 in a curved valley where Nelder-Mead
+    # crept for 1e5 evaluations; a Gauss-Newton type method uses the
+    # curvature directly.  On an 8-variable zero-residual Ni3Al test
+    # (2 % start): dogbox 5 iterations, 46 evaluations, loss 2e-25; 'lm'
+    # (no bounds) 54 evaluations, 2e-32; 'trf' 177 iterations and still
+    # 1e-10, 50 x slower (its reflective bound handling stalls here).
+    # max_nfev counts residual evaluations of the least-squares iterations
+    # (the Jacobian's own evaluations are not included by scipy).  The
+    # Jacobian is fit_potential's own forward difference (jacobian_fn).
+    "least_squares": {"max_nfev": 2000, "ftol": 1e-12, "xtol": 1e-12,
+                      "gtol": 1e-12},
 }
 
 _REJECTED_LOCAL_METHODS = {
@@ -538,6 +555,20 @@ def resolve_local_method(name: str):
     raise ValueError(f"local_method '{name}' {reason}.  Choose one of: {allowed}.")
 
 
+def _rotated_simplex(x, bounds, rng):
+    """Nelder-Mead start simplex around x: scipy's step sizes (5 % of each
+    component, 2.5e-4 for a zero one) along the columns of a random
+    orthonormal matrix, clipped into the bounds."""
+    x = np.asarray(x, float)
+    n = len(x)
+    step = np.where(x != 0.0, 0.05 * np.abs(x), 2.5e-4)
+    q, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    lo = np.array([b[0] for b in bounds], float)
+    hi = np.array([b[1] for b in bounds], float)
+    sim = [x] + [np.clip(x + step * q[:, i], lo, hi) for i in range(n)]
+    return np.array(sim)
+
+
 def fit_potential(param_set      : FittableParameterSet,
                   structures     : list,
                   r_cut          : float,
@@ -553,7 +584,12 @@ def fit_potential(param_set      : FittableParameterSet,
                   val_seed       : int   = 0,
                   output_dir     : str   = ".",
                   verbose        : bool  = True,
-                  timing         : bool  = False) -> dict:
+                  timing         : bool  = False,
+                  restarts       : int   = 0,
+                  restart_rtol   : float = 1e-3,
+                  local_maxiter  : Optional[int] = None,
+                  restart_seed   : int   = 0,
+                  time_limit_hours: Optional[float] = None) -> dict:
     """
     Unified parameter fitting for any pair potential.
 
@@ -625,6 +661,32 @@ def fit_potential(param_set      : FittableParameterSet,
     val_seed       : RNG seed for the train/val split.
     output_dir     : directory for parity plots.
     verbose        : print progress.
+    restarts       : further local runs, each from the best point so far;
+                     default 0.  For Nelder-Mead each restart starts from a
+                     new simplex: scipy's step sizes (5 % of each variable,
+                     2.5e-4 for a zero) along a random orthonormal basis
+                     (``restart_seed``).  A restart from scipy's own
+                     axis-aligned simplex retraces the previous run
+                     exactly and cannot improve on it (ADR-0015: SiC stuck
+                     at 2.9e-5; the same point reached 3.5e-15 from a
+                     start differing only in the last digits).  Stops
+                     after two consecutive restarts that each improve the
+                     loss by less than ``restart_rtol`` (relative).
+    time_limit_hours : wall-clock budget [h] for the whole search (DE,
+                     local runs and restarts), measured with time.time():
+                     a machine asleep in between counts, as the user's
+                     deadline does (time.monotonic stops during sleep on
+                     macOS, which let a run with an 8.8 h limit go on for
+                     12.5 h of wall time, ADR-0015).  When it is exceeded the
+                     search stops at the next loss evaluation and the
+                     best point evaluated so far is kept and saved as
+                     usual (``result["time_limited"]`` is True).  Under
+                     MPI the decision is reduced over all ranks, so they
+                     stop at the same evaluation.
+    local_maxiter  : cap on the iterations (and evaluations) of each
+                     local run, so that a slow run is restarted instead of
+                     spending the whole budget in one valley; default: the
+                     method's own (LOCAL_METHOD_OPTIONS).
 
     A note on cross-validation
     --------------------------
@@ -649,6 +711,13 @@ def fit_potential(param_set      : FittableParameterSet,
     ``train_structs``, ``val_structs``, ``train_sc``, ``val_sc``.
     """
     method, local_options = resolve_local_method(method)
+    if local_maxiter is not None:
+        local_options = dict(local_options)
+        for key in ("maxiter", "maxfev", "maxfun", "max_nfev"):
+            if key in local_options:
+                local_options[key] = int(local_maxiter)
+    if int(restarts) < 0:
+        raise ValueError("fit_potential: restarts must be >= 0")
 
     _tc_fit = TimingCollector(enabled=timing)
     _tc_fit.start("total")
@@ -673,15 +742,97 @@ def fit_potential(param_set      : FittableParameterSet,
 
     # ---- Objective -------------------------------------------------------
     call_count = [0]
+    t_start = time.time()
+    tracked = {"x": None, "loss": np.inf}
+
+    class _TimeUp(Exception):
+        pass
 
     def objective(x):
         call_count[0] += 1
         loss = generic_loss_function(
             x, param_set, train_structs, weights,
             r_cut, ewald_alpha, coulomb_method, loss_type)
+        if loss < tracked["loss"]:
+            tracked["x"], tracked["loss"] = np.array(x, float), float(loss)
         if verbose and call_count[0] % 50 == 0:
             print(f"    iter {call_count[0]:6d}  loss = {loss:.6e}")
+        if time_limit_hours is not None and armed[0]:
+            over = (time.time() - t_start) > 3600.0 * float(time_limit_hours)
+            if _mpi_allreduce_sum_scalar(1.0 if over else 0.0) > 0.0:
+                raise _TimeUp
         return loss
+
+    time_limited = [False]
+    armed = [False]         # the initial evaluation is never cut
+
+    def residual_fn(x):
+        r = generic_residuals(x, param_set, train_structs, weights,
+                              r_cut, ewald_alpha, coulomb_method)
+        call_count[0] += 1
+        loss = float(r @ r)
+        if loss < tracked["loss"]:
+            tracked["x"], tracked["loss"] = np.array(x, float), loss
+        if verbose and call_count[0] % 50 == 0:
+            print(f"    eval {call_count[0]:6d}  loss = {loss:.6e}")
+        if time_limit_hours is not None and armed[0]:
+            over = (time.time() - t_start) > 3600.0 * float(time_limit_hours)
+            if _mpi_allreduce_sum_scalar(1.0 if over else 0.0) > 0.0:
+                raise _TimeUp
+        return r
+
+    lo_b = np.array([b[0] for b in param_set.bounds], float)
+    hi_b = np.array([b[1] for b in param_set.bounds], float)
+
+    def jacobian_fn(x, *args, **kwargs):
+        """Forward differences, step 1e-7 max(1, |x_i|) (backward at an
+        upper bound).  scipy's own relative step, diff_step |x_i|, is zero
+        at x_i = 0 -- e.g. log(chi) at chi = 1 -- where it returned a zero
+        column and least_squares stopped on gtol at a wrong point."""
+        r0 = residual_fn(x)
+        J = np.empty((len(r0), len(x)))
+        for i in range(len(x)):
+            h = 1e-7 * max(1.0, abs(x[i]))
+            if x[i] + h > hi_b[i]:
+                h = -h
+            xp = np.array(x, float)
+            xp[i] += h
+            J[:, i] = (residual_fn(xp) - r0) / h
+        return J
+
+    def local(x0, options):
+        """One local run from x0; returns an object with .x and .fun."""
+        if method == "least_squares":
+            if loss_type != "squared":
+                raise ValueError("local_method 'least_squares' needs loss_type "
+                                 "'squared'")
+            opts = {k: v for k, v in options.items()
+                    if k not in ("initial_simplex", "diff_step")}
+            res = run(least_squares, residual_fn, np.clip(x0, lo_b, hi_b),
+                      jac=jacobian_fn, bounds=(lo_b, hi_b), method="dogbox",
+                      x_scale="jac", **opts)
+            if res is None:
+                return None
+            res.fun = float(2.0 * res.cost)     # scipy's cost is 1/2 sum r^2
+            return res
+        return run(minimize, objective, x0=x0, method=method,
+                   bounds=param_set.bounds, options=options)
+
+    def run(fn, *args, **kwargs):
+        """Run an optimiser; on the time limit return None (best point
+        so far stays in ``tracked``)."""
+        if time_limited[0]:
+            return None
+        armed[0] = True
+        try:
+            return fn(*args, **kwargs)
+        except _TimeUp:
+            time_limited[0] = True
+            if verbose:
+                print(f"\nTime limit of {time_limit_hours:g} h reached after "
+                      f"{call_count[0]} evaluations; keeping the best point "
+                      f"(loss {tracked['loss']:.6e})")
+            return None
 
     best_x    = param_set.x0.copy()
     best_loss = objective(best_x)
@@ -692,12 +843,12 @@ def fit_potential(param_set      : FittableParameterSet,
     if use_de:
         if verbose:
             print("\nRunning Differential Evolution ...")
-        de_res = differential_evolution(
+        de_res = run(differential_evolution,
             objective, bounds=param_set.bounds,
             maxiter=de_maxiter, popsize=de_popsize,
             tol=1e-8, seed=42, workers=1, polish=False,
             disp=verbose)
-        if de_res.fun < best_loss:
+        if de_res is not None and de_res.fun < best_loss:
             best_x, best_loss = de_res.x, de_res.fun
         if verbose:
             print(f"DE finished  : loss = {best_loss:.6e}")
@@ -705,10 +856,38 @@ def fit_potential(param_set      : FittableParameterSet,
     # ---- Local refinement -------------------------------------------------
     if verbose:
         print(f"\nLocal refinement with {method} ...")
-    opt = minimize(objective, x0=best_x, method=method,
-                   bounds=param_set.bounds, options=local_options)
-    if opt.fun < best_loss:
+    opt = local(best_x, local_options)
+    if opt is not None and opt.fun < best_loss:
         best_x, best_loss = opt.x, opt.fun
+    loss_history = [float(best_loss)]
+    rng = np.random.default_rng(restart_seed)
+    stalled = 0
+    for k in range(int(restarts)):
+        if time_limited[0]:
+            break
+        if verbose:
+            print(f"\nRestart {k + 1}/{restarts} from loss {best_loss:.6e} ...")
+        prev = best_loss
+        options = dict(local_options)
+        if method == "Nelder-Mead":
+            options["initial_simplex"] = _rotated_simplex(
+                best_x, param_set.bounds, rng)
+        opt = local(best_x, options)
+        if opt is not None and opt.fun < best_loss:
+            best_x, best_loss = opt.x, opt.fun
+        if time_limited[0] and tracked["loss"] < best_loss:
+            best_x, best_loss = tracked["x"], tracked["loss"]
+        loss_history.append(float(best_loss))
+        if verbose:
+            print(f"  -> loss {best_loss:.6e}")
+        stalled = stalled + 1 if (prev <= 0.0 or (prev - best_loss) < restart_rtol * prev) else 0
+        if stalled >= 2:
+            if verbose:
+                print(f"  two restarts below restart_rtol = {restart_rtol:g}; stopping")
+            break
+
+    if tracked["x"] is not None and tracked["loss"] < best_loss:
+        best_x, best_loss = tracked["x"], tracked["loss"]
 
     params_fit  = param_set.decode(best_x)
     engine_fit  = param_set.build_engine(params_fit)
@@ -761,6 +940,8 @@ def fit_potential(param_set      : FittableParameterSet,
         "loss"          : best_loss,
         "val_loss"      : val_loss,
         "opt_result"    : opt,
+        "loss_history"  : loss_history,
+        "time_limited"  : bool(time_limited[0]),
         "train_structs" : train_structs,
         "val_structs"   : val_structs,
         "train_sc"      : train_sc,
@@ -1074,6 +1255,19 @@ def save_fit_result_generic(result: dict,
     # JSON"; a Born-Mayer / Buckingham fit at r_cut 5 A).
     save_potential(result, out_path, potential_type=potential,
                    r_cut=r_cut, species=species, extra=extra)
+
+    if potential == "eam":
+        # ADR-0015: the fitted Zhou EAM tabulated for LAMMPS (pair_style
+        # eam/alloy) and for `potential: {type: EAM, setfl: ...}`.
+        from ..engine.eam_zhou import write_setfl, zhou_eam
+        p = result["params"]["eam"]
+        sp = list(species) if species else list(p["elements"])
+        pot = zhou_eam(p["elements"], sp, r_cut=p["r_cut"], chi=p["chi"])
+        path = os.path.join(output_dir, "fitted.eam.alloy")
+        write_setfl(path, pot, sp, comments=(
+            "akitsushima fit: Zhou et al. (2004) form (ADR-0015)",
+            "species " + " ".join(sp), ""))
+        print(f"  setfl table   -> {path}")
 
     if potential == "buckingham":
         params = result.get("params", {})

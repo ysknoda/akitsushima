@@ -56,6 +56,9 @@ from .parameter_sets import (
     MultiSpeciesStillingerWeberParameterSet,
     StillingerWeberParameterSet,
     TersoffParameterSet,
+    MultiSpeciesTersoffParameterSet,
+    Tersoff1989ParameterSet,
+    ZhouEAMParameterSet,
     YukawaParameterSet,
 )
 
@@ -69,6 +72,9 @@ class PotentialSpec:
     default_cfg     : Optional[dict]     = None
     build_from_yaml : Optional[Callable] = None
     yaml_aliases    : tuple              = field(default_factory=tuple)
+    # Further `fit --write-config --template NAME` configs (ADR-0015),
+    # e.g. the multi-species forms of Tersoff.
+    templates       : dict               = field(default_factory=dict)
 
 
 _REGISTRY: dict = {}        # canonical name -> PotentialSpec ("fit --potential")
@@ -630,10 +636,44 @@ _DEFAULT_FIT_CFG_TERSOFF = {
 }
 
 
+def _is_tersoff1989(init) -> bool:
+    return (isinstance(init, dict)
+            and str(init.get("mixing", "")).lower() == "tersoff1989")
+
+
 def _build_param_set_tersoff(cfg, all_species, pairs, r_cut):
+    # Three formats for initial_tersoff (ADR-0015), the same three the
+    # relax/md YAML accepts for potential.params:
+    #   flat dict                      -- one element (legacy, unchanged)
+    #   list of i/j/k records          -- LAMMPS table, any number of elements
+    #   {mixing: tersoff1989, elements: {...}, chi: {...}}
+    #                                  -- Tersoff (1989) mixing rules
+    init = cfg["initial_tersoff"]
+    species = cfg.get("species", all_species)
+    if isinstance(init, list) or _is_tersoff1989(init):
+        # The elements come from the training data: a `species` key
+        # back-filled from the single-element default template ([C]) must
+        # not narrow a multi-species fit.
+        species = list(all_species)
+    if isinstance(init, list):
+        return MultiSpeciesTersoffParameterSet(
+            init, species=species, fix_params=cfg.get("fix_params"),
+            fit_keys=cfg.get("fit_keys"), tie=cfg.get("tie", "record"))
+    if _is_tersoff1989(init):
+        return Tersoff1989ParameterSet(
+            init["elements"], init.get("chi", {}), species=species,
+            fix_params=cfg.get("fix_params"), fit_keys=cfg.get("fit_keys"),
+            omega=init.get("omega"))
+    if len(set(all_species)) > 1:
+        raise ValueError(
+            f"the training data contain {sorted(set(all_species))}, but "
+            f"initial_tersoff is a single flat parameter set, which applies "
+            f"the same numbers to every pair and triple regardless of "
+            f"species.  Give initial_tersoff as a list of i/j/k records, or "
+            f"as {{mixing: tersoff1989, elements: ..., chi: ...}} (ADR-0015).")
     return TersoffParameterSet(
-        initial_t=dict(cfg["initial_tersoff"]),
-        species=cfg.get("species", all_species),
+        initial_t=dict(init),
+        species=species,
         fix_params=cfg.get("fix_params"),
         fit_keys=cfg.get("fit_keys"))
 
@@ -644,9 +684,19 @@ def _build_from_yaml_tersoff(pot_cfg):
     # Two supported YAML formats for potential.params (see SW above for
     # the identical pattern): legacy flat dict, or multi-species
     # list-of-triples (LAMMPS .tersoff-file convention).
-    if isinstance(params, list):
+    if _is_tersoff1989(params):
+        # Tersoff (1989) mixing form (ADR-0015): expanded to the record
+        # table below.
+        from ..engine.tersoff import tersoff1989_to_triplets
+        species = species or list(params["elements"])
+        params = tersoff1989_to_triplets(params["elements"],
+                                         params.get("chi", {}), species,
+                                         params.get("omega"))
+    if isinstance(params, (list, dict)) and (
+            isinstance(params, list) or any(isinstance(k, tuple) for k in params)):
         nested = {}
-        for rec in params:
+        for rec in (params if isinstance(params, list) else
+                    [dict(i=t[0], j=t[1], k=t[2], **v) for t, v in params.items()]):
             rec = dict(rec)
             key = (rec.pop("i"), rec.pop("j"), rec.pop("k"))
             nested[key] = rec
@@ -660,38 +710,137 @@ def _build_from_yaml_tersoff(pot_cfg):
     return make_force_fn(engine), r_cut
 
 
+def _tersoff_multi_template(initial, r_cut, **extra):
+    cfg = {k: v for k, v in _DEFAULT_FIT_CFG_TERSOFF.items()
+           if k not in ("species", "initial_tersoff", "r_cut")}
+    # least_squares (dogbox on the residual vector): Nelder-Mead crept in
+    # the ill-conditioned c-d valley; least_squares reached loss ~1e-15 on
+    # Si-C and AlN (ADR-0015).  restarts: a cheap safeguard.
+    cfg.update(r_cut=r_cut, initial_tersoff=initial, local_method="least_squares",
+               restarts=2, **extra)
+    return cfg
+
+
+def _tersoff1989_sic_initial():
+    from ..engine.published_parameters import TERSOFF_1989
+    el = TERSOFF_1989["elements"]
+    return {"mixing": "tersoff1989",
+            "elements": {s: dict(el[s]) for s in ("C", "Si")},
+            "chi": {"C-Si": TERSOFF_1989["chi"]["C-Si"]}}
+
+
+# Tersoff records for AlN: Karaaslan, Yapicioglu and Sevik, Phys. Rev.
+# Applied 13, 034027 (2020), Table I (Al-N and N-Al columns), as used by
+# example/AlN.  The pair keys of the two records are equal, as required.
+_TERSOFF_ALN_RECORDS = [
+    {"i": "Al", "j": "N", "k": "N", "A": 1258.567263, "B": 453.228512,
+     "lambda1": 2.434869, "lambda2": 1.71768, "beta": 2.133047e-06,
+     "n": 0.598233, "R": 2.55, "D": 0.15, "lambda3": 1.186759,
+     "c": 19110.741778, "d": 10.88209, "h": -0.972662},
+    {"i": "N", "j": "Al", "k": "Al", "A": 1258.567263, "B": 453.228512,
+     "lambda1": 2.434869, "lambda2": 1.71768, "beta": 2.496023e-06,
+     "n": 1.220882, "R": 2.55, "D": 0.15, "lambda3": 1.100709,
+     "c": 27568.039128, "d": 8.292436, "h": -0.816226},
+]
+
 register(PotentialSpec("tersoff", _build_param_set_tersoff,
                        _DEFAULT_FIT_CFG_TERSOFF, _build_from_yaml_tersoff,
-                       yaml_aliases=("t3",)))
+                       yaml_aliases=("t3",),
+                       templates={
+                           # R + D = 2.70 A
+                           "records": _tersoff_multi_template(
+                               _TERSOFF_ALN_RECORDS, 2.70, tie="record"),
+                           # S_Si = 3.0 A is the largest cutoff
+                           "tersoff1989": _tersoff_multi_template(
+                               _tersoff1989_sic_initial(), 3.0),
+                       }))
 
 
 # ============================================================================
-#  EAM (YAML-bridge lookup only -- no `fit --potential` support: EAM's
-#  parameters are tabulated per-species functions, not scalars a generic
-#  optimiser can fit; see _build_from_yaml_eam for why the bridge itself
-#  is also unimplemented)
+#  EAM (ADR-0015): the analytic Zhou et al. (2004) form is fitted and
+#  built from YAML; a tabulated setfl file is read from YAML
 # ============================================================================
+
+def _zhou_elements(spec, species):
+    """`elements:` of a Zhou EAM block: a {symbol: {...}} dict, or a list of
+    symbols meaning the published Table III rows (with ZHOU_2004_ERRATA)."""
+    from ..engine.published_parameters import ZHOU_2004
+    if isinstance(spec, (list, tuple)):
+        missing = [s for s in spec if s not in ZHOU_2004]
+        if missing:
+            raise ValueError(f"EAM zhou2004: {missing} not in Zhou et al. "
+                             f"(2004) Table III")
+        return {s: dict(ZHOU_2004[s]) for s in spec}
+    return {s: dict(v) for s, v in spec.items()}
+
 
 def _build_from_yaml_eam(pot_cfg):
-    # Bug-fix note (S19): EAMPotential.__init__ takes F_table/rho_table/
-    # phi_table (tabulated per-species embedding/density/pair-potential
-    # functions, normally loaded from a DYNAMO/setfl file), not a flat
-    # `params: {key: value}` scalar dict. This project has no setfl/
-    # DYNAMO table-file parser to source those from, so there is no
-    # working design here to "restore" -- constructing an EAMPotential
-    # directly in Python (bypassing YAML) remains fully supported and
-    # tested (see test_engine_forces.py); only the YAML bridge for it is
-    # unimplemented.
-    raise ValueError(
-        "_build_force_fn_from_yaml: 'EAM' cannot be constructed from "
-        "a flat YAML 'params:' dict -- EAMPotential requires tabulated "
-        "F_table/rho_table/phi_table functions per species (typically "
-        "from a DYNAMO/setfl file), which this project has no YAML-"
-        "level loader for. Construct EAMPotential directly in Python "
-        "and pass it to PotentialEngine/make_force_fn instead.")
+    # ADR-0015: two YAML forms.
+    #   {type: EAM, setfl: file.eam.alloy}          tabulated (LAMMPS eam/alloy)
+    #   {type: EAM, form: zhou2004, elements: {...} | [Ni, Al], chi, r_cut}
+    # A flat `params:` dict still cannot describe an EAM (S19).
+    from ..engine.eam_zhou import read_setfl, zhou_eam
+    species = pot_cfg.get("species")
+    if "setfl" in pot_cfg:
+        pot = read_setfl(pot_cfg["setfl"], species=species)
+    elif str(pot_cfg.get("form", "")).lower() == "zhou2004":
+        el = _zhou_elements(pot_cfg["elements"], species)
+        species = species or list(el)
+        pot = zhou_eam(el, species, r_cut=pot_cfg.get("r_cut"),
+                       chi=pot_cfg.get("chi"))
+    else:
+        raise ValueError(
+            "_build_force_fn_from_yaml: an EAM potential needs either "
+            "'setfl: <file>' (a LAMMPS eam/alloy table) or 'form: zhou2004' "
+            "with 'elements:' (Zhou, Johnson & Wadley 2004; ADR-0015).  A "
+            "flat YAML 'params:' dict cannot describe the tabulated "
+            "F / rho / phi functions of an EAM.")
+    engine = PotentialEngine().add(pot)
+    return make_force_fn(engine), float(pot.r_cut)
 
 
-register(PotentialSpec("eam", build_from_yaml=_build_from_yaml_eam))
+def _build_param_set_eam(cfg, all_species, pairs, r_cut):
+    init = cfg["initial_eam"]
+    if str(init.get("form", "")).lower() != "zhou2004":
+        raise ValueError("fit --potential eam: initial_eam.form must be "
+                         "'zhou2004' (the analytic form that can be fitted)")
+    return ZhouEAMParameterSet(
+        _zhou_elements(init["elements"], all_species), list(all_species),
+        chi=init.get("chi"), fix_params=cfg.get("fix_params"),
+        fit_keys=cfg.get("fit_keys"), r_cut=r_cut)
+
+
+def _default_fit_cfg_eam():
+    from ..engine.published_parameters import ZHOU_2004
+    return {
+        "potential"    : "eam",
+        "training_csv" : "./training_set/structures.csv",
+        "output_dir"   : "./fitting_output",
+        # max over Ni, Al of eam_zhou.zhou_cutoff (Al: 6.690 A): every
+        # |phi_aa| / max(A, B) and f / f_e below 1e-6 beyond it
+        "r_cut"        : 6.6904128564,
+        "weights"      : {"energy": 1.0, "forces": 1.0, "stress": 0.1,
+                          "r0": 1.0, "eps0": 1.0},
+        "use_de"       : False,
+        # least_squares: 3 min and loss 7e-14 on the Ni-Al test, where
+        # Nelder-Mead with restarts stopped at 2.7e-4 after 8.8 h (ADR-0015)
+        "local_method" : "least_squares",
+        "val_fraction" : 0.2,
+        "val_seed"     : 0,
+        "restarts"     : 2,
+        # Zhou, Johnson & Wadley (2004) Table III rows for Ni and Al (Al's
+        # A corrected, published_parameters.ZHOU_2004_ERRATA); Fn0, Fn1,
+        # F0, F_e are re-derived from continuity whatever is given here.
+        "initial_eam"  : {"form": "zhou2004",
+                          "elements": {s: dict(ZHOU_2004[s]) for s in ("Al", "Ni")},
+                          "chi": {"Al-Ni": 1.0}},
+        "fix_params"   : None,
+        "fit_keys"     : None,
+    }
+
+
+register(PotentialSpec("eam", _build_param_set_eam, _default_fit_cfg_eam(),
+                       build_from_yaml=_build_from_yaml_eam))
 
 
 # ============================================================================

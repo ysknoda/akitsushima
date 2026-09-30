@@ -36,6 +36,9 @@ __all__ = [
     "StillingerWeberParameterSet",
     "MultiSpeciesStillingerWeberParameterSet",
     "TersoffParameterSet",
+    "MultiSpeciesTersoffParameterSet",
+    "Tersoff1989ParameterSet",
+    "ZhouEAMParameterSet",
 ]
 
 
@@ -1010,3 +1013,393 @@ class TersoffParameterSet(FittableParameterSet):
         return (PotentialEngine()
                 .add(TersoffPotential(params['tersoff'],
                                       species=self.species)))
+
+
+# ---------------------------------------------------------------------------
+#  Multi-species Tersoff (ADR-0015)
+# ---------------------------------------------------------------------------
+
+def _tersoff_records_to_nested(recs) -> dict:
+    """YAML record list [{i, j, k, ...}] or {(i, j, k): {...}} -> nested dict."""
+    if isinstance(recs, dict):
+        return {tuple(t): {k: float(v) for k, v in p.items()}
+                for t, p in recs.items()}
+    nested = {}
+    for rec in recs:
+        rec = dict(rec)
+        key = (rec.pop("i"), rec.pop("j"), rec.pop("k"))
+        nested[key] = {k: float(v) for k, v in rec.items()}
+    return nested
+
+
+class _VariableTableMixin:
+    """x <-> named variables, each writing one value to several targets."""
+
+    @property
+    def x0(self) -> np.ndarray:
+        return self._x0.copy()
+
+    @property
+    def bounds(self) -> list:
+        return self._bounds
+
+    @property
+    def variable_names(self) -> list:
+        return [name for name, _, _ in self.variables]
+
+    def _setup_vector(self, initial_values, owner: str) -> None:
+        x0, bounds = [], []
+        for (name, key, _), v in zip(self.variables, initial_values):
+            lo, hi = self._BOUNDS[key]
+            if not lo <= v <= hi:
+                raise ValueError(f"{owner}: initial {name} = {v} lies outside "
+                                 f"its search range [{lo}, {hi}].")
+            if key in self._LOG_KEYS:
+                x0.append(np.log(v)); bounds.append((np.log(lo), np.log(hi)))
+            else:
+                x0.append(v);         bounds.append((lo, hi))
+        self._x0 = np.array(x0)
+        self._bounds = bounds
+
+    def _value(self, key: str, xi: float) -> float:
+        return float(np.exp(xi)) if key in self._LOG_KEYS else float(xi)
+
+
+class MultiSpeciesTersoffParameterSet(_VariableTableMixin, FittableParameterSet):
+    """
+    Tersoff fitting on the (i, j, k) record table (LAMMPS .tersoff
+    convention) that TersoffPotential evaluates (ADR-0015, form (a)).
+
+    How the engine reads a record, and the default variables
+    -------------------------------------------------------
+    * Pair terms A, B, lambda1, lambda2 (and the cutoff R, D) come from
+      the diagonal record (i, j, j) of the LOWER-INDEXED atom of a pair,
+      so (i, j, j) and (j, i, i) must agree or the energy depends on atom
+      order.  They are one variable per unordered pair, and initial
+      records that disagree are rejected.
+    * beta, n: bond order b_ij of the centre i, from (i, j, j): one
+      variable per diagonal record.
+    * c, d, h (and lambda3, gamma if fitted): from the full record
+      (i, j, k), one variable per record; ``tie="centre"`` makes them one
+      variable per centre element i (every record with that i), the
+      usual physical choice.
+    * Fixed by default: R, D (cutoffs are set, not fitted), m (1 or 3),
+      gamma, lambda3, and beta, n (ADR-0015 Q17): with near-tetrahedral
+      training angles, beta and the scale of zeta (c, d) trade off almost
+      exactly (the degeneracy of ADR-0003 FT1).  Fitted, they drifted by
+      orders of magnitude even from a start 1 % off the reference, and
+      Nelder-Mead stalled at loss ~1e-5 (AlN, wurtzite and with zinc blende
+      and rocksalt added).  Name them in ``fit_keys`` to fit them anyway.
+
+    Parameters
+    ----------
+    initial_records : record list (YAML format) or {(i, j, k): {...}}; the
+                      starting point and the values of every fixed key.
+    species         : element symbols.
+    fix_params      : keys held at their record values (added to the
+                      default fixed set; only the names are used).
+    fit_keys        : keys to optimise (default A, B, lambda1, lambda2,
+                      beta, n, c, d, h).
+    tie             : "record" (default) or "centre" for the angular keys.
+    """
+
+    _DEFAULT_FIX = ("R", "D", "m", "gamma", "lambda3", "beta", "n")
+    _DEFAULT_FIT = ("A", "B", "lambda1", "lambda2", "c", "d", "h")
+    _PAIR_KEYS = ("A", "B", "lambda1", "lambda2", "R", "D")
+    _BOND_KEYS = ("beta", "n")
+    _ANGLE_KEYS = ("c", "d", "h", "lambda3", "gamma")
+    _LOG_KEYS = frozenset({"A", "B", "lambda1", "lambda2", "beta", "n",
+                           "c", "d", "gamma"})
+    _BOUNDS = {                      # physical (not log) limits
+        "A": (1.0, 1e5), "B": (0.1, 1e4),
+        "lambda1": (0.5, 10.0), "lambda2": (0.1, 8.0),
+        "beta": (1e-10, 10.0), "n": (0.05, 10.0),
+        "c": (1e-3, 1e7), "d": (1e-2, 1e4), "h": (-1.0, 1.0),
+        "lambda3": (0.0, 5.0), "gamma": (1e-3, 100.0),
+        "R": (1.0, 5.0), "D": (0.02, 0.5),
+    }
+
+    def __init__(self, initial_records, species: list, fix_params=None,
+                 fit_keys: Optional[list] = None, tie: str = "record"):
+        if tie not in ("record", "centre"):
+            raise ValueError("MultiSpeciesTersoffParameterSet: tie must be "
+                             "'record' or 'centre'")
+        self.species = list(species)
+        self.records = _tersoff_records_to_nested(initial_records)
+        for sp in {e for t in self.records for e in t}:
+            if sp not in self.species:
+                raise ValueError(f"Tersoff record element '{sp}' is not among "
+                                 f"the species {self.species}")
+        fixed = set(self._DEFAULT_FIX) | set(fix_params or ())
+        keys = list(fit_keys) if fit_keys else list(self._DEFAULT_FIT)
+        self.fit_keys = [k for k in keys if k not in fixed]
+        unknown = [k for k in self.fit_keys if k not in self._BOUNDS]
+        if unknown:
+            raise ValueError(f"MultiSpeciesTersoffParameterSet: unknown fit "
+                             f"key(s) {unknown}")
+        self._check_pairs()
+
+        # variables: (name, key, [(triple, key), ...])
+        self.variables = []
+        seen_pairs, seen_centres = set(), set()
+        for (i, j, k) in self.records:
+            if j == k:
+                pair = frozenset((i, j))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    tw = [(i, j, j)] + ([(j, i, i)] if i != j else [])
+                    for key in self.fit_keys:
+                        if key in self._PAIR_KEYS:
+                            self.variables.append(
+                                (f"{i}-{j}:{key}", key, [(t, key) for t in tw]))
+                for key in self.fit_keys:
+                    if key in self._BOND_KEYS:
+                        self.variables.append(
+                            (f"{i};{j}:{key}", key, [((i, j, j), key)]))
+            for key in self.fit_keys:
+                if key not in self._ANGLE_KEYS:
+                    continue
+                if tie == "centre":
+                    if (i, key) in seen_centres:
+                        continue
+                    seen_centres.add((i, key))
+                    tg = [(t, key) for t in self.records if t[0] == i]
+                    self.variables.append((f"{i};*:{key}", key, tg))
+                else:
+                    self.variables.append(
+                        (f"{i};{j},{k}:{key}", key, [((i, j, k), key)]))
+        init = []
+        for name, key, targets in self.variables:
+            try:
+                init.append(float(np.mean([self.records[t][kk] for t, kk in targets])))
+            except KeyError:
+                raise ValueError(f"MultiSpeciesTersoffParameterSet: a record "
+                                 f"of {name} has no '{key}'") from None
+        self._setup_vector(init, "MultiSpeciesTersoffParameterSet")
+
+    def _check_pairs(self) -> None:
+        for (i, j, k), rec in self.records.items():
+            if j != k or i == j:
+                continue
+            twin = self.records.get((j, i, i))
+            if twin is None:
+                raise ValueError(
+                    f"Tersoff record ({i},{j},{j}) has no partner ({j},{i},{i}); "
+                    f"the {i}-{j} pair is read from whichever belongs to the "
+                    f"lower-indexed atom, so both are required.")
+            for key in self._PAIR_KEYS:
+                a, b = rec.get(key), twin.get(key)
+                if (a is None) != (b is None) or (
+                        a is not None and not np.isclose(a, b, rtol=1e-12, atol=0.0)):
+                    raise ValueError(
+                        f"Tersoff records ({i},{j},{j}) and ({j},{i},{i}) disagree "
+                        f"on '{key}' ({a} vs {b}); the engine would read one or "
+                        f"the other depending on atom order.")
+
+    def decode(self, x: np.ndarray) -> dict:
+        """Return {'tersoff': {(i, j, k): full parameter dict}}."""
+        out = {t: dict(p) for t, p in self.records.items()}
+        for xi, (_, key, targets) in zip(x, self.variables):
+            v = self._value(key, xi)
+            for triple, kk in targets:
+                out[triple][kk] = v
+        return {"tersoff": out}
+
+    def build_engine(self, params: dict) -> PotentialEngine:
+        return PotentialEngine().add(
+            TersoffPotential(params["tersoff"], species=self.species))
+
+
+class Tersoff1989ParameterSet(_VariableTableMixin, FittableParameterSet):
+    """
+    Tersoff fitting in the multicomponent mixing form of Tersoff, Phys.
+    Rev. B 39, 5566 (1989) (ADR-0015, form (b)): per-element A, B,
+    lambda, mu, beta, n, c, d, h, R, S plus one chi per unordered pair of
+    distinct elements; the (i, j, k) table follows from
+    akitsushima.engine.tersoff.tersoff1989_to_triplets.
+
+    Default variables: A, B, lambda, mu, c, d, h of every element and every
+    chi; R and S fixed (the paper did not optimise them either), beta and
+    n fixed (the beta-c/d degeneracy, see MultiSpeciesTersoffParameterSet;
+    ADR-0015 Q17; list them in ``fit_keys`` to fit them).
+    ``fit_keys=["chi"]`` reproduces the paper's own procedure (elements
+    fixed, chi from compound data).
+
+    Parameters
+    ----------
+    elements : {symbol: {A, B, lambda, mu, beta, n, c, d, h, R, S}}.
+    chi      : {"a-b": value} for every pair of distinct species.
+    species  : element symbols.
+    fix_params, fit_keys : names, as for the other parameter sets.
+    omega    : optional {"i-k": omega_ik} (fixed; default 1).
+    """
+
+    _DEFAULT_FIX = ("R", "S", "beta", "n")
+    _DEFAULT_FIT = ("A", "B", "lambda", "mu", "c", "d", "h", "chi")
+    _LOG_KEYS = frozenset({"A", "B", "lambda", "mu", "beta", "n", "c", "d",
+                           "chi", "R", "S"})
+    _BOUNDS = {
+        "A": (1.0, 1e5), "B": (0.1, 1e4), "lambda": (0.5, 10.0),
+        "mu": (0.1, 8.0), "beta": (1e-10, 10.0), "n": (0.05, 10.0),
+        "c": (1e-3, 1e7), "d": (1e-2, 1e4), "h": (-1.0, 1.0),
+        "chi": (0.3, 3.0), "R": (1.0, 5.0), "S": (1.0, 5.5),
+    }
+
+    def __init__(self, elements: dict, chi: dict, species: list,
+                 fix_params=None, fit_keys: Optional[list] = None,
+                 omega: Optional[dict] = None):
+        from ..engine.tersoff import TERSOFF1989_ELEMENT_KEYS, tersoff1989_to_triplets
+        self.species = list(species)
+        self.elements = {s: {k: float(v) for k, v in elements[s].items()}
+                         for s in self.species if s in elements}
+        self.omega = dict(omega or {})
+        self._expand = tersoff1989_to_triplets
+        # canonical chi keys, species order
+        self.chi = {}
+        for a_i, a in enumerate(self.species):
+            for b in self.species[a_i + 1:]:
+                v = chi.get(f"{a}-{b}", chi.get(f"{b}-{a}"))
+                if v is None:
+                    raise ValueError(f"Tersoff1989ParameterSet: chi for {a}-{b} "
+                                     f"is not given")
+                self.chi[f"{a}-{b}"] = float(v)
+        tersoff1989_to_triplets(self.elements, self.chi, self.species, self.omega)
+
+        fixed = set(self._DEFAULT_FIX) | set(fix_params or ())
+        keys = list(fit_keys) if fit_keys else list(self._DEFAULT_FIT)
+        self.fit_keys = [k for k in keys if k not in fixed]
+        unknown = [k for k in self.fit_keys
+                   if k not in TERSOFF1989_ELEMENT_KEYS and k != "chi"]
+        if unknown:
+            raise ValueError(f"Tersoff1989ParameterSet: unknown fit key(s) {unknown}")
+        self.variables, init = [], []
+        for s in self.species:
+            for key in self.fit_keys:
+                if key != "chi":
+                    self.variables.append((f"{s}:{key}", key, (s, key)))
+                    init.append(self.elements[s][key])
+        if "chi" in self.fit_keys:
+            for pair, v in self.chi.items():
+                self.variables.append((f"chi:{pair}", "chi", pair))
+                init.append(v)
+        self._setup_vector(init, "Tersoff1989ParameterSet")
+
+    def decode(self, x: np.ndarray) -> dict:
+        """Return {'tersoff': (i, j, k) table, 'tersoff1989': {elements, chi}}."""
+        el = {s: dict(p) for s, p in self.elements.items()}
+        chi = dict(self.chi)
+        for xi, (_, key, target) in zip(x, self.variables):
+            v = self._value(key, xi)
+            if key == "chi":
+                chi[target] = v
+            else:
+                el[target[0]][key] = v
+        table = self._expand(el, chi, self.species, self.omega)
+        return {"tersoff": table,
+                "tersoff1989": {"elements": el, "chi": chi, "omega": dict(self.omega)}}
+
+    def build_engine(self, params: dict) -> PotentialEngine:
+        return PotentialEngine().add(
+            TersoffPotential(params["tersoff"], species=self.species))
+
+
+class ZhouEAMParameterSet(_VariableTableMixin, FittableParameterSet):
+    """
+    Alloy EAM fitting in the analytic form of Zhou, Johnson and Wadley,
+    Phys. Rev. B 69, 144113 (2004) (ADR-0015; engine/eam_zhou.py).
+
+    Variables (default, per element): A, B, alpha, beta of the pair term
+    and Fn2, Fn3, F2, F3, eta of the embedding function.  Fn0, Fn1, F0
+    and F_e are never variables: they follow from the continuity of F and
+    dF/drho at rho_n and rho_0 (eam_zhou.continuous).  Fixed: r_e, f_e,
+    rho_e, rho_s (f_e and rho set the density scale, which a single
+    element cannot determine), kappa, lambda (cutoff shape), F1 (0 in
+    Table III).  The cross pair follows eq. (A5); ``"chi"`` in fit_keys
+    adds one factor phi_ab -> chi_ab phi_ab per pair of distinct elements
+    (not in the paper, ADR-0015 Q8(b)).
+
+    The cutoff is fixed for the whole fit (``r_cut``, default: from the
+    initial parameters, eam_zhou.zhou_cutoff), so the loss stays smooth.
+
+    Parameters
+    ----------
+    elements : {symbol: Table III parameter dict} (the start point).
+    species  : element symbols.
+    chi      : optional {"a-b": value}, default 1.
+    fix_params, fit_keys : names, as for the other parameter sets.
+    r_cut    : cutoff [A]; None -> computed once from ``elements``.
+    """
+
+    _DEFAULT_FIX = ("r_e", "f_e", "rho_e", "rho_s", "kappa", "lambda", "F1")
+    _DEFAULT_FIT = ("A", "B", "alpha", "beta", "Fn2", "Fn3", "F2", "F3", "eta")
+    _LOG_KEYS = frozenset({"A", "B", "alpha", "beta", "chi", "r_e", "f_e",
+                           "rho_e", "rho_s"})
+    _BOUNDS = {
+        "A": (1e-3, 10.0), "B": (1e-3, 10.0), "alpha": (1.0, 30.0),
+        "beta": (0.5, 20.0), "Fn2": (-20.0, 20.0), "Fn3": (-20.0, 20.0),
+        "F2": (-20.0, 20.0), "F3": (-20.0, 20.0), "eta": (-3.0, 3.0),
+        "F1": (-20.0, 20.0), "chi": (0.2, 5.0), "r_e": (1.5, 5.0),
+        "f_e": (0.05, 20.0), "rho_e": (0.5, 100.0), "rho_s": (0.5, 100.0),
+        "kappa": (0.05, 2.0), "lambda": (0.05, 2.0),
+    }
+
+    def __init__(self, elements: dict, species: list, chi: Optional[dict] = None,
+                 fix_params=None, fit_keys: Optional[list] = None,
+                 r_cut: Optional[float] = None):
+        from ..engine.eam_zhou import DERIVED, KEYS, continuous, zhou_cutoff
+        self.species = list(species)
+        self.elements = {}
+        for s in self.species:
+            if s not in elements:
+                raise ValueError(f"ZhouEAMParameterSet: no parameters for '{s}'")
+            self.elements[s] = continuous(elements[s])
+        self.chi = {}
+        for a_i, a in enumerate(self.species):
+            for b in self.species[a_i + 1:]:
+                v = (chi or {}).get(f"{a}-{b}", (chi or {}).get(f"{b}-{a}", 1.0))
+                self.chi[f"{a}-{b}"] = float(v)
+        self.r_cut = float(r_cut) if r_cut else max(
+            zhou_cutoff(self.elements[s]) for s in self.species)
+
+        fixed = set(self._DEFAULT_FIX) | set(fix_params or ())
+        keys = list(fit_keys) if fit_keys else list(self._DEFAULT_FIT)
+        bad = [k for k in keys if k in DERIVED]
+        if bad:
+            raise ValueError(f"ZhouEAMParameterSet: {bad} follow from the "
+                             f"continuity of F and cannot be fitted")
+        self.fit_keys = [k for k in keys if k not in fixed]
+        unknown = [k for k in self.fit_keys if k not in KEYS and k != "chi"]
+        if unknown:
+            raise ValueError(f"ZhouEAMParameterSet: unknown fit key(s) {unknown}")
+        self.variables, init = [], []
+        for s in self.species:
+            for key in self.fit_keys:
+                if key != "chi":
+                    self.variables.append((f"{s}:{key}", key, (s, key)))
+                    init.append(self.elements[s][key])
+        if "chi" in self.fit_keys:
+            for pair, v in self.chi.items():
+                self.variables.append((f"chi:{pair}", "chi", pair))
+                init.append(v)
+        self._setup_vector(init, "ZhouEAMParameterSet")
+
+    def decode(self, x: np.ndarray) -> dict:
+        """Return {'eam': {'form': 'zhou2004', 'elements', 'chi', 'r_cut'}}."""
+        from ..engine.eam_zhou import continuous
+        el = {s: dict(p) for s, p in self.elements.items()}
+        chi = dict(self.chi)
+        for xi, (_, key, target) in zip(x, self.variables):
+            v = self._value(key, xi)
+            if key == "chi":
+                chi[target] = v
+            else:
+                el[target[0]][key] = v
+        el = {s: continuous(p) for s, p in el.items()}
+        return {"eam": {"form": "zhou2004", "elements": el, "chi": chi,
+                        "r_cut": self.r_cut}}
+
+    def build_engine(self, params: dict) -> PotentialEngine:
+        from ..engine.eam_zhou import zhou_eam
+        p = params["eam"]
+        return PotentialEngine().add(
+            zhou_eam(p["elements"], self.species, r_cut=p["r_cut"], chi=p["chi"]))

@@ -144,7 +144,14 @@ def save_potential(result        : dict,
     # "('Ge', 'Ge', 'Sn')" keys that nothing could read back.  Write the
     # i/j/k record list instead -- the same format as potential.params in
     # a relax/md YAML, so a fitted result can be pasted straight in.
-    if (pot_type in ('sw', 'stillinger_weber', 'stillingerweber')
+    # Multi-species Tersoff (ADR-0015) decodes the same way; a 1989-form
+    # fit also carries its per-element / chi parameters, stored beside
+    # the records under 'tersoff1989' (the records alone define the
+    # potential and are what load_potential reads).
+    tersoff1989 = None
+    if pot_type == 'tersoff' and isinstance(result.get('params'), dict):
+        tersoff1989 = result['params'].get('tersoff1989')
+    if (pot_type in ('sw', 'stillinger_weber', 'stillingerweber', 'tersoff')
             and isinstance(params_raw, dict) and params_raw
             and all(isinstance(t, tuple) for t in params_raw)):
         serialised_params = [
@@ -163,6 +170,8 @@ def save_potential(result        : dict,
         out[_POT_SPECIES_KEY] = list(species)
     if charges is not None:
         out['charges'] = charges
+    if tersoff1989 is not None:
+        out['tersoff1989'] = tersoff1989
     if extra:
         out.update(extra)
 
@@ -287,7 +296,24 @@ def load_potential(path    : str,
                                              species=sp or None))
 
     elif pot_type == 'tersoff':
-        engine.add(TersoffPotential(params, species=sp or None))
+        t_params = params.get('tersoff', params) if isinstance(params, dict) else params
+        if isinstance(t_params, list):           # multi-species records
+            nested = {}
+            for rec in t_params:
+                rec = dict(rec)
+                nested[(rec.pop('i'), rec.pop('j'), rec.pop('k'))] = rec
+            t_params = nested
+            if not sp:
+                sp = list(dict.fromkeys(e for t in nested for e in t))
+        engine.add(TersoffPotential(t_params, species=sp or None))
+
+    elif pot_type == 'eam':
+        # ADR-0015: the analytic Zhou et al. (2004) form, as fitted.
+        from ..engine.eam_zhou import zhou_eam
+        p = params.get('eam', params)
+        sp = sp or list(p['elements'])
+        engine.add(zhou_eam(p['elements'], sp, r_cut=p.get('r_cut', rc),
+                            chi=p.get('chi')))
 
     elif pot_type == 'mie':
         # n/m are fixed (not-fit) hyperparameters -- see
@@ -307,7 +333,7 @@ def load_potential(path    : str,
         raise ValueError(
             f"load_potential: unknown type '{pot_type}'. "
             "Supported: lj, morse, bornmayer, buckingham, sw, tersoff, "
-            "mie, yukawa.")
+            "mie, yukawa, eam.")
 
     meta = {'potential_type': pot_type, 'r_cut': rc, 'species': sp,
             'params': params, 'charges': charges, 'loss': loss}

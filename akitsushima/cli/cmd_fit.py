@@ -290,6 +290,14 @@ def cmd_fit(args: argparse.Namespace) -> int:
     # -- Write template config and exit --------------------
     if args.write_config:
         tmpl = _FIT_CFG_TEMPLATES.get(potential, _DEFAULT_FIT_CFG)
+        variant = getattr(args, "template", None)
+        if variant:
+            variants = registry.get(potential).templates
+            if variant not in variants:
+                print(f"ERROR: no template '{variant}' for {potential}; "
+                      f"available: {sorted(variants) or 'none'}")
+                return 1
+            tmpl = variants[variant]
         _write_cfg(args.write_config, tmpl)
         return 0
 
@@ -419,6 +427,11 @@ def cmd_fit(args: argparse.Namespace) -> int:
         val_seed     = cfg.get("val_seed", 0),
         output_dir   = cfg["output_dir"],
         verbose      = verbose,
+        restarts     = int(cfg.get("restarts", 0)),
+        restart_rtol = float(cfg.get("restart_rtol", 1e-3)),
+        local_maxiter= cfg.get("local_maxiter"),
+        restart_seed = int(cfg.get("restart_seed", 0)),
+        time_limit_hours = cfg.get("time_limit_hours"),
     )
     print_fit_result(result, potential)
     # Bug-fix note (F5): evaluate_diagnostics_generic requires the FITTED

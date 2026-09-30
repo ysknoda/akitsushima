@@ -126,6 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=registry.names())
     p_fit.add_argument("--config",       "-c", metavar="FILE")
     p_fit.add_argument("--write-config",       metavar="FILE")
+    p_fit.add_argument("--template",           metavar="NAME",
+                        help="with --write-config: a named variant of the "
+                             "potential's template (tersoff: records, "
+                             "tersoff1989)")
     p_fit.add_argument("--training-csv", "-d", metavar="CSV")
     p_fit.add_argument("--output-dir",   "-o", metavar="DIR")
     p_fit.add_argument("--r-cut",        type=float, metavar="A")

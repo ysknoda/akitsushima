@@ -41,6 +41,9 @@ from .parameter_sets import (
     StillingerWeberParameterSet,
     MultiSpeciesStillingerWeberParameterSet,
     TersoffParameterSet,
+    MultiSpeciesTersoffParameterSet,
+    Tersoff1989ParameterSet,
+    ZhouEAMParameterSet,
     YukawaParameterSet,
 )
 
@@ -55,6 +58,9 @@ __all__ = [
     "StillingerWeberParameterSet",
     "MultiSpeciesStillingerWeberParameterSet",
     "TersoffParameterSet",
+    "MultiSpeciesTersoffParameterSet",
+    "Tersoff1989ParameterSet",
+    "ZhouEAMParameterSet",
     "generic_loss_function",
     "split_train_val",
     "ScoreCard",

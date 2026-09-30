@@ -66,8 +66,10 @@ class EAMPotential:
         """
         Parameters (multi-species alloy EAM format)
         ---------------------------------------------
-        F_table   : dict {species: callable/array} -- embedding function
-                    per element.
+        F_table   : dict {species: callable/array/(f, df)} -- embedding
+                    function per element; a (f, df) tuple of callables
+                    supplies the exact derivative (the same holds for
+                    rho_table and phi_table).
         rho_table : dict {species: callable/array} -- electron-density
                     function per element (the density AT atom i is the
                     sum of rho_j(r_ij) over neighbours j, using the
@@ -88,6 +90,12 @@ class EAMPotential:
         self.species = list(species) if species else None
 
         def _make_interp(tab, grid):
+            # (f, df): a callable with its exact derivative (analytic
+            # forms such as Zhou et al. 2004, ADR-0015); a bare callable
+            # is differentiated by central differences in _eval.
+            if (isinstance(tab, tuple) and len(tab) == 2
+                    and callable(tab[0]) and callable(tab[1])):
+                return tab[0], tab[1]
             if callable(tab):
                 return tab, None
             cs = CubicSpline(grid, tab)

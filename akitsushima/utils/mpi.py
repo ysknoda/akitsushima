@@ -101,6 +101,14 @@ def _mpi_allreduce_sum_scalar(value: float) -> float:
     return float(_mpi_comm.allreduce(float(value), op=_MPI.SUM))
 
 
+def _mpi_allgather_concat(arr: np.ndarray) -> np.ndarray:
+    """Concatenate each rank's 1-D array in rank order, on every rank."""
+    if not _mpi_is_active():
+        return np.asarray(arr, float)
+    parts = _mpi_comm.allgather(np.asarray(arr, float))
+    return np.concatenate(parts) if parts else np.zeros(0)
+
+
 def _mpi_bcast(obj, root: int = 0):
     """Broadcast a Python object from root to all ranks."""
     if not _HAS_MPI:

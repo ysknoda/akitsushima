@@ -1670,3 +1670,85 @@ class TersoffPotential:
         stress /= volume
         return energy, forces, stress
 
+
+# -- Tersoff (1989) mixing form (ADR-0015) ---------------------------------
+
+TERSOFF1989_ELEMENT_KEYS = ("A", "B", "lambda", "mu", "beta", "n",
+                            "c", "d", "h", "R", "S")
+
+
+def _pair_key(a: str, b: str, table: dict, default):
+    """Look up an unordered-pair value keyed "a-b" or "b-a"."""
+    for k in (f"{a}-{b}", f"{b}-{a}"):
+        if k in table:
+            return float(table[k])
+    return default
+
+
+def tersoff1989_to_triplets(elements: dict, chi: dict,
+                            species: Optional[list] = None,
+                            omega: Optional[dict] = None) -> dict:
+    """
+    Expand the multicomponent Tersoff form of Tersoff, Phys. Rev. B 39,
+    5566 (1989), eqs. (1a)-(1e), into the (i, j, k) record table that
+    TersoffPotential evaluates.
+
+    Mixing rules (eq. 1e): lambda_ij = (lambda_i + lambda_j)/2,
+    mu_ij = (mu_i + mu_j)/2, A_ij = (A_i A_j)^1/2, B_ij = (B_i B_j)^1/2,
+    R_ij = (R_i R_j)^1/2, S_ij = (S_i S_j)^1/2.  chi_ij multiplies b_ij
+    (chi_ii = 1), which is the same as B_ij -> chi_ij B_ij.  beta, n and
+    the angular c, d, h belong to the centre atom i; lambda3 (alpha of
+    Tersoff 1988) is 0; omega_ik (default 1, as in the paper) enters as
+    gamma of every (i, j, k) record.
+
+    Mapping onto the engine: its cutoff is 1/2 - 1/2 sin(pi/2 (r - R)/D),
+    identical to the paper's 1/2 + 1/2 cos(pi (r - R_ij)/(S_ij - R_ij))
+    with R = (R_ij + S_ij)/2, D = (S_ij - R_ij)/2; zeta_ij uses the (i, k)
+    pair's cutoff, as eq. (1d) requires.
+
+    Parameters
+    ----------
+    elements : {symbol: {A, B, lambda, mu, beta, n, c, d, h, R, S}}.
+    chi      : {"a-b": chi_ab} for every unordered pair of distinct
+               elements in ``species``.  A missing pair is an error: the
+               paper has none for C-Ge, and silently using 1 would be a
+               guess.
+    species  : element symbols to expand (default: all of ``elements``).
+    omega    : optional {"i-k": omega_ik}, default 1.
+    """
+    species = list(species) if species is not None else list(elements)
+    omega = omega or {}
+    for s in species:
+        if s not in elements:
+            raise ValueError(f"tersoff1989: no parameters for element '{s}'")
+        missing = [k for k in TERSOFF1989_ELEMENT_KEYS if k not in elements[s]]
+        if missing:
+            raise ValueError(f"tersoff1989: element '{s}' lacks {missing}")
+    out = {}
+    for i in species:
+        pi = elements[i]
+        for j in species:
+            pj = elements[j]
+            x = 1.0 if i == j else _pair_key(i, j, chi, None)
+            if x is None:
+                raise ValueError(
+                    f"tersoff1989: chi for the {i}-{j} pair is not given "
+                    f"(Tersoff 1989 tabulates only C-Si and Si-Ge).")
+            r_ij = math.sqrt(float(pi["R"]) * float(pj["R"]))
+            s_ij = math.sqrt(float(pi["S"]) * float(pj["S"]))
+            if not s_ij > r_ij:
+                raise ValueError(f"tersoff1989: S must exceed R ({i}-{j})")
+            for k in species:
+                rec = {"c": float(pi["c"]), "d": float(pi["d"]),
+                       "h": float(pi["h"]), "lambda3": 0.0, "m": 3.0,
+                       "gamma": _pair_key(i, k, omega, 1.0)}
+                if j == k:
+                    rec.update(
+                        A=math.sqrt(float(pi["A"]) * float(pj["A"])),
+                        B=x * math.sqrt(float(pi["B"]) * float(pj["B"])),
+                        lambda1=0.5 * (float(pi["lambda"]) + float(pj["lambda"])),
+                        lambda2=0.5 * (float(pi["mu"]) + float(pj["mu"])),
+                        R=0.5 * (r_ij + s_ij), D=0.5 * (s_ij - r_ij),
+                        beta=float(pi["beta"]), n=float(pi["n"]))
+                out[(i, j, k)] = rec
+    return out
