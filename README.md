@@ -39,7 +39,10 @@
 > gamma), and the Vinet equation of state. 0.2.0a9 adds Born charges
 > (`born:` block), the Gonze-Lee non-analytic correction (LO-TO splitting)
 > in phonon / gruneisen / qha, and the `dielectric` (eps_0, IR modes) and
-> `piezo` (relaxed-ion e, d, k) commands (ADR-0019).
+> `piezo` (relaxed-ion e, d, k) commands (ADR-0019). 0.2.0a10 adds the
+> `nemd` command (Langevin heat baths, temperature profile, local heat
+> flux, kappa and Kapitza resistance, checkpoint / restart) and the
+> species / region decomposition of the Green-Kubo kappa (ADR-0020).
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -216,6 +219,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `qha`    | Quasi-harmonic thermal expansion, B(T), C_p, thermodynamic γ(T) |
 | `dielectric` | Static dielectric tensor, LO-TO splitting, IR modes (Born charges) |
 | `piezo`  | Relaxed-ion piezoelectric e, d and coupling k (rigid ion) |
+| `nemd`   | Non-equilibrium MD: T profile, local heat flux, kappa, Kapitza resistance |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
 | `fit`    | Fit a classical potential (LJ / Mie / Morse / Born-Mayer / Yukawa / Buckingham / Stillinger-Weber / Tersoff / EAM) |
 
@@ -287,6 +291,23 @@ gives e (C/m^2), d (pC/N) and k.  The model is rigid ion: with point
 charges only, eps_inf = 1 and the electronic (clamped-ion) piezoelectric
 term is zero unless given.  Without charges or a `born:` block (MLIP,
 EAM, Tersoff, SW) both commands refuse.
+
+### NEMD and the decomposition of kappa (ADR-0020)
+
+`akitsushima nemd` places a hot and a cold Langevin bath (fractional slabs
+along a lattice vector) in a periodic cell, so heat flows both ways
+round: J = Qdot / (2A).  It reports the temperature profile, the local
+heat flux per bin (from the per-atom heat currents), kappa = J / |dT/dz|
+from each of the two segments with block errors, the Kapitza resistance
+of interfaces you name, and steady-state indicators (bath balance,
+profile drift, gradient sign).  kappa depends on the length: run several
+and extrapolate 1/kappa against 1/L (example/nemd).  Long runs: launch
+detached; the checkpoint (`checkpoint_every`) lets a re-run continue bit
+for bit.
+
+`kappa.decompose: {species: true, regions: {axis: c, bounds: [0, 0.5, 1]}}`
+splits the Green-Kubo tensor into kappa_g = (V/k_B T^2) int <J_g(0) J(t)>,
+which add up to kappa exactly.
 
 ### Fitting a classical potential
 
@@ -554,7 +575,7 @@ Which solvers take an MLIP (ADR-0007):
 | `relax`, `md`, `neb`, `tsa`, `phonon`, `elastic`, `gruneisen`, `qha` | yes | yes | need E, F, S only |
 | `dielectric`, `piezo` | with `born:` | with `born:` | Z* and eps_inf must be given (no charges of its own) |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
-| `kappa` | refused | yes | exact heat flux from the site terms |
+| `kappa`, `nemd` (local flux) | refused | yes | exact heat flux from the site terms |
 | `osmc` | refused | yes | CFCMC couples the fractional atom through total energies (ADR-0009): as `gcmc` |
 | `esm` | refused | refused | electrostatics only |
 

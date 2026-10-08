@@ -65,7 +65,8 @@ def cmd_kappa(args) -> int:
                 traj_every=kp_cfg.get("traj_every",100),
                 thermo_every=kp_cfg.get("thermo_every",1000),
                 seed=kp_cfg.get("seed", 42),
-                output_dir=output_dir, verbose=verbose)
+                output_dir=output_dir, verbose=verbose,
+                decompose=kp_cfg.get("decompose"))
     t_sections.append(("NVE MD run", _time.perf_counter()-t0))
 
     t0 = _time.perf_counter()
@@ -73,6 +74,16 @@ def cmd_kappa(args) -> int:
                                n_blocks=kp_cfg.get("n_blocks",5),
                                verbose=verbose)
     t_sections.append(("Green-Kubo integration", _time.perf_counter()-t0))
+
+    decomp = None
+    if kp_cfg.get("decompose"):
+        decomp = calc.compute_kappa_decomposition(
+            tau_max=kp_cfg.get("tau_max", 20.0), verbose=verbose)
+        import json
+        with open(os.path.join(output_dir, "kappa_decomposition.json"), "w") as fh:
+            json.dump({k: ({g: v.tolist() for g, v in d.items()} if isinstance(d, dict)
+                           else (d.tolist() if hasattr(d, "tolist") else d))
+                       for k, d in decomp.items()}, fh, indent=1)
 
     kappa_slack = None
     slack_cfg = kp_cfg.get("slack_debye")
@@ -105,6 +116,14 @@ def cmd_kappa(args) -> int:
     print(f"  kappa_yy : {kappa[1,1]:.4f} W/(m K)")
     print(f"  kappa_zz : {kappa[2,2]:.4f} W/(m K)")
     print(f"  kappa_iso: {(kappa[0,0]+kappa[1,1]+kappa[2,2])/3:.4f} W/(m K)")
+    if decomp is not None:
+        for name, parts in decomp.items():
+            if name in ("sum_rule_residual", "total"):
+                continue
+            print(f"\n[kappa by {name}]  (sum-rule residual "
+                  f"{decomp['sum_rule_residual'][name]:.1e} W/m/K)")
+            for g, k in parts.items():
+                print(f"  {g:>18s} : {k[0,0]:9.4f} {k[1,1]:9.4f} {k[2,2]:9.4f}")
     if kappa_slack is not None:
         print(f"\n[Slack-Debye estimate]")
         print(f"  kappa_Slack : {kappa_slack:.4f} W/(m K)")

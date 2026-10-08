@@ -13,6 +13,7 @@ from .cmd_kappa import cmd_kappa
 from .cmd_md import cmd_md
 from .cmd_mlip import cmd_mlip
 from .cmd_neb import cmd_neb
+from .cmd_nemd import cmd_nemd
 from .cmd_osmc import cmd_osmc
 from .cmd_phonon import cmd_phonon
 from .cmd_piezo import cmd_piezo
@@ -44,6 +45,7 @@ _DISPATCH = {
     "qha":     cmd_qha,
     "dielectric": cmd_dielectric,
     "piezo":   cmd_piezo,
+    "nemd":    cmd_nemd,
     "mlip":    cmd_mlip,
     "fit":     cmd_fit,
 }
@@ -73,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  qha       Quasi-harmonic thermal expansion, B(T), Cp\n"
             "  dielectric Static dielectric tensor, LO-TO, IR modes (Born charges)\n"
             "  piezo     Relaxed-ion piezoelectric e, d and coupling k\n"
+            "  nemd      Non-equilibrium MD: T profile, local heat flux, Kapitza\n"
             "  mlip      Fit a machine-learning potential (ELM/QELM/NN/linear)\n"
             "  fit       Fit a classical potential "
             "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n\n"
@@ -115,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("qha",    "Quasi-harmonic thermal expansion, bulk modulus, Cp")
     _add("dielectric", "Static dielectric tensor, LO-TO splitting, IR modes")
     _add("piezo",  "Relaxed-ion piezoelectric tensors e, d and coupling k")
+    _add("nemd",   "Non-equilibrium MD with Langevin heat baths (kappa, Kapitza)")
     _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
 
     p_fit = sub.add_parser(

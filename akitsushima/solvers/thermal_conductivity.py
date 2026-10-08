@@ -302,6 +302,62 @@ class ThermalConductivityCalculator:
 
         return J_vir_exact + J_vir_remainder
 
+    def _per_atom_heat_current(self,
+                               velocities: np.ndarray,
+                               e_pot_i   : np.ndarray,
+                               pair_data,
+                               stress_full: np.ndarray) -> np.ndarray:
+        """
+        Per-atom heat current J_i [eV A/fs] with sum_i J_i = V J of
+        :meth:`_compute_heat_flux` (ADR-0020):
+
+            J_i = E_i v_i - sum_{m: nbr[m] = i} v_m (dU_centre/dv_m . v_i)
+
+        -- each neighbour entry's term goes to the atom whose velocity it
+        carries (Fan et al., PRB 92, 094301 (2015): the per-atom form of
+        their eq. 21).  The part with no site decomposition (Coulomb, or
+        everything for an engine without one) keeps the centre-of-mass
+        approximation and is split equally over the atoms.
+        """
+        V = abs(np.linalg.det(self.lattice))
+        e_kin_i = (0.5 * self.masses * np.sum(velocities ** 2, axis=1)
+                   / EV_ANG_TO_AMU_ANG_FS2)
+        Ji = (e_kin_i + e_pot_i)[:, None] * velocities
+        v_mean = velocities.mean(axis=0)
+        if pair_data is None:
+            Ji += (-V * stress_full @ v_mean * 0.5) / self.N
+            return Ji
+        if isinstance(pair_data, list):
+            from ..engine.site_terms import SiteTerms
+            pair_data = SiteTerms.combine(pair_data, self.N)
+        c = np.einsum("ma,ma->m", pair_data.dUdv, velocities[pair_data.nbr])
+        np.add.at(Ji, pair_data.nbr, -c[:, None] * pair_data.vec)
+        remainder = stress_full - pair_data.stress(V)
+        Ji += (-V * remainder @ v_mean * 0.5) / self.N
+        return Ji
+
+    def _group_labels(self, positions: np.ndarray, decompose: dict):
+        """{decomposition name: (labels (N,), names)} for this frame:
+        'species' (static) and 'regions' (by the current fractional
+        coordinate along regions.axis, between regions.bounds)."""
+        out = {}
+        if decompose.get("species"):
+            names = sorted(set(self.atom_types), key=self.atom_types.index)
+            out["species"] = (np.array([names.index(t) for t in self.atom_types]),
+                              names)
+        reg = decompose.get("regions")
+        if reg:
+            ax = {"a": 0, "b": 1, "c": 2}.get(str(reg.get("axis", "c")), reg.get("axis"))
+            bounds = np.asarray(reg["bounds"], dtype=float)
+            f = (positions @ np.linalg.inv(self.lattice))[:, int(ax)]
+            f -= np.floor(f)
+            lab = np.clip(np.searchsorted(bounds, f, side="right") - 1,
+                          0, len(bounds) - 2)
+            names = [f"[{bounds[k]:.3f},{bounds[k + 1]:.3f})"
+                     for k in range(len(bounds) - 1)]
+            out["regions"] = (lab, names)
+        return out
+
     # ------------------------------------------------------------------ #
     #  Per-atom potential energy                                           #
     # ------------------------------------------------------------------ #
@@ -366,10 +422,18 @@ class ThermalConductivityCalculator:
                output_dir   : str   = ".",
                seed         : int   = 42,
                verbose      : bool  = True,
+               decompose    : Optional[dict] = None,
                ) -> dict:
         """
         Run NVE-MD and record the heat flux J at every ``heat_flux_every``
         steps.
+
+        ``decompose`` (ADR-0020): {"species": bool, "regions": {"axis":
+        "a"|"b"|"c", "bounds": [fractional edges]}, "save_atom_flux":
+        bool}.  The per-atom heat currents are summed per group at every
+        recorded frame (regions by each frame's positions) for
+        :meth:`compute_kappa_decomposition`; ``save_atom_flux`` also
+        writes them, float32, to atom_heat_flux.npy (n_frames, N, 3).
 
         Equilibration (``equil_steps``) is done with NVT (Nose-Hoover
         chain, single chain) to reach the target temperature, then
@@ -484,6 +548,14 @@ class ThermalConductivityCalculator:
         acc = forces * acc_factor
 
         J_list      : List[np.ndarray] = []
+        decompose = dict(decompose or {})
+        G_lists = {}                 # name -> list of (n_groups, 3) per frame
+        atom_flux = None
+        if decompose.get("save_atom_flux"):
+            atom_flux = np.lib.format.open_memmap(
+                os.path.join(output_dir, "atom_heat_flux.npy"), mode="w+",
+                dtype=np.float32,
+                shape=((n_steps + heat_flux_every - 1) // heat_flux_every, N, 3))
         thermo_path = os.path.join(output_dir, "thermo_nve.log")
         hf_path     = os.path.join(output_dir, "heat_flux.dat")
         traj_path   = os.path.join(output_dir, "trajectory_tc.xyz")
@@ -527,6 +599,15 @@ class ThermalConductivityCalculator:
                     e_pot_i = self._per_atom_energy(pos, forces, float(E_pot), pair_data)
                     J = self._compute_heat_flux(pos, vel, forces, stress, e_pot_i, pair_data)
                     J_list.append(J)
+                    if decompose:
+                        Ji = self._per_atom_heat_current(vel, e_pot_i, pair_data,
+                                                         stress) / V_cell
+                        if atom_flux is not None:
+                            atom_flux[len(J_list) - 1] = Ji
+                        for name, (lab, names) in self._group_labels(pos, decompose).items():
+                            g = np.zeros((len(names), 3))
+                            np.add.at(g, lab, Ji)
+                            G_lists.setdefault(name, [names, []])[1].append(g)
                     j_fh.write(f"{step}  {J[0]:.8e}  {J[1]:.8e}  {J[2]:.8e}\n")
 
                 # Thermo
@@ -564,6 +645,9 @@ class ThermalConductivityCalculator:
         J_series = np.array(J_list)   # (n_frames, 3)
         self._J_series = J_series
         self._dt_hf    = float(timestep * heat_flux_every)
+        self._J_groups = {k: (v[0], np.array(v[1])) for k, v in G_lists.items()}
+        if atom_flux is not None:
+            atom_flux.flush()
 
         elapsed = _time.perf_counter() - t0
         if verbose:
@@ -736,6 +820,55 @@ class ThermalConductivityCalculator:
             print(f"    k_avg = {kavg:.2f} W/(m.K)")
 
         return kappa_WmK
+
+    def compute_kappa_decomposition(self,
+                                    tau_max: float = 20.0,
+                                    verbose: bool  = True) -> dict:
+        """
+        Contributions of atom groups to the Green-Kubo tensor (ADR-0020):
+
+            kappa_g,ab = (V / k_B T^2) int_0^tau_max <J_g,a(0) J_b(tau)> dt,
+
+        J_g the heat flux of the group's atoms (per-atom currents summed,
+        divided by V), J the total.  The integral is linear in J_g, so the
+        groups of one decomposition add up to compute_kappa's kappa (same
+        lags, same trapezoid rule).  Needs run_md(decompose=...).
+
+        Returns {decomposition: {group: (3, 3) [W/(m.K)]}} and, under
+        "sum_rule_residual", max |sum_g kappa_g - kappa| per decomposition.
+        """
+        if not getattr(self, "_J_groups", None):
+            raise RuntimeError("compute_kappa_decomposition: run run_md("
+                               "decompose=...) first.")
+        J = self._J_series
+        dt = float(self._dt_hf)
+        V = abs(np.linalg.det(self.lattice))
+        n_lag = min(int(tau_max * 1e3 / dt), len(J) // 2)
+        pref = V / (K_B * self.temperature**2) * _EV_ANG_K_FS_TO_W_MK
+
+        def integral(A, B):
+            k = np.zeros((3, 3))
+            for a in range(3):
+                for b in range(3):
+                    c = _autocorr_fft(A[:, a], B[:, b], n_lag)
+                    k[a, b] = 0.5 * dt * np.sum(c[1:] + c[:-1])
+            return k * pref
+
+        total = integral(J, J)
+        out, resid = {}, {}
+        for name, (names, G) in self._J_groups.items():
+            out[name] = {g: integral(G[:, k], J) for k, g in enumerate(names)}
+            resid[name] = float(np.max(np.abs(sum(out[name].values()) - total)))
+        out["sum_rule_residual"] = resid
+        out["total"] = total
+        if verbose:
+            for name, parts in out.items():
+                if name in ("sum_rule_residual", "total"):
+                    continue
+                print(f"\n  kappa by {name} (W/m/K; xx yy zz):")
+                for g, k in parts.items():
+                    print(f"    {g:>18s} : {k[0,0]:9.4f} {k[1,1]:9.4f} {k[2,2]:9.4f}")
+        return out
 
     # ------------------------------------------------------------------ #
     #  3. Slack-Debye approximation                                       #

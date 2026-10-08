@@ -29,6 +29,7 @@ __all__ = [
     "_YAML_QHA_DEFAULT",
     "_YAML_DIELECTRIC_DEFAULT",
     "_YAML_PIEZO_DEFAULT",
+    "_YAML_NEMD_DEFAULT",
     "_DUMP_MAP",
 ]
 
@@ -539,6 +540,47 @@ kappa:
     supercell:  2
     ifc_path:   null                # reuse a saved ifc.npz if available
   verbose:         true
+"""
+
+_YAML_NEMD_DEFAULT = """\
+# akitsushima  --  Non-equilibrium MD with Langevin heat baths (ADR-0020)
+# Usage: akitsushima nemd nemd.yaml
+# The cell is periodic: heat flows from the hot to the cold slab both ways
+# round, so the flux is Qdot / (2 A).  kappa depends on the length L along
+# the axis: run several lengths and extrapolate 1/kappa against 1/L.
+# Long runs: launch detached (nohup ... &); the checkpoint makes a re-run
+# continue where the last one stopped.
+
+structure:
+  poscar: POSCAR             # e.g. fcc Ar, 4 x 4 x 16 conventional cells
+
+potential:
+  # Lennard-Jones argon, eps/k_B 119.8 K = 10.32 meV, sigma 3.405 A (the
+  # values of the gcmc template); cutoff 2.5 sigma
+  type: LJ
+  species: [Ar]
+  params:
+    epsilon: 0.01032
+    sigma:   3.405
+    r_cut:   8.5
+
+nemd:
+  output_dir:  ./nemd_output
+  axis:        c             # transport along lattice vector a | b | c
+  hot:  {temperature: 50.0, region: [0.0, 0.0625]}    # fractional slab
+  cold: {temperature: 30.0, region: [0.5, 0.5625]}    # (or atoms: [1-based])
+  damping:     500.0         # fs, Langevin relaxation time of the baths
+  timestep:    5.0           # fs
+  equil_steps: 20000
+  n_steps:     200000
+  sample_every: 10
+  n_bins:      16
+  local_flux:  true          # per-bin heat flux from per-atom currents
+  fit: {fraction: 0.5}       # central part of each segment for dT/dz
+  kapitza: {interfaces: [], window: 0.1, skip_bins: 1}
+  checkpoint_every: 1000     # steps; nemd_checkpoint.npz in output_dir
+  restart:     true          # false: discard an existing checkpoint
+  seed:        42
 """
 
 _YAML_ELM_DEFAULT = """\
@@ -1077,6 +1119,7 @@ _DUMP_MAP = {
     "qha":    _YAML_QHA_DEFAULT,
     "dielectric": _YAML_DIELECTRIC_DEFAULT,
     "piezo":  _YAML_PIEZO_DEFAULT,
+    "nemd":   _YAML_NEMD_DEFAULT,
     "mlip":   _YAML_ELM_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).

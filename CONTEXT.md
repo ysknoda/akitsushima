@@ -131,6 +131,18 @@ The Gonze-Lee dipole-dipole term added to D(q); what produces LO-TO
 splitting at Gamma, which depends on the direction of approach.
 _Avoid_: LO-TO correction, polar correction
 
+**Per-atom heat current** (J_i):
+The share of V J carried by atom i in ADR-0020's split of the exact
+heat flux; sums to V J.  Its time average is zero in equilibrium -- the
+meaningful per-group quantity in Green-Kubo is kappa_g, the
+cross-correlation of the group's flux with the total.
+_Avoid_: local kappa, atomic conductivity
+
+**Heat bath** (NEMD):
+A slab of atoms whose velocities get the Langevin update at a fixed
+temperature; its energy input over time is the heat current.
+_Avoid_: thermostat region, reservoir (also used for chemical potentials)
+
 ### Ensembles and dynamics
 
 **Equilibration** / **production**:

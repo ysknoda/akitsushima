@@ -41,6 +41,7 @@ _COMMAND = {
     "qha": "qha",
     "dielectric": "dielectric",
     "piezo": "piezo",
+    "nemd": "nemd",
     "mlip": "mlip",
 }
 
@@ -63,6 +64,7 @@ _SHRINK = {
     "qha": {"qha": {"q_mesh": 6}},
     "dielectric": {},
     "piezo": {},
+    "nemd": {"nemd": {"equil_steps": 20, "n_steps": 120}},
     "mlip": {},
 }
 
@@ -190,6 +192,9 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         _write_si(tmp_path / st["poscar"])
     elif key in ("gruneisen", "qha"):
         _write_si_primitive(tmp_path / st["poscar"])
+    elif key == "nemd":
+        from test_nemd import write_fcc_ar
+        write_fcc_ar(tmp_path / st["poscar"])
     elif key in ("dielectric", "piezo"):
         from test_dielectric import write_mgo
         write_mgo(tmp_path, n=1 if key == "dielectric" else 3)
