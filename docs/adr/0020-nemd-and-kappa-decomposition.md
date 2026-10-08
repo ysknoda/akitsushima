@@ -1,5 +1,5 @@
 ---
-status: accepted (implemented 2026-10-08; length-series example pending, see below)
+status: accepted (implemented 2026-10-08); NEMD vs Green-Kubo comparison OPEN (see Verification)
 ---
 
 # NEMD with Langevin heat baths, local heat flux, and the decomposition of the Green-Kubo conductivity
@@ -68,11 +68,35 @@ spatial resolution, no checkpoint in any MD command.
 - Steady state needs long runs.  A 6000-step LJ Ar run (1024 atoms)
   was not yet steady (bath balance 0.74, profile still moving) -- the
   warnings fired, as intended.
-- Length series (example/nemd, launched 2026-10-08, several hours):
-  LJ Ar 40 K, lengths 12 / 16 / 24 cells, against Green-Kubo; judged by
-  check_nemd.py (steady state, local flux = bath flux within 10 %, kappa
-  extrapolated to infinite length within 25 % of GK).  Results to be
-  recorded here.
+- Length series (example/nemd, 2026-10-08/09; LJ Ar, baths 50 / 30 K,
+  4x4 cross-section, 200 ps equilibration + 500 ps production, dt 5 fs):
+
+  | length | bath balance | local / bath flux (two segments) | kappa (W/m/K) |
+  |---|---|---|---|
+  | 12 cells, 63.6 A | 0.012 | 0.94 / 1.06 | 0.467 +- 0.026 |
+  | 16 cells, 84.8 A | 0.006 | 0.97 / 1.02 | 0.492 +- 0.036 |
+  | 24 cells, 127.2 A | 0.004 | 0.97 / 1.02 | 0.667 +- 0.034 |
+
+  The NEMD checks pass (12 / 12): steady bath balance, gradients of the
+  right sign, and the per-bin flux from the per-atom heat currents equal
+  to the bath's Qdot / 2A within 6 % -- two independent measurements of
+  the same current.  The profile change between the last two blocks is
+  1.7-3.2 K (above the 1 K indicator): block-to-block noise of the
+  temperatures at this length of run.
+- **The comparison with Green-Kubo FAILED and is open.**
+  1/kappa = 0.851 (+- 0.192) + 85.5 / L gives kappa(L -> inf) = 1.17 W/m/K
+  (1-sigma 0.96 .. 1.52); the Green-Kubo run (6x6x6, 1 ns, tau_max 50 ps)
+  reported 0.32 W/m/K with xx / yy / zz = 0.10 / 0.58 / 0.28 for a cubic
+  crystal.  Its running kappa shows why: all three components reach a
+  plateau of about 0.60 W/m/K at 10-15 ps and then wander in noise; the
+  50 ps tau_max (chosen when the example was set up) integrates mostly
+  noise.  Even against the ~0.60 plateau the extrapolated NEMD value is
+  about twice as large, and kappa at 24 cells (0.67) already exceeds it,
+  which a finite-length NEMD value should not.  Not resolved: GK
+  statistics (one 1 ns trajectory), GK cell size, the NEMD bath coupling
+  (damping 500 fs) and the three-point extrapolation (chi^2/dof 1.7) are
+  the candidates; a literature value for LJ Ar at 40 K (e.g. McGaughey
+  and Kaviany, PRB 69, 094303 (2004)) would anchor it.
 
 ## Self-critique of the chosen values
 
