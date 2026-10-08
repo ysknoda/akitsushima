@@ -39,7 +39,8 @@ SW_SI = {
     "q": 0.0,
     "costheta0": -1.0 / 3.0,
 }
-# Tersoff T3 Si, PRB 38, 9902 (1988)
+# Tersoff T3 Si, PRB 38, 9902 (1988), except lambda3: the paper has 0;
+# 1.7322 is kept so the exp(lambda3^3 dr^3) term is exercised
 T3_SI = {
     "A": 1830.8,
     "B": 471.18,

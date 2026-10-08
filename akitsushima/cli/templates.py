@@ -205,17 +205,17 @@ structure:
 potential:
   type: Tersoff                    # see the timestep note in the md section below
   species: [Si]
-  params:                          # Tersoff T3 Si (Tersoff 1988)
+  params:                          # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
     A:       1830.8
     B:       471.18
     lambda1: 2.4799
     lambda2: 1.7322
-    lambda3: 1.7322
+    lambda3: 0.0
     beta:    1.1e-6
     n:       0.78734
     c:       100390.0
-    d:       16.218
-    h:       -0.59826
+    d:       16.217
+    h:       -0.59825
     R:       2.85
     D:       0.15
 
@@ -275,17 +275,17 @@ structure:
 potential:
   type: Tersoff
   species: [Si]
-  params:
+  params:   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
     A:       1830.8
     B:       471.18
     lambda1: 2.4799
     lambda2: 1.7322
-    lambda3: 1.7322
+    lambda3: 0.0
     beta:    1.1e-6
     n:       0.78734
     c:       100390.0
-    d:       16.218
-    h:       -0.59826
+    d:       16.217
+    h:       -0.59825
     R:       2.85
     D:       0.15
 
@@ -316,17 +316,17 @@ structure:
 potential:
   type: Tersoff
   species: [Si]
-  params:
+  params:   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
     A:       1830.8
     B:       471.18
     lambda1: 2.4799
     lambda2: 1.7322
-    lambda3: 1.7322
+    lambda3: 0.0
     beta:    1.1e-6
     n:       0.78734
     c:       100390.0
-    d:       16.218
-    h:       -0.59826
+    d:       16.217
+    h:       -0.59825
     R:       2.85
     D:       0.15
 
@@ -411,17 +411,17 @@ structure:
 potential:
   type: Tersoff
   species: [Si]
-  params:
+  params:   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
     A:       1830.8
     B:       471.18
     lambda1: 2.4799
     lambda2: 1.7322
-    lambda3: 1.7322
+    lambda3: 0.0
     beta:    1.1e-6
     n:       0.78734
     c:       100390.0
-    d:       16.218
-    h:       -0.59826
+    d:       16.217
+    h:       -0.59825
     R:       2.85
     D:       0.15
 
@@ -446,17 +446,17 @@ structure:
 potential:
   type: Tersoff
   species: [Si]
-  params:
+  params:   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
     A:       1830.8
     B:       471.18
     lambda1: 2.4799
     lambda2: 1.7322
-    lambda3: 1.7322
+    lambda3: 0.0
     beta:    1.1e-6
     n:       0.78734
     c:       100390.0
-    d:       16.218
-    h:       -0.59826
+    d:       16.217
+    h:       -0.59825
     R:       2.85
     D:       0.15
 
@@ -493,17 +493,17 @@ structure:
 potential:
   type: Tersoff
   species: [Si]
-  params:
+  params:   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
     A:       1830.8
     B:       471.18
     lambda1: 2.4799
     lambda2: 1.7322
-    lambda3: 1.7322
+    lambda3: 0.0
     beta:    1.1e-6
     n:       0.78734
     c:       100390.0
-    d:       16.218
-    h:       -0.59826
+    d:       16.217
+    h:       -0.59825
     R:       2.85
     D:       0.15
 
@@ -692,17 +692,17 @@ structure:
 potential:
   type: Tersoff
   species: [Si]
-  params:
+  params:   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
     A:       1830.8
     B:       471.18
     lambda1: 2.4799
     lambda2: 1.7322
-    lambda3: 1.7322
+    lambda3: 0.0
     beta:    1.1e-6
     n:       0.78734
     c:       100390.0
-    d:       16.218
-    h:       -0.59826
+    d:       16.217
+    h:       -0.59825
     R:       2.85
     D:       0.15
 
