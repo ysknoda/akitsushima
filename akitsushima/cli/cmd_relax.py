@@ -59,6 +59,7 @@ def cmd_relax(args) -> int:
         if rel_cfg.get("relax_cell", False):
             print(f"  cell_update_scheme : {rel_cfg.get('cell_update_scheme', 'generalized_force')}")
             print(f"  lattice_constraints: {rel_cfg.get('lattice_constraints', None)} (null=all free)")
+            print(f"  fix_volume : {rel_cfg.get('fix_volume', False)}")
 
     # Initial energy.
     #
@@ -140,6 +141,7 @@ def cmd_relax(args) -> int:
         memory       = rel_cfg.get("memory",        None),
         max_displacement = rel_cfg.get("max_displacement", 0.2),
         fix_cell     = rel_cfg.get("fix_cell",      None),
+        fix_volume   = bool(rel_cfg.get("fix_volume", False)),
         flush_every_step = rel_cfg.get("flush_every_step", True),
         fsync_every_step = rel_cfg.get("fsync_every_step", False),
         timing       = bool(rel_cfg.get("timing", True)),

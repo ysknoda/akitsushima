@@ -113,6 +113,13 @@ class GeometryOptimiser:
             fix = np.zeros((N, 3), dtype=bool); fix[0] = True
 
     fix_cell  : (3, 3) bool array -- True = frozen (relax_cell=True only).
+    fix_volume: relax_cell=True only -- keep the cell volume at its
+                starting value and relax shape and ions (ADR-0018).  The
+                cell force is projected orthogonal to dV/dh (prop. to
+                h^-T), each step is followed by an isotropic rescale back
+                to the volume, and the stress criterion is applied to the
+                deviatoric stress (at a constant-volume minimum the stress
+                is purely hydrostatic: its pressure is the result).
         Example -- fix the c-axis length (lattice[2, 2])::
 
             fc = np.zeros((3, 3), dtype=bool); fc[2, 2] = True
@@ -199,6 +206,7 @@ class GeometryOptimiser:
                  # -- constraints ---------------------------------------
                  fix_atoms       : Optional[np.ndarray] = None,
                  fix_cell        : Optional[np.ndarray] = None,
+                 fix_volume      : bool  = False,
                  # -- timing --------------------------------------------
                  timing          : bool  = False):
 
@@ -208,6 +216,11 @@ class GeometryOptimiser:
         self.N           = len(atom_types)
         self.method      = method.lower()
         self.relax_cell  = relax_cell
+        self.fix_volume  = bool(fix_volume)
+        if self.fix_volume and not relax_cell:
+            raise ValueError("GeometryOptimiser: fix_volume=True needs "
+                             "relax_cell=True (it relaxes the cell shape).")
+        self._volume0    = abs(float(np.linalg.det(self.lattice)))
         # -- Convergence criteria ------------------------------------
         # Each criterion can be independently enabled/disabled.
         # When relax_cell=True, check_stress defaults to True unless the
@@ -469,6 +482,11 @@ class GeometryOptimiser:
         # boundaries and the in-plane cell must stay rectangular, so only
         # a_x and b_y may relax.
         from ..fitting.force_fn import uses_esm
+        if self.fix_volume and uses_esm(self._force_fn):
+            raise ValueError(
+                "GeometryOptimiser: fix_volume is not available with ESM "
+                "electrostatics (the volume rescale moves Lz and the ESM "
+                "boundaries).")
         if self.relax_cell and uses_esm(self._force_fn):
             free = (np.asarray(self._lattice_constraints_mask, dtype=bool)
                     & ~self._fix_cell_mask)
@@ -618,6 +636,17 @@ class GeometryOptimiser:
             # matrix itself (a1x, a1y, a1z, a2x, a2y, a2z, a3x, a3y, a3z).
             f_cell = (f_cell_raw.ravel() * self._lattice_constraints_mask
                      ).reshape(3, 3)
+            if self.fix_volume:
+                # Remove the component along dV/dh = V h^-T (within the
+                # free components), so a step is volume-preserving to
+                # first order; _retract_volume removes the rest.
+                n = (np.linalg.inv(self.lattice).T.ravel()
+                     * self._lattice_constraints_mask
+                     * ~self._fix_cell_mask)
+                nn = float(n @ n)
+                if nn > 0.0:
+                    fc = f_cell.ravel()
+                    f_cell = (fc - (fc @ n) / nn * n).reshape(3, 3)
             g = np.concatenate([forces.ravel(), f_cell.ravel()])
 
         g[~self._free_mask] = 0.0
@@ -640,6 +669,7 @@ class GeometryOptimiser:
             frac   = self.positions @ np.linalg.inv(self.lattice)
             self.lattice   += d_cell
             self.positions  = frac @ self.lattice
+            self._retract_volume()
         # Deliberately NOT wrapped.  The optimiser's state vector must
         # be a continuous function of the step it just took: `s = x_new
         # - x_old` is what L-BFGS pairs with the gradient change to
@@ -722,7 +752,25 @@ class GeometryOptimiser:
             frac = self.positions @ np.linalg.inv(self.lattice)
             self.lattice   = x[n_ion:].reshape(3, 3).copy()
             self.positions = frac @ self.lattice
+            self._retract_volume()
         # Not wrapped -- see _apply_generalised_displacement.
+
+    def _retract_volume(self) -> None:
+        """fix_volume: rescale the cell isotropically back to the starting
+        volume, atoms following at fixed fractional coordinates."""
+        if not self.fix_volume:
+            return
+        frac = self.positions @ np.linalg.inv(self.lattice)
+        self.lattice  = self.lattice * (self._volume0
+                        / abs(float(np.linalg.det(self.lattice)))) ** (1.0 / 3.0)
+        self.positions = frac @ self.lattice
+
+    def _checked_stress(self, stress: np.ndarray) -> np.ndarray:
+        """The stress the convergence test and log see: deviatoric under
+        fix_volume, as is otherwise."""
+        if not self.fix_volume:
+            return stress
+        return stress - np.trace(stress) / 3.0 * np.eye(3)
 
     # ------------------------------------------------------------------ #
     #  Common run entry-point                                              #
@@ -825,7 +873,7 @@ class GeometryOptimiser:
     def _log_row(self, log_fh, step, e, forces, stress, extra,
                  GPa=EV_ANG3_TO_GPA):
         fmax_val = float(np.max(np.abs(forces)))
-        pmax_val = float(np.max(np.abs(stress))) * GPa
+        pmax_val = float(np.max(np.abs(self._checked_stress(stress)))) * GPa
         row = (f"{step:6d}  {float(e):16.6f}  "
                f"{fmax_val:12.4f}  {pmax_val:10.4f}  {str(extra):>12}")
         log_fh.write(row + "\n")
@@ -880,7 +928,7 @@ class GeometryOptimiser:
         GPa = EV_ANG3_TO_GPA
         ok_forces = (not self.check_forces) or (fmax_val < self.fmax)
         ok_stress = (not self.check_stress) or (
-            float(np.max(np.abs(stress))) * GPa < self.pmax)
+            float(np.max(np.abs(self._checked_stress(stress)))) * GPa < self.pmax)
         if self.check_energy:
             ok_energy = (e_curr is not None and e_prev is not None
                         and abs(float(e_curr) - float(e_prev)) < self.emax)

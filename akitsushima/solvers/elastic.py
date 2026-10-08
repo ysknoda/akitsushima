@@ -376,23 +376,34 @@ def _birch_murnaghan_energy(V, E0, V0, B0, B0_prime):
         + (eta - 1.0) ** 2 * (6.0 - 4.0 * eta))
 
 
+def _vinet_energy(V, E0, V0, B0, B0_prime):
+    """Vinet equation of state: E(V) (Vinet et al., J. Phys.: Condens.
+    Matter 1, 1941 (1989); the energy form used by phonopy):
+    E0 + 9 B0 V0 / xi^2 [1 + (xi (1 - x) - 1) exp(xi (1 - x))],
+    x = (V/V0)^(1/3), xi = 3 (B0' - 1) / 2."""
+    x  = (V / V0) ** (1.0 / 3.0)
+    xi = 1.5 * (B0_prime - 1.0)
+    return E0 + 9.0 * B0 * V0 / xi**2 * (
+        1.0 + (xi * (1.0 - x) - 1.0) * np.exp(xi * (1.0 - x)))
+
+
+_EOS = {"birch-murnaghan": _birch_murnaghan_energy, "vinet": _vinet_energy}
+
+
 def fit_equation_of_state(volumes: np.ndarray,
                           energies: np.ndarray,
                           eos: str = "birch-murnaghan") -> dict:
     """
-    Fit an E(V) curve (from a volume scan of relaxed energies) to the
-    3rd-order Birch-Murnaghan equation of state.
+    Fit an E(V) curve to the third-order Birch-Murnaghan or the Vinet
+    equation of state.
 
     Parameters
     ----------
     volumes  : (n,) cell volumes [A^3] (a scan around the expected
-              equilibrium volume; each entry's energy should come from a
-              structure relaxed at FIXED volume, e.g. via
-              ``GeometryOptimiser(relax_cell=False)`` after isotropically
-              scaling the cell to that volume).
-    energies : (n,) corresponding total energies [eV].
-    eos      : equation-of-state model; currently only
-              ``'birch-murnaghan'`` is implemented.
+              equilibrium volume; each energy from a structure relaxed at
+              fixed volume, e.g. GeometryOptimiser(fix_volume=True)).
+    energies : (n,) corresponding energies [eV].
+    eos      : ``'birch-murnaghan'`` (third order) or ``'vinet'``.
 
     Returns
     -------
@@ -402,10 +413,10 @@ def fit_equation_of_state(volumes: np.ndarray,
         B0         : bulk modulus at equilibrium [GPa].
         B0_prime   : pressure derivative of the bulk modulus (dimensionless).
     """
-    if eos != "birch-murnaghan":
+    if eos not in _EOS:
         raise ValueError(
             f"fit_equation_of_state: unknown eos '{eos}'. "
-            "Only 'birch-murnaghan' is implemented.")
+            f"Choose from {sorted(_EOS)}.")
 
     volumes  = np.asarray(volumes, dtype=float)
     energies = np.asarray(energies, dtype=float)
@@ -420,11 +431,10 @@ def fit_equation_of_state(volumes: np.ndarray,
     V0_guess = volumes[i_min]
     E0_guess = energies[i_min]
     poly = np.polyfit(volumes, energies, 2)
-    B0_guess = float(max(2.0 * poly[0] * V0_guess, 1e-3)) * EV_ANG3_TO_GPA
+    B0_guess = float(max(2.0 * poly[0] * V0_guess, 1e-5))
     p0 = [E0_guess, V0_guess, B0_guess, 4.0]
 
-    popt, _ = curve_fit(_birch_murnaghan_energy, volumes, energies,
-                        p0=p0, maxfev=20000)
+    popt, _ = curve_fit(_EOS[eos], volumes, energies, p0=p0, maxfev=20000)
     E0, V0, B0_eV_ang3, B0_prime = popt
     return {
         "E0"      : float(E0),

@@ -37,6 +37,8 @@ _COMMAND = {
     "phonon": "phonon",
     "kappa": "kappa",
     "elastic": "elastic",
+    "gruneisen": "gruneisen",
+    "qha": "qha",
     "mlip": "mlip",
 }
 
@@ -55,6 +57,8 @@ _SHRINK = {
     "phonon": {},
     "kappa": {"kappa": {"n_steps": 200, "equil_steps": 20, "tau_max": 0.02}},
     "elastic": {},
+    "gruneisen": {"gruneisen": {"mesh": {"q_mesh": 4}}},
+    "qha": {"qha": {"q_mesh": 6}},
     "mlip": {},
 }
 
@@ -180,6 +184,8 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         _write_si(tmp_path / st["poscar"])
     elif key == "elastic":
         _write_si(tmp_path / st["poscar"])
+    elif key in ("gruneisen", "qha"):
+        _write_si_primitive(tmp_path / st["poscar"])
     elif key == "mlip":
         _write_mlip_csv(tmp_path / st["training_csv"])
     else:  # pragma: no cover - guarded by test_every_template_key_is_covered

@@ -2253,3 +2253,98 @@ def test_kappa_seed_changes_the_trajectory(tmp_path):
                         output_dir=str(tmp_path / f"s{seed}"), verbose=False)
         J.append(np.asarray(out["J_series"]))
     assert not np.allclose(J[0], J[1])
+
+
+# ---------------------------------------------------------------------------
+# ADR-0018: constant-volume cell relaxation (fix_volume)
+# ---------------------------------------------------------------------------
+
+def _aln_tersoff_wurtzite(ca, volume=None, shear=0.0):
+    """72-atom wurtzite AlN (3x3x2), Karaaslan et al. (2020) Tersoff
+    records; a set from the volume when given.  u = 0.375."""
+    from akitsushima.fitting.registry import _TERSOFF_ALN_RECORDS
+    from akitsushima.solvers.config_bridge import _build_force_fn_from_yaml
+    fn = _build_force_fn_from_yaml({"type": "Tersoff", "species": ["Al", "N"],
+                                    "params": _TERSOFF_ALN_RECORDS})[0]
+    a = 3.3812 if volume is None else (volume / (18 * np.sqrt(3) / 2 * ca)) ** (1 / 3)
+    c = ca * a
+    lat = np.diag([3, 3, 2]) @ np.array([[a, 0, 0], [-a / 2, a * np.sqrt(3) / 2, 0],
+                                         [0, 0, c]])
+    lat = lat @ (np.eye(3) + np.array([[0, shear, 0], [shear, 0, 0], [0, 0, 0]]))
+    base = np.array([[1 / 3, 2 / 3, 0], [2 / 3, 1 / 3, .5],
+                     [1 / 3, 2 / 3, .375], [2 / 3, 1 / 3, .875]])
+    frac = np.array([(b + [i, j, k]) / [3, 3, 2] for i in range(3)
+                     for j in range(3) for k in range(2) for b in base])
+    types = ["Al", "Al", "N", "N"] * 18
+    return fn, lat, frac @ lat, types
+
+
+def test_fix_volume_relaxes_shape_at_constant_volume(tmp_path):
+    """Wurtzite AlN started 3 % off in c/a and sheared, at 97 % of its
+    equilibrium volume: every method keeps the volume to 1e-12, ends with
+    a hydrostatic stress, and reaches the c/a of an independent search
+    (golden-section over c/a at that volume, ions relaxed at each)."""
+    from scipy.optimize import minimize_scalar
+    V = 0.97 * 18 * np.sqrt(3) / 2 * 3.3812 ** 3 * 1.633
+    fn, lat, pos, types = _aln_tersoff_wurtzite(1.633 * 0.97, V, shear=0.01)
+    V_start = abs(np.linalg.det(lat))
+
+    def e_at(ca):
+        _, L, P, _ = _aln_tersoff_wurtzite(ca, V_start)
+        return GeometryOptimiser(L, P, types, force_fn=fn, relax_cell=False,
+                                 fmax=1e-5, max_steps=5000, verbose=False,
+                                 output_dir=str(tmp_path / "scan")).run()["energy"]
+    ref = minimize_scalar(e_at, bracket=(1.62, 1.633, 1.645), tol=1e-8)
+
+    for method in ("fire", "lbfgs", "sd"):
+        r = GeometryOptimiser(lat, pos, types, force_fn=fn, relax_cell=True,
+                              fix_volume=True, method=method, fmax=1e-4,
+                              pmax=1e-3, max_steps=20000, verbose=False,
+                              output_dir=str(tmp_path / method)).run()
+        L = r["lattice"]
+        assert r["converged"], method
+        assert abs(np.linalg.det(L)) == pytest.approx(V_start, rel=1e-12)
+        s = fn(L, r["positions"], types)[2] * EV_ANG3_TO_GPA
+        dev = s - np.trace(s) / 3 * np.eye(3)
+        assert np.max(np.abs(dev)) < 1e-3, method
+        assert np.trace(s) / 3 > 1.0          # compressed: positive pressure
+        n = np.linalg.norm(L, axis=1)
+        assert (n[2] / 2) / (n[0] / 3) == pytest.approx(ref.x, abs=2e-5), method
+        assert r["energy"] <= ref.fun + 1e-6, method
+
+
+def test_fix_volume_on_cubic_cell_matches_isotropic_scaling(tmp_path):
+    """Diamond Si (Tersoff) compressed isotropically and rattled: the cell
+    stays the scaled cube (fix_volume only removes deviatoric stress)."""
+    from akitsushima.solvers.config_bridge import _build_force_fn_from_yaml
+    fn = _build_force_fn_from_yaml({"type": "Tersoff", "species": ["Si"], "params": dict(
+        A=1830.8, B=471.18, lambda1=2.4799, lambda2=1.7322, lambda3=0.0,
+        beta=1.1e-6, n=0.78734, c=100390.0, d=16.217, h=-0.59825,
+        R=2.85, D=0.15)})[0]
+    base = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0]])
+    base = np.vstack([base, base + 0.25])
+    frac = np.array([(b + [i, j, k]) / 2 for i in range(2) for j in range(2)
+                     for k in range(2) for b in base])
+    lat = np.eye(3) * 2 * 5.432 * 0.98
+    pos = frac @ lat + np.random.default_rng(1).normal(0, 0.02, (64, 3))
+    r = GeometryOptimiser(lat, pos, ["Si"] * 64, force_fn=fn, relax_cell=True,
+                          fix_volume=True, fmax=1e-5, pmax=1e-4,
+                          max_steps=20000, verbose=False,
+                          output_dir=str(tmp_path)).run()
+    assert r["converged"]
+    assert np.allclose(r["lattice"], lat, atol=1e-5)
+
+
+def test_fix_volume_refusals():
+    fn, lat, pos, types = _aln_tersoff_wurtzite(1.633)
+    with pytest.raises(ValueError, match="relax_cell"):
+        GeometryOptimiser(lat, pos, types, force_fn=fn, relax_cell=False,
+                          fix_volume=True)
+
+    def esm(lattice, positions, atom_types, **kw):
+        return 0.0, np.zeros_like(positions), np.zeros((3, 3))
+    esm.coulomb = "esm"
+    esm.r_cut = 3.0
+    with pytest.raises(ValueError, match="fix_volume"):
+        GeometryOptimiser(lat, pos, types, force_fn=esm, relax_cell=True,
+                          fix_volume=True)

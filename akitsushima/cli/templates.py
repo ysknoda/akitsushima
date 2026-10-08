@@ -25,6 +25,8 @@ __all__ = [
     "_YAML_OSMC_DEFAULT",
     "_YAML_ESM_DEFAULT",
     "_YAML_ELASTIC_DEFAULT",
+    "_YAML_GRUNEISEN_DEFAULT",
+    "_YAML_QHA_DEFAULT",
     "_DUMP_MAP",
 ]
 
@@ -94,6 +96,9 @@ relax:
   output_dir:    ./relax_output
   method:        fire               # fire | lbfgs | sd | diis | rmmdiis | rfo
   relax_cell:    false
+  fix_volume:    false               # with relax_cell: keep the volume, relax
+                                     # shape + ions; pmax tests the deviatoric
+                                     # stress (ADR-0018)
 
   # -- convergence criteria (each independently on/off) ----------------
   # ALL enabled criteria must be satisfied simultaneously to converge.
@@ -855,6 +860,115 @@ elastic:
   verbose:     true
 """
 
+_YAML_GRUNEISEN_DEFAULT = """\
+# akitsushima  --  Mode Grueneisen parameters (ADR-0018)
+# Usage: akitsushima gruneisen gruneisen.yaml
+# POSCAR: the PRIMITIVE cell (as for phonon).  Three structures relaxed at
+# V0 (1 - dv), V0, V0 (1 + dv); gamma = -(V/2w^2) <e|dD/dV|e>.
+
+structure:
+  poscar: POSCAR
+
+potential:
+  # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
+  type: Tersoff
+  species: [Si]
+  params:
+    A:       1830.8
+    B:       471.18
+    lambda1: 2.4799
+    lambda2: 1.7322
+    lambda3: 0.0
+    beta:    1.1e-6
+    n:       0.78734
+    c:       100390.0
+    d:       16.217
+    h:       -0.59825
+    R:       2.85
+    D:       0.15
+
+gruneisen:
+  output_dir:  ./gruneisen_output
+  volume_step: 0.01           # dv, fractional volume step
+  supercell:   [4, 4, 4]      # phonon supercell; also the relaxation cell,
+                              # so r_cut + 0.5 A skin < half its width
+  delta:       0.01           # A, finite displacement
+  pre_relax:   true           # full cell + ion relaxation first -> V0
+  relax:                      # every relaxation (pre and fixed-volume)
+    method:    fire
+    fmax:      1.0e-4         # eV/A
+    pmax:      1.0e-3         # GPa (deviatoric at fixed volume)
+    max_steps: 5000
+  masses:      {}
+  n_jobs:      1
+  verbose:     true
+  band_structure:
+    q_path:
+      - ["G", [0.0, 0.0, 0.0]]
+      - ["X", [0.5, 0.0, 0.5]]
+      - ["K", [0.375, 0.375, 0.75]]
+      - ["G", [0.0, 0.0, 0.0]]
+      - ["L", [0.5, 0.5, 0.5]]
+    n_points: 50
+  mesh:                       # C_v-weighted mean gamma(T)
+    q_mesh: 12
+    t_min:  10.0
+    t_max:  1000.0
+    t_step: 10.0
+"""
+
+_YAML_QHA_DEFAULT = """\
+# akitsushima  --  Quasi-harmonic approximation (ADR-0018)
+# Usage: akitsushima qha qha.yaml
+# POSCAR: the PRIMITIVE cell.  n_volumes structures relaxed at fixed volume
+# (shape + ions), F(V,T) = E(V) + F_vib(V,T), EOS fit at each T.
+
+structure:
+  poscar: POSCAR
+
+potential:
+  # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
+  type: Tersoff
+  species: [Si]
+  params:
+    A:       1830.8
+    B:       471.18
+    lambda1: 2.4799
+    lambda2: 1.7322
+    lambda3: 0.0
+    beta:    1.1e-6
+    n:       0.78734
+    c:       100390.0
+    d:       16.217
+    h:       -0.59825
+    R:       2.85
+    D:       0.15
+
+qha:
+  output_dir:   ./qha_output
+  volume_range: 0.05          # volumes V0 x [1 - r, 1 + r]
+  n_volumes:    7             # >= 5
+  eos:          birch-murnaghan   # birch-murnaghan | vinet
+  t_min:        0.0
+  t_max:        1000.0
+  t_step:       10.0
+  q_mesh:       20
+  imaginary_tol_THz: 0.05     # stop if any mode is below -tol ...
+  skip_unstable_volumes: false   # ... unless true: drop that volume
+  supercell:   [4, 4, 4]      # phonon supercell; also the relaxation cell,
+                              # so r_cut + 0.5 A skin < half its width
+  delta:       0.01           # A, finite displacement
+  pre_relax:   true           # full cell + ion relaxation first -> V0
+  relax:                      # every relaxation (pre and fixed-volume)
+    method:    fire
+    fmax:      1.0e-4         # eV/A
+    pmax:      1.0e-3         # GPa (deviatoric at fixed volume)
+    max_steps: 5000
+  masses:      {}
+  n_jobs:      1
+  verbose:     true
+"""
+
 _DUMP_MAP = {
     "relax":  _YAML_RELAX_DEFAULT,
     "md":     _YAML_MD_NVT_DEFAULT,
@@ -869,6 +983,8 @@ _DUMP_MAP = {
     "phonon": _YAML_PHONON_DEFAULT,
     "kappa":  _YAML_KAPPA_DEFAULT,
     "elastic": _YAML_ELASTIC_DEFAULT,
+    "gruneisen": _YAML_GRUNEISEN_DEFAULT,
+    "qha":    _YAML_QHA_DEFAULT,
     "mlip":   _YAML_ELM_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).

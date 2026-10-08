@@ -166,7 +166,29 @@ def test_fit_equation_of_state_recovers_known_birch_murnaghan_parameters():
 def test_fit_equation_of_state_rejects_unknown_eos():
     with pytest.raises(ValueError, match="birch-murnaghan"):
         fit_equation_of_state(np.array([1.0, 2.0, 3.0, 4.0]),
-                              np.array([1.0, 0.5, 0.6, 1.2]), eos="vinet")
+                              np.array([1.0, 0.5, 0.6, 1.2]), eos="murnaghan")
+
+
+def test_fit_equation_of_state_vinet_matches_phonopy():
+    """ADR-0018: the Vinet form against phonopy's own vinet(), and a
+    round trip of its parameters."""
+    from akitsushima.solvers.elastic import _birch_murnaghan_energy, _vinet_energy
+    E0, V0, B0, Bp = -10.0, 40.0, 0.6, 4.3
+    V = np.linspace(36.0, 44.0, 9)
+    E = _vinet_energy(V, E0, V0, B0, Bp)
+    try:
+        from phonopy.qha.eos import get_eos
+    except ImportError:
+        pass
+    else:
+        for name, ours in (("vinet", _vinet_energy),
+                           ("birch_murnaghan", _birch_murnaghan_energy)):
+            ref = get_eos(name)(V, np.array([E0, B0, Bp, V0]))
+            assert np.allclose(ours(V, E0, V0, B0, Bp), ref, rtol=1e-13, atol=1e-12)
+    r = fit_equation_of_state(V, E, eos="vinet")
+    assert r["V0"] == pytest.approx(V0, rel=1e-8)
+    assert r["B0"] == pytest.approx(B0 * 160.2176621, rel=1e-7)
+    assert r["B0_prime"] == pytest.approx(Bp, rel=1e-6)
 
 
 def test_two_instances_get_distinct_scratch_dirs(tmp_path):

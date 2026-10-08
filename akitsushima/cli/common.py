@@ -26,6 +26,7 @@ __all__ = [
     "_print_output_files",
     "_resolve_mu_from_cfg",
     "_input_hash",
+    "_cli_force_fn",
 ]
 
 
@@ -99,6 +100,27 @@ def _input_hash(lattice, positions, atom_types, pot_cfg: dict) -> str:
            "potential": pot_cfg}
     blob = json.dumps(key, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()
+
+
+def _cli_force_fn(pot_cfg: dict, caller: str):
+    """(force_fn, r_cut) from a YAML potential section, with the Buckingham
+    bridge's (buck_params, charges) resolved to a callable too, and r_cut
+    attached to the callable where it has none (the minimum-image checks
+    read it)."""
+    from ..fitting.force_fn import _resolve_force_fn
+    from ..solvers.config_bridge import _build_force_fn_from_yaml
+    force_fn, r_cut, buck_params, charges = _build_force_fn_from_yaml(pot_cfg)
+    force_fn, r_cut = _resolve_force_fn(
+        force_fn, r_cut, buck_params, charges,
+        pot_cfg.get("ewald_alpha"), pot_cfg.get("coulomb_method", "ewald"),
+        pot_cfg.get("pppm_accuracy", 1e-5), pot_cfg.get("pppm_mesh"),
+        pot_cfg.get("pppm_order", 6), caller)
+    if getattr(force_fn, "r_cut", None) is None:
+        try:
+            force_fn.r_cut = r_cut
+        except AttributeError:
+            pass
+    return force_fn, r_cut
 
 
 def _fmt_time(s: float) -> str:

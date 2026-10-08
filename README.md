@@ -32,7 +32,11 @@
 > the internal strain. 0.2.0a7 adds harmonic thermodynamics to `phonon`
 > (ADR-0018): F, U, S, C_v and Theta_D(T) by a Gamma-centred q-mesh mode
 > sum (F_vib too), and fixes the sound-velocity Debye temperature, which
-> lacked the 1/3 of the Debye mean and was 0.69x too low.
+> lacked the 1/3 of the Debye mean and was 0.69x too low. 0.2.0a8 adds
+> constant-volume cell relaxation (`relax.fix_volume`), the `gruneisen`
+> command (mode Grueneisen parameters from +-1 % volume force constants)
+> and the `qha` command (thermal expansion, B(T), C_p, thermodynamic
+> gamma), and the Vinet equation of state.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -205,6 +209,8 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `phonon` | Phonon band structure, DOS, Debye temperature, F / U / S / C_v (mode sum) |
 | `kappa`  | Thermal conductivity (Green-Kubo + optional Slack-Debye) |
 | `elastic` | Elastic tensor, B / G / E / ν (Voigt / Reuss / Hill), Born stability, Debye temperature |
+| `gruneisen` | Mode Grüneisen parameters (q-path, mesh, C_v-weighted mean γ(T)) |
+| `qha`    | Quasi-harmonic thermal expansion, B(T), C_p, thermodynamic γ(T) |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
 | `fit`    | Fit a classical potential (LJ / Mie / Morse / Born-Mayer / Yukawa / Buckingham / Stillinger-Weber / Tersoff / EAM) |
 
@@ -234,6 +240,27 @@ strain du/deta in A per unit strain, and an input hash),
 `example/elastic/check_elastic.py` checks Tersoff Si against Tersoff's
 published C11 / C12 / C44 / C44^0 and Kleinman zeta, ASE's own Tersoff
 and pymatgen, and ZnO (Buckingham + PPPM) against the hexagonal relations.
+
+### Grüneisen parameters and the quasi-harmonic approximation (ADR-0018)
+
+```bash
+akitsushima --dump-default gruneisen > g.yaml   # Tersoff Si, primitive POSCAR
+akitsushima gruneisen g.yaml
+akitsushima --dump-default qha > q.yaml
+akitsushima qha q.yaml
+```
+
+Both start from the primitive cell (as `phonon`), relax it fully
+(`pre_relax`), then relax shape and ions at each fixed volume in the
+phonon supercell (`GeometryOptimiser(fix_volume=True)`, also available as
+`relax.fix_volume`).  `gruneisen` uses V0 (1 -+ 0.01): gamma =
+-(V/2w^2)<e|dD/dV|e> along the q-path and on a mesh, with the
+C_v-weighted mean gamma(T).  `qha` scans 7 volumes over +-5 %, fits
+E(V) + F_vib(V, T) per temperature (Birch-Murnaghan or Vinet) and reports
+V(T), B(T), alpha(T), C_v, C_p and gamma(T); it stops on an imaginary mode
+(below -0.05 THz) unless `skip_unstable_volumes: true`, and reports
+nothing above the temperature where V(T) leaves the scanned volumes.
+Both match phonopy's own Grueneisen and QHA (tests/test_qha.py).
 
 ### Fitting a classical potential
 
@@ -498,7 +525,7 @@ Which solvers take an MLIP (ADR-0007):
 
 | command | tabular | atom-centred | note |
 |---|---|---|---|
-| `relax`, `md`, `neb`, `tsa`, `phonon`, `elastic` | yes | yes | need E, F, S only |
+| `relax`, `md`, `neb`, `tsa`, `phonon`, `elastic`, `gruneisen`, `qha` | yes | yes | need E, F, S only |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
 | `kappa` | refused | yes | exact heat flux from the site terms |
 | `osmc` | refused | yes | CFCMC couples the fractional atom through total energies (ADR-0009): as `gcmc` |

@@ -7,12 +7,14 @@ from .cmd_elastic import cmd_elastic
 from .cmd_esm import cmd_esm
 from .cmd_fit import cmd_fit
 from .cmd_gcmc import cmd_gcmc
+from .cmd_gruneisen import cmd_gruneisen
 from .cmd_kappa import cmd_kappa
 from .cmd_md import cmd_md
 from .cmd_mlip import cmd_mlip
 from .cmd_neb import cmd_neb
 from .cmd_osmc import cmd_osmc
 from .cmd_phonon import cmd_phonon
+from .cmd_qha import cmd_qha
 from .cmd_relax import cmd_relax
 from .cmd_tsa import cmd_tsa
 from .templates import _DUMP_MAP
@@ -36,6 +38,8 @@ _DISPATCH = {
     "phonon":  cmd_phonon,
     "kappa":   cmd_kappa,
     "elastic": cmd_elastic,
+    "gruneisen": cmd_gruneisen,
+    "qha":     cmd_qha,
     "mlip":    cmd_mlip,
     "fit":     cmd_fit,
 }
@@ -61,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  phonon    Phonon band structure, DOS, Debye T, free energy\n"
             "  kappa     Thermal conductivity (Green-Kubo + Slack-Debye)\n"
             "  elastic   Elastic tensor, B/G/E/nu (Voigt/Reuss/Hill), Debye T\n"
+            "  gruneisen Mode Grueneisen parameters (+-dV force constants)\n"
+            "  qha       Quasi-harmonic thermal expansion, B(T), Cp\n"
             "  mlip      Fit a machine-learning potential (ELM/QELM/NN/linear)\n"
             "  fit       Fit a classical potential "
             "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n\n"
@@ -77,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | elastic | mlip"))
+              " | esm | phonon | kappa | elastic | gruneisen | qha | mlip"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -99,6 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add("phonon", "Phonon band structure, DOS, Debye temperature, free energy")
     _add("kappa",  "Thermal conductivity (Green-Kubo + optional Slack-Debye)")
     _add("elastic", "Elastic tensor, polycrystalline moduli, Debye temperature")
+    _add("gruneisen", "Mode Grueneisen parameters from +-dV force constants")
+    _add("qha",    "Quasi-harmonic thermal expansion, bulk modulus, Cp")
     _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
 
     p_fit = sub.add_parser(

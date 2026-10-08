@@ -9,15 +9,14 @@ import time as _time
 import numpy as np
 
 from ..constants import EV_ANG3_TO_GPA
-from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..solvers import ElasticConstantsCalculator, GeometryOptimiser
-from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..solvers.elastic import DEFAULT_STRAINS, elastic_moduli
 from ..utils.mpi import _mpi_rank
 from .common import (
     _check_poscar,
     _check_yaml,
+    _cli_force_fn,
     _input_hash,
     _print_header,
     _print_output_files,
@@ -59,19 +58,7 @@ def cmd_elastic(args) -> int:
     lattice, positions = pos_data["lattice"], pos_data["positions"]
     atom_types = pos_data["atom_types"]
 
-    force_fn, r_cut, buck_params, charges = _build_force_fn_from_yaml(pot_cfg)
-    # Buckingham's YAML bridge returns (buck_params, charges) instead of a
-    # callable; resolve both paths to one force function (as cmd_relax).
-    force_fn, r_cut = _resolve_force_fn(
-        force_fn, r_cut, buck_params, charges,
-        pot_cfg.get("ewald_alpha"), pot_cfg.get("coulomb_method", "ewald"),
-        pot_cfg.get("pppm_accuracy", 1e-5), pot_cfg.get("pppm_mesh"),
-        pot_cfg.get("pppm_order", 6), "cmd_elastic")
-    if getattr(force_fn, "r_cut", None) is None:
-        try:
-            force_fn.r_cut = r_cut
-        except AttributeError:
-            pass
+    force_fn, r_cut = _cli_force_fn(pot_cfg, "cmd_elastic")
 
     strains   = el_cfg.get("strains", list(DEFAULT_STRAINS))
     skin      = float(el_cfg.get("skin_width", 0.5))
