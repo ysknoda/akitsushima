@@ -907,7 +907,11 @@ class GeometryOptimiser:
 
     def _finalise(self, e, forces, stress, converged, n_steps):
         status = "CONVERGED" if converged else "NOT CONVERGED (max steps reached)"
-        if self._is_root:
+        # verbose=False silences the summary too: ElasticConstantsCalculator
+        # runs 36 quiet relaxations and printed 36 of these blocks.
+        # Files are still written.
+        talk = self._is_root and self.verbose
+        if talk:
             print(f"\n  Geometry optimisation -- {status}")
 
         # Save the true final positions/lattice BEFORE any restoration.
@@ -922,7 +926,7 @@ class GeometryOptimiser:
         if self.save_best and self._best_pos is not None:
             best_is_different = (self._best_step != n_steps - 1)
             if best_is_different:
-                if self._is_root:
+                if talk:
                     print(f"  Best energy found at step {self._best_step}: "
                           f"{self._best_e:.6f} eV")
                     print(f"  (Final step energy was {e_final:.6f} eV; "
@@ -934,7 +938,7 @@ class GeometryOptimiser:
                 self.positions = self._best_pos
                 self.lattice   = self._best_lat
                 e, forces, stress = self._get_forces_and_stress()
-            elif self._is_root:
+            elif talk:
                 print(f"  Best energy coincides with final step "
                       f"({self._best_e:.6f} eV)")
 
@@ -948,7 +952,8 @@ class GeometryOptimiser:
                              self.atom_types,
                              title="Best-energy structure (akitsushima.py)",
                              fix_atoms=fa_out)
-                print(f"  Best structure written to {best_out}")
+                if talk:
+                    print(f"  Best structure written to {best_out}")
 
         # POSCAR_relaxed always contains the LAST step structure,
         # regardless of whether save_best is active.
@@ -956,13 +961,15 @@ class GeometryOptimiser:
         fa_out = (self._fix_ions.reshape(self.N, 3)
                   if np.any(self._fix_ions) else None)
         if self._is_root:
-            print(f"  Final energy : {e_final:.6f} eV")
-            print(f"  Final Fmax   : {np.max(np.abs(forces)):.4f} eV/A")
+            if talk:
+                print(f"  Final energy : {e_final:.6f} eV")
+                print(f"  Final Fmax   : {np.max(np.abs(forces)):.4f} eV/A")
             write_poscar(out, final_lat,
                          wrap_positions_into_cell(final_pos, final_lat),
                          self.atom_types, title="Relaxed by akitsushima.py",
                          fix_atoms=fa_out)
-            print(f"  Relaxed structure written to {out}")
+            if talk:
+                print(f"  Relaxed structure written to {out}")
         return {
             "energy"    : float(e),
             "lattice"   : self.lattice.copy(),

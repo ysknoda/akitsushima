@@ -87,6 +87,32 @@ _Avoid_: total force, combined force
 A calculation in which the lattice relaxes alongside the atoms.
 _Avoid_: full relaxation, cell relaxation, NPT relaxation
 
+### Elastic properties
+
+**Clamped-ion / relaxed-ion**:
+The two elastic tensors of `elastic` (ADR-0017).  Clamped-ion: atoms
+strained affinely with the cell (fractional coordinates fixed).
+Relaxed-ion: atoms then relaxed inside the fixed strained cell.  The
+physical static tensor is the relaxed-ion one; the two coincide with one
+atom per primitive cell.
+_Avoid_: unrelaxed / relaxed C (ambiguous with the pre-relaxation),
+frozen-ion, ionic contribution
+
+**Internal strain**:
+The displacement of each atom away from its affine position per unit
+strain, du_ia/d eta_j -- the part of the relaxed-ion response the
+clamped-ion tensor misses, and the input of the relaxed-ion piezoelectric
+tensor.
+_Avoid_: internal relaxation (the process, not the tensor), Kleinman
+parameter (one scalar of it for diamond)
+
+**Voigt / Reuss / Hill average**:
+Polycrystalline bulk and shear moduli from C (uniform strain), from
+S = C^-1 (uniform stress), and their arithmetic mean.  E and nu of each
+scheme come from that scheme's own B and G; E_Hill is not the mean of
+E_Voigt and E_Reuss.
+_Avoid_: VRH (when only one of the three is meant), isotropic average
+
 ### Ensembles and dynamics
 
 **Equilibration** / **production**:

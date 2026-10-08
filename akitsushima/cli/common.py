@@ -1,6 +1,8 @@
 """Shared helpers for the CLI sub-command handlers: config/POSCAR loading,
 mass resolution, and console output formatting.
 """
+import hashlib
+import json
 import os
 import warnings
 
@@ -23,6 +25,7 @@ __all__ = [
     "_file_sizes",
     "_print_output_files",
     "_resolve_mu_from_cfg",
+    "_input_hash",
 ]
 
 
@@ -79,6 +82,23 @@ def _resolve_mu_from_cfg(section_cfg: dict, default: float = -0.1,
             UserWarning, stacklevel=2)
         return float(section_cfg["mu_ex"])
     return float(default)
+
+
+def _input_hash(lattice, positions, atom_types, pot_cfg: dict) -> str:
+    """SHA-256 of a structure (lattice, element order, fractional
+    coordinates rounded to 1e-6) and its potential section.  A command
+    that reuses another command's results (an IFC file, an
+    elastic_results.json) refuses them when this does not match
+    (ADR-0017, Q30)."""
+    lattice = np.asarray(lattice, dtype=float)
+    frac = np.asarray(positions, dtype=float) @ np.linalg.inv(lattice)
+    frac -= np.floor(frac + 1e-9)
+    key = {"lattice": np.round(lattice, 6).tolist(),
+           "types": list(atom_types),
+           "frac": np.round(frac, 6).tolist(),
+           "potential": pot_cfg}
+    blob = json.dumps(key, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()
 
 
 def _fmt_time(s: float) -> str:

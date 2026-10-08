@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "akitsushima"
-version = "0.2.0a5"
+version = "0.2.0a6"
 description = "Classical force-field and machine-learning potential toolkit for atomistic simulation"
 readme = "README.md"
 requires-python = ">=3.10"

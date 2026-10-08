@@ -24,6 +24,7 @@ __all__ = [
     "_YAML_TSA_DEFAULT",
     "_YAML_OSMC_DEFAULT",
     "_YAML_ESM_DEFAULT",
+    "_YAML_ELASTIC_DEFAULT",
     "_DUMP_MAP",
 ]
 
@@ -799,6 +800,54 @@ esm:
   verbose: true
 """
 
+_YAML_ELASTIC_DEFAULT = """\
+# akitsushima  --  Elastic constants (ADR-0017)
+# Usage: akitsushima elastic elastic.yaml
+#
+# The POSCAR must already be a supercell wide enough for the potential:
+# r_cut + skin_width < half the smallest perpendicular cell width at every
+# strain (refused otherwise).  For this Tersoff Si, r_cut 3.0 + 0.5 needs
+# the 64-atom 2x2x2 conventional cell, not the 8-atom one.
+
+structure:
+  poscar: POSCAR
+
+potential:
+  # Tersoff, PRB 38, 9902 (1988), Si(C): C11 142.5, C12 75.4, C44 69 GPa
+  type: Tersoff
+  species: [Si]
+  params:
+    A:       1830.8
+    B:       471.18
+    lambda1: 2.4799
+    lambda2: 1.7322
+    lambda3: 0.0
+    beta:    1.1e-6
+    n:       0.78734
+    c:       100390.0
+    d:       16.217
+    h:       -0.59825
+    R:       2.85
+    D:       0.15
+
+elastic:
+  output_dir:  ./elastic_output
+  pre_relax:   true          # relax cell + ions first
+  relax:                     # pre-relaxation settings
+    method:    fire
+    fmax:      1.0e-3        # eV/A
+    pmax:      0.01          # GPa
+    max_steps: 3000
+  strains:     [0.0025, 0.005, 0.01]   # each applied with + and -
+  relax_ions:  true          # relaxed-ion C and internal strain
+  fmax:        1.0e-4        # eV/A, ionic relaxation at each strain
+  max_steps:   1000
+  skin_width:  0.5           # A
+  n_jobs:      1             # threads over strained cells (-1: all cores)
+  masses:      {}            # amu overrides, e.g. {Si: 28.0855}
+  verbose:     true
+"""
+
 _DUMP_MAP = {
     "relax":  _YAML_RELAX_DEFAULT,
     "md":     _YAML_MD_NVT_DEFAULT,
@@ -812,6 +861,7 @@ _DUMP_MAP = {
     "esm":    _YAML_ESM_DEFAULT,
     "phonon": _YAML_PHONON_DEFAULT,
     "kappa":  _YAML_KAPPA_DEFAULT,
+    "elastic": _YAML_ELASTIC_DEFAULT,
     "mlip":   _YAML_ELM_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).

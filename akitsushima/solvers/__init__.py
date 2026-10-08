@@ -1,5 +1,5 @@
 from .dynamics_analysis import DiffusionAnalyzer
-from .elastic import ElasticConstantsCalculator, fit_equation_of_state
+from .elastic import ElasticConstantsCalculator, elastic_moduli, fit_equation_of_state
 from .gcmc import CFCMCSimulation, GCMCMDSimulation
 from .geometry_optimiser import GeometryOptimiser
 from .molecular_dynamics import NPTSimulation, NVESimulation, NVTSimulation
@@ -23,6 +23,7 @@ __all__ = [
     "ThermalConductivityCalculator",
     "RadialDistributionFunction",
     "ElasticConstantsCalculator",
+    "elastic_moduli",
     "fit_equation_of_state",
     "DiffusionAnalyzer",
 ]

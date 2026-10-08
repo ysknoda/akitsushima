@@ -26,19 +26,35 @@ that a genuine energy minimum must have a positive bulk modulus) for
 the flipped formula -- see the module's own test suite
 (tests/test_elastic.py) for the corresponding regression test.
 """
+import os
 import tempfile
-from typing import Callable
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 from scipy.optimize import curve_fit
 
 from ..constants import EV_ANG3_TO_GPA
+from ..engine.neighborlist import _check_min_image
 from .geometry_optimiser import GeometryOptimiser
 
-__all__ = ["ElasticConstantsCalculator", "fit_equation_of_state"]
+__all__ = ["ElasticConstantsCalculator", "elastic_moduli",
+           "fit_equation_of_state", "DEFAULT_STRAINS"]
 
 # Voigt notation: (1=xx, 2=yy, 3=zz, 4=yz, 5=xz, 6=xy), 0-indexed here.
 _VOIGT_PAIRS = [(0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1)]
+
+# Strain amplitudes (dimensionless), each applied with both signs
+# (ADR-0017 decision 3: de Jong et al., Sci. Data 2, 150009 (2015) use
+# 0.5 % and 1 %; 0.25 % is added to see the linear regime from below).
+DEFAULT_STRAINS = (0.0025, 0.005, 0.01)
+
+# For the sound velocities / Debye temperature: h and k_B exact (SI 2019),
+# amu CODATA 2018.
+_AMU_KG = 1.66053906660e-27
+_H_SI   = 6.62607015e-34
+_KB_SI  = 1.380649e-23
 
 
 def _strain_matrix(voigt_idx: int, magnitude: float) -> np.ndarray:
@@ -56,61 +72,59 @@ def _strain_matrix(voigt_idx: int, magnitude: float) -> np.ndarray:
     return eps
 
 
+def _voigt(sigma: np.ndarray) -> np.ndarray:
+    return np.array([sigma[a, b] for a, b in _VOIGT_PAIRS])
+
+
 class ElasticConstantsCalculator:
     """
     Compute the 6x6 elastic constant tensor C_ij (Voigt notation) [GPa]
-    from small strain deformations, via linear stress-strain fitting.
+    from small strain deformations, via linear stress-strain fitting
+    (ADR-0017).
 
-    For each of the 6 independent Voigt strain modes, applies a
-    +-``delta`` strain to the reference cell (holding fractional
-    coordinates fixed, then optionally relaxing ionic positions at that
-    FIXED strained cell shape), and central-differences the resulting
-    stress with respect to the strain magnitude.
+    Each of the 6 Voigt strain modes is applied at +-each amplitude in
+    ``strains`` with fractional coordinates fixed (the clamped-ion cell),
+    and the ions are then relaxed at that FIXED strained cell shape (the
+    relaxed-ion cell).  Each column of C is the slope of a straight-line
+    least-squares fit of the six stress components against the strain,
+    over those points and the unstrained cell.  With a single amplitude
+    this is exactly the old +-delta central difference.
 
     Parameters
     ----------
     lattice, positions, atom_types : reference (to-be-strained) structure,
                      ideally already relaxed to its own equilibrium (a
-                     nonzero starting stress will bias the linear
-                     stress-strain fit).
+                     nonzero starting stress shows up as the fit's
+                     intercept, ``residual_stress_GPa``, and biases C at
+                     the order of that stress).
     force_fn        : callable (lattice, positions, atom_types) -> (E, F, S).
-    delta           : strain magnitude for the +-delta finite difference
-                     (dimensionless, default 0.005 = 0.5%).
+    strains         : strain amplitudes (dimensionless), each used with
+                     both signs.  Default ``DEFAULT_STRAINS``.
+    delta           : a single amplitude -- the old interface, the same as
+                     ``strains=(delta,)``.  Give at most one of the two.
     relax_ions      : if True (default), relax ionic positions at each
                      strained cell via GeometryOptimiser(relax_cell=False)
                      before reading off the stress -- needed whenever the
                      strained cell has inequivalent atomic sites that
                      would otherwise feel a nonzero internal force (e.g.
-                     a shear strain on a multi-atom-basis cell). Skipping
-                     this (relax_ions=False) is only valid for structures
-                     with no free internal coordinates under strain (e.g.
-                     a single atom per primitive cell).
+                     a shear strain on a multi-atom-basis cell).  With one
+                     atom per cell no relaxation is done.
     fmax            : force convergence criterion for the ionic
                      relaxation, when relax_ions=True [eV/A].
+    skin_width      : the relaxation's neighbour-list skin [A]; part of
+                     the minimum-image check below.
+    n_jobs          : worker threads over the strained cells (-1: all
+                     cores).  force_fn must be thread-safe for n_jobs > 1
+                     (ExternalFileEngine and ELMModel.compute are not).
 
-    Minimum cell size (important)
-    ------------------------------
-    ``lattice``/``positions`` must already be large enough that
-    ``force_fn``'s own r_cut is comfortably below half the shortest
-    cell dimension -- exactly the same constraint
-    ``NeighbourList.build()`` enforces for any force_fn that uses one.
-    If ``force_fn`` internally falls back to a bare O(N^2) minimum-image
-    sum with NO ``NeighbourList`` (e.g. calling a potential directly
-    with ``neigh_list=None``), THAT path performs no equivalent
-    validation and will silently return WRONG (and not obviously so --
-    still finite, still smooth) forces/stress once r_cut exceeds this
-    bound, since more than one periodic image of a neighbour then lies
-    within the cutoff and only one is (arbitrarily) kept. This was
-    confirmed directly during development: a bare 4-atom conventional
-    FCC cell with r_cut=6.0 A (roughly 3x too large for that cell) gave
-    a nonzero shear-strain force (~0.018 eV/A) on what is, by inversion
-    symmetry, an EXACTLY force-free configuration for any true single-
-    atom-basis Bravais lattice under any affine strain -- and fed
-    through to a bulk modulus wrong by close to a factor of 5. Switching
-    to an adequately-sized supercell reduced that same force to ~2e-13
-    eV/A (machine-precision zero) and gave a physically sound,
-    Cauchy-relation-respecting result. Use a supercell large enough for
-    your ``force_fn``'s r_cut before calling this class.
+    Minimum cell size
+    -----------------
+    The cutoff (plus ``skin_width`` when ions are relaxed) must stay below
+    half the smallest perpendicular width of EVERY strained cell; this is
+    checked before any force call and raises ValueError otherwise.  Past
+    that bound a direct O(N^2) evaluation keeps one periodic image per
+    pair and silently drops the others: a 4-atom FCC cell with r_cut = 6 A
+    once gave a bulk modulus wrong by a factor of about 5.  Use a supercell.
     """
 
     def __init__(self,
@@ -118,74 +132,240 @@ class ElasticConstantsCalculator:
                  positions  : np.ndarray,
                  atom_types : list,
                  force_fn   : Callable,
-                 delta      : float = 0.005,
+                 strains    : Optional[Sequence[float]] = None,
+                 delta      : Optional[float] = None,
                  relax_ions : bool  = True,
                  fmax       : float = 1e-4,
-                 max_steps  : int   = 1000):
+                 max_steps  : int   = 1000,
+                 skin_width : float = 0.5,
+                 n_jobs     : int   = 1):
+        if strains is not None and delta is not None:
+            raise ValueError("ElasticConstantsCalculator: give strains= or "
+                             "delta=, not both.")
+        if strains is None:
+            strains = (delta,) if delta is not None else DEFAULT_STRAINS
+        self.strains = tuple(sorted(abs(float(s)) for s in strains))
+        if not self.strains or min(self.strains) <= 0.0:
+            raise ValueError("ElasticConstantsCalculator: strain amplitudes "
+                             f"must be positive, got {strains}.")
         self.lattice0    = np.asarray(lattice, dtype=float).copy()
         self.positions0  = np.asarray(positions, dtype=float).copy()
         self.atom_types  = list(atom_types)
         self.force_fn    = force_fn
-        self.delta       = float(delta)
-        self.relax_ions  = relax_ions
+        self.relax_ions  = bool(relax_ions) and len(self.positions0) > 1
         self.fmax        = fmax
         self.max_steps   = max_steps
+        self.skin_width  = float(skin_width)
+        self.n_jobs      = (os.cpu_count() or 1) if n_jobs == -1 else int(n_jobs)
         self._frac0      = self.positions0 @ np.linalg.inv(self.lattice0)
-        # Bug-fix note (code-check follow-up): this used to be a single
-        # hardcoded path shared by every ElasticConstantsCalculator
-        # instance/process. GeometryOptimiser truncates (mode "w") the
-        # relax.log/XDATCAR_relax files it opens there on every call, so
-        # two instances running concurrently (e.g. under different MPI
-        # ranks each analysing a different structure, or just two
-        # instances in the same process) could interleave/clobber each
-        # other's scratch log files -- harmless to the returned stress
-        # (which is read from the in-memory GeometryOptimiser result, not
-        # from these log files), but a real nuisance for anyone trying to
-        # inspect them for debugging. A fresh, uniquely-named directory
-        # per instance removes that collision risk entirely.
+        from ..fitting.force_fn import check_esm_for_solver
+        from ..fitting.mlip_engine import check_mlip_for_solver
+        check_esm_for_solver(force_fn, "ElasticConstantsCalculator",
+                             refuse="straining the cell moves the ESM "
+                                    "boundaries (ADR-0017)")
+        check_mlip_for_solver(force_fn, "ElasticConstantsCalculator",
+                              species=set(self.atom_types))
+        # One fresh directory per instance, and a subdirectory per strained
+        # cell: GeometryOptimiser truncates its relax.log / XDATCAR_relax on
+        # every call, so a shared path let concurrent relaxations clobber
+        # each other's scratch files.
         self._scratch_dir = tempfile.mkdtemp(prefix="akitsushima_elastic_")
+        self._check_cells()
 
-    def _stress_at_strain(self, eps: np.ndarray) -> np.ndarray:
-        T = np.eye(3) + eps
-        lattice_s   = self.lattice0 @ T
+    def _points(self) -> list:
+        """(mode j, signed strain) pairs; mode None is the unstrained cell."""
+        pts = [(None, 0.0)]
+        for j in range(6):
+            for s in self.strains:
+                pts += [(j, +s), (j, -s)]
+        return pts
+
+    def _strained_lattice(self, j, s) -> np.ndarray:
+        if j is None:
+            return self.lattice0.copy()
+        return self.lattice0 @ (np.eye(3) + _strain_matrix(j, s))
+
+    def _check_cells(self) -> None:
+        r_cut = getattr(self.force_fn, "r_cut", None)
+        if r_cut is None:
+            return
+        r_list = float(r_cut) + (self.skin_width if self.relax_ions else 0.0)
+        for j, s in self._points():
+            _check_min_image(self._strained_lattice(j, s), r_list,
+                             f"ElasticConstantsCalculator (strain mode "
+                             f"{'none' if j is None else j + 1}, {s:+.4f})")
+
+    def _evaluate(self, k: int, j, s) -> tuple:
+        """(clamped stress, relaxed stress, affine positions, relaxed
+        positions, converged) at one strain point."""
+        lattice_s   = self._strained_lattice(j, s)
         positions_s = self._frac0 @ lattice_s
-        if self.relax_ions and len(self.positions0) > 1:
-            go = GeometryOptimiser(
-                lattice_s, positions_s, self.atom_types,
-                force_fn=self.force_fn, relax_cell=False, method="fire",
-                fmax=self.fmax, max_steps=self.max_steps, verbose=False,
-                output_dir=self._scratch_dir)
-            go.run()
-            _, _, stress = go._get_forces_and_stress()
-        else:
-            _, _, stress = self.force_fn(lattice_s, positions_s, self.atom_types)
-        return stress
+        _, _, stress0 = self.force_fn(lattice_s, positions_s, self.atom_types)
+        if not self.relax_ions:
+            return stress0, stress0, positions_s, positions_s, True
+        out = os.path.join(self._scratch_dir, f"point_{k:02d}")
+        os.makedirs(out, exist_ok=True)
+        go = GeometryOptimiser(
+            lattice_s, positions_s, self.atom_types,
+            force_fn=self.force_fn, relax_cell=False, method="fire",
+            fmax=self.fmax, max_steps=self.max_steps, verbose=False,
+            skin_width=self.skin_width, output_dir=out)
+        res = go.run()
+        _, _, stress = go._get_forces_and_stress()
+        return (stress0, stress, positions_s, res["positions"],
+                bool(res["converged"]))
 
     def compute(self) -> dict:
         """
         Returns
         -------
         dict with keys:
-            C            : (6, 6) elastic constant tensor [GPa], Voigt order.
-            bulk_modulus : Voigt-averaged bulk modulus [GPa]
-                          ``(C11+C22+C33 + 2(C12+C13+C23)) / 9``.
+            C                  : (6, 6) relaxed-ion elastic tensor [GPa],
+                                 Voigt order, symmetrised.
+            C_clamped          : (6, 6) clamped-ion tensor [GPa].
+            internal_strain    : (N, 3, 6) du_ia / d eta_j [A per unit
+                                 Voigt strain]; zeros when the ions are
+                                 not relaxed.
+            fit_rms_GPa        : {"relaxed": (6,), "clamped": (6,)} RMS
+                                 residual of each mode's straight-line fit.
+            residual_stress_GPa: (6,) the fits' intercept, Voigt order,
+                                 standard (tensile-positive) sign.
+            unconverged        : [(mode 1-6, strain)] whose ionic
+                                 relaxation hit max_steps.
+            strains            : the amplitudes used.
+            bulk_modulus       : Voigt bulk modulus [GPa] (the old
+                                 interface; see elastic_moduli).
         """
-        C = np.zeros((6, 6))
-        for j in range(6):
-            eps_p = _strain_matrix(j, +self.delta)
-            eps_m = _strain_matrix(j, -self.delta)
-            s_p = self._stress_at_strain(eps_p)
-            s_m = self._stress_at_strain(eps_m)
-            ds  = (s_p - s_m) / (2.0 * self.delta)
-            dsigma_voigt = np.array([ds[a, b] for a, b in _VOIGT_PAIRS])
-            # Sign: see module docstring -- this codebase's sigma is the
-            # negative of the standard Hooke's-law stress convention.
-            C[:, j] = -dsigma_voigt * EV_ANG3_TO_GPA
+        pts = self._points()
+        if self.n_jobs > 1:
+            with ThreadPoolExecutor(max_workers=self.n_jobs) as ex:
+                res = list(ex.map(lambda a: self._evaluate(a[0], *a[1]),
+                                  enumerate(pts)))
+        else:
+            res = [self._evaluate(k, j, s) for k, (j, s) in enumerate(pts)]
 
-        C = 0.5 * (C + C.T)   # symmetrise away finite-difference noise
+        unconverged = [(j + 1, s) for (j, s), r in zip(pts, res)
+                       if j is not None and not r[4]]
+        if unconverged:
+            warnings.warn(
+                f"ElasticConstantsCalculator: ionic relaxation did not reach "
+                f"fmax={self.fmax} eV/A within {self.max_steps} steps at "
+                f"(mode, strain) {unconverged}; the relaxed-ion C and the "
+                f"internal strain there are less accurate.", RuntimeWarning)
+
+        n = len(self.positions0)
+        C, C0 = np.zeros((6, 6)), np.zeros((6, 6))
+        dudeta = np.zeros((n, 3, 6))
+        rms = {"relaxed": np.zeros(6), "clamped": np.zeros(6)}
+        intercepts = []
+        # Sign: this codebase's stress is compressive-positive (ADR-0001),
+        # the negative of the standard Hooke's-law stress, so the standard
+        # stress is -sigma and C_ij = -d sigma_i / d eta_j.
+        for j in range(6):
+            idx = [0] + [k for k, (jj, _) in enumerate(pts) if jj == j]
+            eta = np.array([pts[k][1] for k in idx])
+            A = np.column_stack([eta, np.ones_like(eta)])
+            for key, col, target in (("clamped", 0, C0), ("relaxed", 1, C)):
+                y = np.array([-_voigt(res[k][col]) for k in idx]) * EV_ANG3_TO_GPA
+                coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+                target[:, j] = coef[0]
+                rms[key][j] = float(np.sqrt(np.mean((A @ coef - y) ** 2)))
+                if key == "relaxed":
+                    intercepts.append(coef[1])
+            if self.relax_ions:
+                # Displacement from the affine position, minimum image in
+                # the strained cell, uniform translation removed.
+                u = []
+                for k in idx:
+                    lat_s = self._strained_lattice(*pts[k])
+                    f = (res[k][3] - res[k][2]) @ np.linalg.inv(lat_s)
+                    d = (f - np.round(f)) @ lat_s
+                    u.append((d - d.mean(axis=0)).ravel())
+                coef, *_ = np.linalg.lstsq(A, np.array(u), rcond=None)
+                dudeta[:, :, j] = coef[0].reshape(n, 3)
+
+        if not np.any(C0) and not np.any(C):
+            raise ValueError(
+                "ElasticConstantsCalculator: the stress is identically zero "
+                "at every strain -- the force function returns no stress "
+                "(e.g. an external engine without one).")
+        C  = 0.5 * (C + C.T)     # symmetrise away finite-difference noise
+        C0 = 0.5 * (C0 + C0.T)
         bulk_modulus = (C[0, 0] + C[1, 1] + C[2, 2]
                        + 2.0 * (C[0, 1] + C[1, 2] + C[0, 2])) / 9.0
-        return {"C": C, "bulk_modulus": float(bulk_modulus)}
+        return {"C": C, "C_clamped": C0, "internal_strain": dudeta,
+                "fit_rms_GPa": rms,
+                "residual_stress_GPa": np.mean(intercepts, axis=0),
+                "unconverged": unconverged, "strains": self.strains,
+                "bulk_modulus": float(bulk_modulus)}
+
+
+def elastic_moduli(C      : np.ndarray,
+                   volume : Optional[float] = None,
+                   masses : Optional[Sequence[float]] = None) -> dict:
+    """
+    Polycrystalline moduli and stability measures from a Voigt C [GPa]
+    (ADR-0017 decisions 6 and 7).
+
+    Parameters
+    ----------
+    C      : (6, 6) elastic tensor [GPa], Voigt order, engineering shear.
+    volume : cell volume [A^3]; with
+    masses : per-atom masses [amu] -- both needed for the density, the
+             sound velocities and the Debye temperature.
+
+    Returns
+    -------
+    dict: ``S`` (6x6, 1/GPa), ``eigenvalues`` [GPa], ``born_stable``
+    (all eigenvalues > 0; Mouhat and Coudert, PRB 90, 224104 (2014));
+    ``B``, ``G``, ``E`` [GPa] and ``nu`` as {"voigt", "reuss", "hill"}
+    (Hill 1952; E and nu of each scheme from that scheme's B and G);
+    ``pugh_ratio`` = B_H / G_H; ``universal_anisotropy``
+    A^U = 5 G_V/G_R + B_V/B_R - 6; with volume and masses also
+    ``density_kg_m3``, ``v_l_m_s``, ``v_t_m_s``, ``v_m_m_s`` and
+    ``debye_temperature_K`` (Anderson 1963, per atom).
+
+    A singular C gives NaN for every Reuss-derived value.
+    """
+    C = np.asarray(C, dtype=float)
+    eig = np.linalg.eigvalsh(0.5 * (C + C.T))
+    try:
+        S = np.linalg.inv(C)
+    except np.linalg.LinAlgError:
+        S = np.full((6, 6), np.nan)
+
+    def diag(M):  return M[0, 0] + M[1, 1] + M[2, 2]
+    def off(M):   return M[0, 1] + M[1, 2] + M[0, 2]
+    def shear(M): return M[3, 3] + M[4, 4] + M[5, 5]
+
+    B = {"voigt": (diag(C) + 2.0 * off(C)) / 9.0,
+         "reuss": 1.0 / (diag(S) + 2.0 * off(S))}
+    G = {"voigt": (diag(C) - off(C) + 3.0 * shear(C)) / 15.0,
+         "reuss": 15.0 / (4.0 * diag(S) - 4.0 * off(S) + 3.0 * shear(S))}
+    for M in (B, G):
+        M["hill"] = 0.5 * (M["voigt"] + M["reuss"])
+    E, nu = {}, {}
+    for k in ("voigt", "reuss", "hill"):
+        b, g = B[k], G[k]
+        E[k]  = 9.0 * b * g / (3.0 * b + g)
+        nu[k] = (3.0 * b - 2.0 * g) / (2.0 * (3.0 * b + g))
+    out = {
+        "S": S, "eigenvalues": eig, "born_stable": bool(np.all(eig > 0.0)),
+        "B": B, "G": G, "E": E, "nu": nu,
+        "pugh_ratio": B["hill"] / G["hill"],
+        "universal_anisotropy": (5.0 * G["voigt"] / G["reuss"]
+                                 + B["voigt"] / B["reuss"] - 6.0),
+    }
+    if volume is not None and masses is not None:
+        rho = float(np.sum(masses)) * _AMU_KG / (volume * 1e-30)     # kg/m^3
+        v_l = np.sqrt((B["hill"] + 4.0 * G["hill"] / 3.0) * 1e9 / rho)
+        v_t = np.sqrt(G["hill"] * 1e9 / rho)
+        v_m = ((2.0 / v_t**3 + 1.0 / v_l**3) / 3.0) ** (-1.0 / 3.0)
+        n_dens = len(masses) / (volume * 1e-30)                         # 1/m^3
+        theta = (_H_SI / _KB_SI) * (3.0 * n_dens / (4.0 * np.pi)) ** (1.0 / 3.0) * v_m
+        out.update(density_kg_m3=rho, v_l_m_s=float(v_l), v_t_m_s=float(v_t),
+                   v_m_m_s=float(v_m), debye_temperature_K=float(theta))
+    return out
 
 
 def _birch_murnaghan_energy(V, E0, V0, B0, B0_prime):

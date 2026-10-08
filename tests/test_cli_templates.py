@@ -36,6 +36,7 @@ _COMMAND = {
     "esm": "esm",
     "phonon": "phonon",
     "kappa": "kappa",
+    "elastic": "elastic",
     "mlip": "mlip",
 }
 
@@ -53,6 +54,7 @@ _SHRINK = {
     "esm": {"esm": {"n_grid_z": 128}},
     "phonon": {},
     "kappa": {"kappa": {"n_steps": 200, "equil_steps": 20, "tau_max": 0.02}},
+    "elastic": {},
     "mlip": {},
 }
 
@@ -175,6 +177,8 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
     elif key == "phonon":
         _write_si_primitive(tmp_path / st["poscar"])
     elif key == "kappa":
+        _write_si(tmp_path / st["poscar"])
+    elif key == "elastic":
         _write_si(tmp_path / st["poscar"])
     elif key == "mlip":
         _write_mlip_csv(tmp_path / st["training_csv"])

@@ -25,7 +25,11 @@
 > force, so it could never drive a solver. 0.2.0a4 makes Tersoff forces
 > analytic (they change by ~1e-7 eV/A) and fits multi-species Tersoff and
 > the Zhou (2004) alloy EAM (ADR-0015). 0.2.0a5 makes an MPI `fit` print
-> and write its files on rank 0 only.
+> and write its files on rank 0 only. 0.2.0a6 adds the `elastic` command
+> (ADR-0017): clamped- and relaxed-ion elastic tensors from a
+> multi-amplitude stress-strain fit, B / G / E / nu as Voigt, Reuss and
+> Hill averages, Born stability, sound velocities, Debye temperature and
+> the internal strain.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -97,6 +101,7 @@ O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 | `relax` | Geometry optimisation: FIRE, L-BFGS, DIIS, RMM-DIIS, RFO — ionic or variable-cell, with transition-state refinement. |
 | `md`    | Molecular dynamics: NVE, NVT (Nosé-Hoover chain), NPT. |
 | `gcmc` / `osmc` | Grand-canonical (μVT) MC/MD: discrete insertion/deletion (`gcmc`) or a continuous fractional atom, CFCMC (`osmc`, ADR-0009). |
+| `elastic` | Elastic tensor (clamped- and relaxed-ion), B / G / E / ν as Voigt, Reuss and Hill averages, Born stability, sound velocities, Debye temperature, internal strain (ADR-0017). |
 
 ### Post-processing
 
@@ -104,6 +109,7 @@ O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 - **`TransitionStateAnalyser`** — Hessian, IRC, saddle-point verification, TST reaction rate
 - **`PhononCalculator`** — Finite-displacement force constants, band structure, DOS, Debye temperature
 - **`ThermalConductivityCalculator`** — Green-Kubo MD + Slack-Debye estimate
+- **`ElasticConstantsCalculator`, `elastic_moduli`** — elastic tensor and polycrystalline moduli (ADR-0017)
 
 ### Performance
 
@@ -195,8 +201,36 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `esm`    | Effective screening medium |
 | `phonon` | Phonon band structure, DOS, Debye temperature, free energy |
 | `kappa`  | Thermal conductivity (Green-Kubo + optional Slack-Debye) |
+| `elastic` | Elastic tensor, B / G / E / ν (Voigt / Reuss / Hill), Born stability, Debye temperature |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
 | `fit`    | Fit a classical potential (LJ / Mie / Morse / Born-Mayer / Yukawa / Buckingham / Stillinger-Weber / Tersoff / EAM) |
+
+### Elastic constants (ADR-0017)
+
+```bash
+akitsushima --dump-default elastic > elastic.yaml   # Tersoff Si template
+akitsushima elastic elastic.yaml
+```
+
+The cell and ions are relaxed first (`pre_relax`), then each of the six
+Voigt strains is applied at +-0.25, 0.5 and 1 % (`strains`).  Each column
+of C is the slope of a straight-line fit of the stress (RMS residual
+reported per mode); the clamped-ion C^0 uses affinely strained cells, the
+relaxed-ion C relaxes the ions in each.  The POSCAR must already be a
+supercell with r_cut + skin below half its smallest perpendicular width
+at every strain -- this is checked and refused, never extended
+automatically.  ESM electrostatics is refused (straining moves its
+boundaries).
+
+Output (`elastic_output/`): `elastic_results.json` (C, C^0, S, eigenvalues
+and Born stability, B / G / E / nu for Voigt, Reuss and Hill -- E and nu
+from each scheme's own B and G, as pymatgen -- Pugh ratio, universal
+anisotropy A^U, density, v_l / v_t / v_m, Debye temperature, internal
+strain du/deta in A per unit strain, and an input hash),
+`elastic_tensor.dat`, `internal_strain.dat` and `POSCAR_reference`.
+`example/elastic/check_elastic.py` checks Tersoff Si against Tersoff's
+published C11 / C12 / C44 / C44^0 and Kleinman zeta, ASE's own Tersoff
+and pymatgen, and ZnO (Buckingham + PPPM) against the hexagonal relations.
 
 ### Fitting a classical potential
 
@@ -461,7 +495,7 @@ Which solvers take an MLIP (ADR-0007):
 
 | command | tabular | atom-centred | note |
 |---|---|---|---|
-| `relax`, `md`, `neb`, `tsa`, `phonon` | yes | yes | need E, F, S only |
+| `relax`, `md`, `neb`, `tsa`, `phonon`, `elastic` | yes | yes | need E, F, S only |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
 | `kappa` | refused | yes | exact heat flux from the site terms |
 | `osmc` | refused | yes | CFCMC couples the fractional atom through total energies (ADR-0009): as `gcmc` |

@@ -3,6 +3,7 @@ import argparse
 
 from ..fitting import registry
 from ..fitting.driver import LOCAL_METHOD_OPTIONS
+from .cmd_elastic import cmd_elastic
 from .cmd_esm import cmd_esm
 from .cmd_fit import cmd_fit
 from .cmd_gcmc import cmd_gcmc
@@ -34,6 +35,7 @@ _DISPATCH = {
     "esm":     cmd_esm,
     "phonon":  cmd_phonon,
     "kappa":   cmd_kappa,
+    "elastic": cmd_elastic,
     "mlip":    cmd_mlip,
     "fit":     cmd_fit,
 }
@@ -58,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  esm       Effective Screening Medium\n"
             "  phonon    Phonon band structure, DOS, Debye T, free energy\n"
             "  kappa     Thermal conductivity (Green-Kubo + Slack-Debye)\n"
+            "  elastic   Elastic tensor, B/G/E/nu (Voigt/Reuss/Hill), Debye T\n"
             "  mlip      Fit a machine-learning potential (ELM/QELM/NN/linear)\n"
             "  fit       Fit a classical potential "
             "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n\n"
@@ -74,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | mlip"))
+              " | esm | phonon | kappa | elastic | mlip"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -95,6 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("esm",    "Effective Screening Medium")
     _add("phonon", "Phonon band structure, DOS, Debye temperature, free energy")
     _add("kappa",  "Thermal conductivity (Green-Kubo + optional Slack-Debye)")
+    _add("elastic", "Elastic tensor, polycrystalline moduli, Debye temperature")
     _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
 
     p_fit = sub.add_parser(
