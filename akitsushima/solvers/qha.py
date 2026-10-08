@@ -79,12 +79,16 @@ def relax_at_volume(lattice, positions, atom_types, force_fn, volume,
 
 
 def phonons_at(lattice, positions, atom_types, force_fn, supercell,
-               delta=0.01, masses=None, n_jobs=1) -> PhononCalculator:
-    """Force constants of one (relaxed) primitive cell."""
+               delta=0.01, masses=None, n_jobs=1, born=None) -> PhononCalculator:
+    """Force constants of one (relaxed) primitive cell; with ``born`` (a
+    solvers.dielectric.born_from_config dict) the Gonze-Lee NAC is set,
+    Z* and eps_inf taken as volume independent (ADR-0019, Q24)."""
     with contextlib.redirect_stdout(io.StringIO()):
         pc = PhononCalculator(lattice, positions, atom_types, force_fn,
                               supercell=supercell, delta=delta, masses=masses)
         pc.compute_ifc(n_jobs=n_jobs, verbose=False)
+    if born is not None:
+        pc.set_nac(born["Z"], born["epsilon_inf"])
     return pc
 
 

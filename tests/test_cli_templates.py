@@ -39,6 +39,8 @@ _COMMAND = {
     "elastic": "elastic",
     "gruneisen": "gruneisen",
     "qha": "qha",
+    "dielectric": "dielectric",
+    "piezo": "piezo",
     "mlip": "mlip",
 }
 
@@ -59,6 +61,8 @@ _SHRINK = {
     "elastic": {},
     "gruneisen": {"gruneisen": {"mesh": {"q_mesh": 4}}},
     "qha": {"qha": {"q_mesh": 6}},
+    "dielectric": {},
+    "piezo": {},
     "mlip": {},
 }
 
@@ -186,6 +190,9 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         _write_si(tmp_path / st["poscar"])
     elif key in ("gruneisen", "qha"):
         _write_si_primitive(tmp_path / st["poscar"])
+    elif key in ("dielectric", "piezo"):
+        from test_dielectric import write_mgo
+        write_mgo(tmp_path, n=1 if key == "dielectric" else 3)
     elif key == "mlip":
         _write_mlip_csv(tmp_path / st["training_csv"])
     else:  # pragma: no cover - guarded by test_every_template_key_is_covered

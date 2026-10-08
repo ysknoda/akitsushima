@@ -146,5 +146,7 @@ reached either.
   are written as before.
 - `cli/common._input_hash`: SHA-256 of lattice, element order, wrapped
   fractional coordinates (1e-6) and the potential section, written to
-  every results JSON that a later command may reuse (Q30).
+  every results JSON that a later command may reuse (Q30).  Since
+  0.2.0a9 (ADR-0019) it is the hash of the INPUT POSCAR, as for phonon,
+  not of the pre-relaxed reference.
 - Version 0.2.0a6.

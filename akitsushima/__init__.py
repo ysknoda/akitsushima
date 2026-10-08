@@ -155,7 +155,7 @@ from .solvers import (
     fit_equation_of_state,
 )
 
-__version__ = "0.2.0a8"
+__version__ = "0.2.0a9"
 
 __all__ = [
     "__version__",

@@ -12,6 +12,7 @@ from ..solvers.qha import phonons_at, quasi_harmonic, relax_at_volume
 from ..utils.mpi import _mpi_rank
 from .common import (
     _check_poscar,
+    _born_setup,
     _check_yaml,
     _cli_force_fn,
     _input_hash,
@@ -54,7 +55,8 @@ def _volume_setup(args, section: str, title: str):
     relax_kw = sec.get("relax", {}) or {}
     t_sections = []
     pre = None
-    if sec.get("pre_relax", True):
+    # load_ifc (dielectric): the stored phonon run's structure is used as is.
+    if sec.get("pre_relax", True) and not sec.get("load_ifc"):
         t0 = _time.perf_counter()
         r = relax_at_volume(lat, pos, types, force_fn, None, sc, relax_kw,
                             output_dir=os.path.join(out_dir, "pre_relax"))
@@ -63,7 +65,11 @@ def _volume_setup(args, section: str, title: str):
         t_sections.append(("Pre-relaxation (cell + ions)", _time.perf_counter() - t0))
         if is_root and not r["converged"]:
             print("  WARNING: pre-relaxation did not converge")
+    born = _born_setup(cfg, types, pot_cfg,
+                       required=section in ("dielectric", "piezo"))
     return {"cfg": cfg, "sec": sec, "pot_cfg": pot_cfg, "force_fn": force_fn,
+            "born": born, "input_hash": _input_hash(
+                pos_data["lattice"], pos_data["positions"], types, pot_cfg),
             "lattice": lat, "positions": pos, "types": types, "supercell": sc,
             "relax_kw": relax_kw, "out_dir": out_dir, "is_root": is_root,
             "masses": _resolve_masses(sec, types), "pre_relax": pre,
@@ -108,7 +114,7 @@ def cmd_qha(args) -> int:
                             output_dir=os.path.join(out_dir, f"relax_v{k}"))
         pc = phonons_at(r["lattice"], r["positions"], types, fn, st["supercell"],
                         delta=sec.get("delta", 0.01), masses=st["masses"],
-                        n_jobs=sec.get("n_jobs", 1))
+                        n_jobs=sec.get("n_jobs", 1), born=st["born"])
         th = pc.thermal_properties(T, q_mesh=sec.get("q_mesh", 20))
         V = abs(float(np.linalg.det(r["lattice"])))
         if st["verbose"]:
@@ -149,8 +155,7 @@ def cmd_qha(args) -> int:
 
     n_at = len(types)
     out = {"command": "qha",
-           "input_hash": _input_hash(st["lattice"], st["positions"], types,
-                                     st["pot_cfg"]),
+           "input_hash": st["input_hash"], "nac": st["born"] is not None,
            "natoms_cell": n_at, "eos": eos, "pre_relax": st["pre_relax"],
            "volumes_A3": Vs.tolist(), "energies_eV": Es.tolist(),
            "pressures_GPa": [r[2] for r in rows],

@@ -113,6 +113,24 @@ scheme come from that scheme's own B and G; E_Hill is not the mean of
 E_Voigt and E_Reuss.
 _Avoid_: VRH (when only one of the three is meant), isotropic average
 
+**Born charge** (Z*):
+Z[k, a, b] = dP_a / du_kb = dF_kb / dE_a -- polarisation index first, as
+phonopy and VASP.  In this code's rigid-ion model it is the point charge
+times the unit tensor unless given under `born:` (ADR-0019).
+_Avoid_: effective charge (also means the mode effective charge), ionic
+charge
+
+**Rigid-ion default**:
+Z* = point charge, eps_inf = 1: what the dielectric and piezo commands
+assume without a `born:` block.  Overestimates LO-TO splitting and leaves
+out the electronic parts of eps_0 and e.
+_Avoid_: formal-charge model (the charges need not be formal)
+
+**NAC** (non-analytic correction):
+The Gonze-Lee dipole-dipole term added to D(q); what produces LO-TO
+splitting at Gamma, which depends on the direction of approach.
+_Avoid_: LO-TO correction, polar correction
+
 ### Ensembles and dynamics
 
 **Equilibration** / **production**:

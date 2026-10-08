@@ -36,7 +36,10 @@
 > constant-volume cell relaxation (`relax.fix_volume`), the `gruneisen`
 > command (mode Grueneisen parameters from +-1 % volume force constants)
 > and the `qha` command (thermal expansion, B(T), C_p, thermodynamic
-> gamma), and the Vinet equation of state.
+> gamma), and the Vinet equation of state. 0.2.0a9 adds Born charges
+> (`born:` block), the Gonze-Lee non-analytic correction (LO-TO splitting)
+> in phonon / gruneisen / qha, and the `dielectric` (eps_0, IR modes) and
+> `piezo` (relaxed-ion e, d, k) commands (ADR-0019).
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -211,6 +214,8 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `elastic` | Elastic tensor, B / G / E / ν (Voigt / Reuss / Hill), Born stability, Debye temperature |
 | `gruneisen` | Mode Grüneisen parameters (q-path, mesh, C_v-weighted mean γ(T)) |
 | `qha`    | Quasi-harmonic thermal expansion, B(T), C_p, thermodynamic γ(T) |
+| `dielectric` | Static dielectric tensor, LO-TO splitting, IR modes (Born charges) |
+| `piezo`  | Relaxed-ion piezoelectric e, d and coupling k (rigid ion) |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
 | `fit`    | Fit a classical potential (LJ / Mie / Morse / Born-Mayer / Yukawa / Buckingham / Stillinger-Weber / Tersoff / EAM) |
 
@@ -261,6 +266,27 @@ V(T), B(T), alpha(T), C_v, C_p and gamma(T); it stops on an imaginary mode
 (below -0.05 THz) unless `skip_unstable_volumes: true`, and reports
 nothing above the temperature where V(T) leaves the scanned volumes.
 Both match phonopy's own Grueneisen and QHA (tests/test_qha.py).
+
+### Born charges, dielectric tensor and piezoelectric response (ADR-0019)
+
+```yaml
+born:                         # top level; also turns on NAC in phonon/gruneisen/qha
+  epsilon_inf: 3.7            # scalar, [xx, yy, zz] or 3x3; default 1 (warned)
+  born_charges:               # default: the potential's point charges
+    per_species: {Zn: 2.1, O: -2.1}       # scalar, diagonal or 3x3
+    per_atom: {4: [[...], [...], [...]]}  # 1-based POSCAR index, wins
+  clamped_ion_piezo: [[...6...], [...], [...]]   # C/m^2, piezo only
+```
+
+Z[k, a, b] = dP_a / du_kb (phonopy's and VASP's order); the sum rule is
+imposed.  `akitsushima dielectric` gives eps_0 = eps_inf + (4 pi / V)
+sum_m S_m / w_m^2 with the per-mode oscillator strengths, mode effective
+charges, IR intensities and LO frequencies along x, y, z.  `akitsushima
+piezo` takes the internal strain of `elastic` (or `load_elastic`) and
+gives e (C/m^2), d (pC/N) and k.  The model is rigid ion: with point
+charges only, eps_inf = 1 and the electronic (clamped-ion) piezoelectric
+term is zero unless given.  Without charges or a `born:` block (MLIP,
+EAM, Tersoff, SW) both commands refuse.
 
 ### Fitting a classical potential
 
@@ -526,6 +552,7 @@ Which solvers take an MLIP (ADR-0007):
 | command | tabular | atom-centred | note |
 |---|---|---|---|
 | `relax`, `md`, `neb`, `tsa`, `phonon`, `elastic`, `gruneisen`, `qha` | yes | yes | need E, F, S only |
+| `dielectric`, `piezo` | with `born:` | with `born:` | Z* and eps_inf must be given (no charges of its own) |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
 | `kappa` | refused | yes | exact heat flux from the site terms |
 | `osmc` | refused | yes | CFCMC couples the fractional atom through total energies (ADR-0009): as `gcmc` |

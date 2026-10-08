@@ -247,6 +247,7 @@ class PhononCalculator:
         self._band_result : Optional[dict]       = None
         self._dos_result  : Optional[dict]       = None
         self._thermal_result: Optional[dict]     = None
+        self._nac         : Optional[dict]       = None   # ADR-0019
 
     # ------------------------------------------------------------------ #
     #  1. Supercell construction                                           #
@@ -514,7 +515,8 @@ class PhononCalculator:
         return [k for k, c in enumerate(self._sc_cell)
                 if np.all(c == [0, 0, 0])]
 
-    def _build_D_raw(self, q_cart: np.ndarray) -> np.ndarray:
+    def _build_D_raw(self, q_cart: np.ndarray,
+                     IFC: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Build the 3Nx3N dynamical matrix at q_cart [A^-1] without D-ASR.
 
@@ -525,19 +527,25 @@ class PhononCalculator:
         """
         origin = np.asarray(self._origin_indices(), dtype=np.int64)
         sc_to_prim = np.asarray(self._sc_to_prim, dtype=np.int64)
-        D = _build_D_raw_jit(self.IFC, self.masses, sc_to_prim, self._img_R,
+        D = _build_D_raw_jit(self.IFC if IFC is None else IFC,
+                             self.masses, sc_to_prim, self._img_R,
                              self._img_n, origin,
                              np.asarray(q_cart, dtype=np.float64),
                              self.N_basis)
         return 0.5 * (D + D.conj().T)
 
-    def build_dynamical_matrix(self, q_cart: np.ndarray) -> np.ndarray:
+    def build_dynamical_matrix(self, q_cart: np.ndarray,
+                               q_direction: Optional[np.ndarray] = None
+                               ) -> np.ndarray:
         """
         Build the mass-weighted dynamical matrix D(q) with D-ASR correction.
 
         Parameters
         ----------
-        q_cart : (3,) array, q-vector in Cartesian coordinates [A^-1].
+        q_cart      : (3,) array, q-vector in Cartesian coordinates [A^-1].
+        q_direction : with NAC set and q = 0, the direction (Cartesian) of
+                      approach, which selects the LO modes; without it
+                      q = 0 gives the analytic (TO) matrix.
 
         Returns
         -------
@@ -546,9 +554,95 @@ class PhononCalculator:
         if self.IFC is None:
             raise RuntimeError(
                 "PhononCalculator: call compute_ifc() first.")
-        D = self._build_D_raw(q_cart)
-        D += self._D_correction    # D-ASR: enforce acoustic zeros at Gamma
+        if self._nac is None:
+            D = self._build_D_raw(q_cart)
+            D += self._D_correction    # D-ASR: enforce acoustic zeros at Gamma
+            return 0.5 * (D + D.conj().T)
+        D = self._build_D_raw(q_cart, self._nac["IFC_SR"])
+        D += self._nac["D_correction"]
+        D += self._nac_dd(q_cart, q_direction)
         return 0.5 * (D + D.conj().T)
+
+    # ------------------------------------------------------------------ #
+    #  NAC: Gonze-Lee dipole-dipole term (ADR-0019)                       #
+    # ------------------------------------------------------------------ #
+
+    def set_nac(self, born: np.ndarray, epsilon_inf: np.ndarray,
+                n_G: int = 300) -> None:
+        """
+        Non-analytic correction by the method of Gonze and Lee (PRB 55,
+        10355 (1997)), with only the reciprocal-space Ewald term as in
+        phonopy's default: the dipole-dipole force constants are removed
+        from the supercell IFC at the q-points commensurate with the
+        supercell (shortest representatives), leaving short-range IFC;
+        every D(q) then adds the dipole-dipole term back.  D is unchanged
+        at commensurate q; LO-TO splitting appears at Gamma along a
+        q_direction.  Z* and eps_inf are taken as volume independent.
+
+        born        : (N_basis, 3, 3) Born effective charges [e], Z[k, a, b]
+                      = dP_a / du_kb (sum rule already imposed).
+        epsilon_inf : (3, 3) high-frequency dielectric tensor.
+        n_G         : number of G-vectors in the sum (phonopy's 300).
+        """
+        from .dielectric import dipole_dipole, g_vectors
+        if self.IFC is None:
+            raise RuntimeError("set_nac: call compute_ifc() first.")
+        Z = np.asarray(born, dtype=float).reshape(self.N_basis, 3, 3)
+        eps = np.asarray(epsilon_inf, dtype=float).reshape(3, 3)
+        G, g_cut = g_vectors(self.lattice_prim, n_G)
+        # exp(-G_cut^2 tr(eps)/3 / 4 Lambda^2) = 1e-10, as phonopy.
+        lam = np.sqrt(g_cut**2 * np.trace(eps) / 3.0 / 4.0 / np.log(1e10))
+        vol = abs(float(np.linalg.det(self.lattice_prim)))
+        pos = self.positions
+        drift = dipole_dipole(np.zeros(3), G, pos, Z, eps, vol, lam,
+                              drift=np.zeros((self.N_basis, 3, 3))).sum(axis=2)
+        args = (G, pos, Z, eps, vol, lam)
+        # Commensurate points, shortest representatives.
+        rec = 2.0 * np.pi * np.linalg.inv(self.lattice_prim).T
+        S = self.supercell
+        shifts = np.array([[i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1)
+                           for k in (-1, 0, 1)], float) @ rec
+        comm = []
+        for i in range(S[0]):
+            for j in range(S[1]):
+                for k in range(S[2]):
+                    q = np.array([i / S[0], j / S[1], k / S[2]]) @ rec
+                    cand = q + shifts
+                    comm.append(cand[np.argmin(np.linalg.norm(cand, axis=1))])
+        n_c = len(comm)
+        N, N_sc = self.N_basis, self.N_sc
+        phi = np.zeros((N, 3, N_sc, 3))
+        for q in comm:
+            C = dipole_dipole(q, *args, drift=drift)          # (N,3,N,3)
+            ph = np.exp(-1j * self._R_sc @ q)                  # (N_sc,)
+            for j in range(N_sc):
+                b = self._sc_to_prim[j]
+                phi[:, :, j, :] += np.real(C[:, :, b, :] * ph[j])
+        phi /= n_c
+        IFC_SR = self.IFC.copy()
+        for a, ia in enumerate(self._origin_indices()):
+            IFC_SR[3 * ia:3 * ia + 3, :] -= phi[a].reshape(3, 3 * N_sc)
+        self._nac = {"Z": Z, "epsilon_inf": eps, "args": args, "drift": drift,
+                     "lambda": lam, "n_G": len(G), "IFC_SR": IFC_SR}
+        # D-ASR of the short-range part (the dipole term obeys the sum
+        # rule by construction of the drift).
+        D0 = self._build_D_raw(np.zeros(3), IFC_SR).real
+        sqm = np.sqrt(self.masses)
+        D4 = D0.copy().reshape(N, 3, N, 3)
+        rs = np.einsum("aibj,b->aij", D4, sqm) / sqm[:, None, None]
+        for a in range(N):
+            D4[a, :, a, :] -= rs[a]
+        self._nac["D_correction"] = D4.reshape(3 * N, 3 * N) - D0
+
+    def _nac_dd(self, q_cart, q_direction=None) -> np.ndarray:
+        """Mass-weighted dipole-dipole matrix at q (cell gauge)."""
+        from .dielectric import dipole_dipole
+        C = dipole_dipole(q_cart, *self._nac["args"], q_direction=q_direction,
+                          drift=self._nac["drift"])
+        inv = 1.0 / np.sqrt(self.masses)
+        C = C * inv[:, None, None, None] * inv[None, None, :, None]
+        n = 3 * self.N_basis
+        return C.reshape(n, n)
 
     # ------------------------------------------------------------------ #
     #  4. Eigenvalue -> frequency conversion                               #
@@ -685,7 +779,14 @@ class PhononCalculator:
                   f"{N_q} q-points x {n_modes} branches ...")
 
         for i, q in enumerate(q_cart_arr):
-            D    = self.build_dynamical_matrix(q)
+            # With NAC, Gamma takes the direction of the path through it
+            # (towards the next point; from the previous one at the end),
+            # so the LO-TO splitting shows.
+            q_dir = None
+            if self._nac is not None and np.linalg.norm(q) < 1e-10:
+                q_dir = (q_cart_arr[i + 1] - q if i + 1 < N_q
+                         else q - q_cart_arr[i - 1])
+            D    = self.build_dynamical_matrix(q, q_dir)
             # Bug-fix note: D(q) is complex Hermitian away from
             # time-reversal-invariant q; eigvalsh(D.real) dropped its
             # imaginary part (1.2-4 THz errors on Si at q = (1/4, 0, 0)).

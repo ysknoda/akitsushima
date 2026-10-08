@@ -57,6 +57,9 @@ def cmd_elastic(args) -> int:
         return 1
     lattice, positions = pos_data["lattice"], pos_data["positions"]
     atom_types = pos_data["atom_types"]
+    # Hash of the INPUT structure and potential (as phonon), so a later
+    # piezo run on the same POSCAR can recognise these results (Q30).
+    in_hash = _input_hash(lattice, positions, atom_types, pot_cfg)
 
     force_fn, r_cut = _cli_force_fn(pot_cfg, "cmd_elastic")
 
@@ -124,7 +127,7 @@ def cmd_elastic(args) -> int:
                  title="Reference structure of akitsushima elastic")
     out = {
         "command": "elastic",
-        "input_hash": _input_hash(lattice, positions, atom_types, pot_cfg),
+        "input_hash": in_hash,
         "natoms": len(atom_types),
         "volume_A3": volume,
         "pre_relax": pre,

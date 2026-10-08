@@ -27,6 +27,8 @@ __all__ = [
     "_YAML_ELASTIC_DEFAULT",
     "_YAML_GRUNEISEN_DEFAULT",
     "_YAML_QHA_DEFAULT",
+    "_YAML_DIELECTRIC_DEFAULT",
+    "_YAML_PIEZO_DEFAULT",
     "_DUMP_MAP",
 ]
 
@@ -969,6 +971,94 @@ qha:
   verbose:     true
 """
 
+_YAML_DIELECTRIC_DEFAULT = """\
+# akitsushima  --  Static dielectric tensor, LO-TO splitting, IR modes
+# Usage: akitsushima dielectric dielectric.yaml
+# POSCAR: the primitive (or conventional) cell, as for phonon.
+
+structure:
+  poscar: POSCAR
+
+potential:
+  # Rigid-ion MgO: Buckingham of Lewis and Catlow, J. Phys. C 18, 1149
+  # (1985), formal charges +-2, PPPM.  mgo_buckingham.json:
+  #   {"potential_type": "buckingham", "r_cut": 5.0, "species": ["Mg", "O"],
+  #    "charges": {"Mg": 2.0, "O": -2.0},
+  #    "params": {"Mg-O": {"A": 1428.5, "rho": 0.2945, "C": 0.0},
+  #               "O-O":  {"A": 22764.0, "rho": 0.149, "C": 27.88},
+  #               "Mg-Mg": {"A": 0.0, "rho": 0.1, "C": 0.0}}}
+  type: Buckingham
+  potential_json: ./mgo_buckingham.json
+  r_cut: 5.0
+  coulomb_method: pppm
+
+born:                       # ADR-0019; this block also turns on NAC in
+                            # phonon, gruneisen and qha
+  epsilon_inf: 2.95         # MgO, experiment (n^2 at optical frequencies);
+                            # omit for the rigid-ion default 1 (warned)
+  # born_charges:           # default: the potential's point charges
+  #   per_species: {Mg: 2.0, O: -2.0}      # scalar, [xx,yy,zz] or 3x3
+  #   per_atom: {1: [[...],[...],[...]]}  # 1-based POSCAR index, wins
+  # clamped_ion_piezo: 3x6 C/m^2           # electronic e (piezo only)
+
+dielectric:
+  output_dir: ./dielectric_output
+  supercell:  [3, 3, 3]     # r_cut + 0.5 A skin < half its width
+  delta:      0.01
+  pre_relax:  true          # cell + ions; ignored with load_ifc
+  relax: {method: fire, fmax: 1.0e-4, pmax: 1.0e-3, max_steps: 5000}
+  # load_ifc: ./phonon_output   # reuse a phonon run of the same POSCAR +
+  #                             # potential (checked by input hash)
+  n_jobs:     1
+  masses:     {}
+"""
+
+_YAML_PIEZO_DEFAULT = """\
+# akitsushima  --  Relaxed-ion piezoelectric tensors (rigid ion, ADR-0019)
+# Usage: akitsushima piezo piezo.yaml
+# POSCAR: a supercell wide enough for the potential (as for elastic).
+# e = e0 + (e/V) sum_k Z_k du_k/deta  from the elastic internal strain;
+# d = e S; k from d, S and the stress-free permittivity.
+
+structure:
+  poscar: POSCAR
+
+potential:
+  # Rigid-ion MgO: Buckingham of Lewis and Catlow, J. Phys. C 18, 1149
+  # (1985), formal charges +-2, PPPM.  mgo_buckingham.json:
+  #   {"potential_type": "buckingham", "r_cut": 5.0, "species": ["Mg", "O"],
+  #    "charges": {"Mg": 2.0, "O": -2.0},
+  #    "params": {"Mg-O": {"A": 1428.5, "rho": 0.2945, "C": 0.0},
+  #               "O-O":  {"A": 22764.0, "rho": 0.149, "C": 27.88},
+  #               "Mg-Mg": {"A": 0.0, "rho": 0.1, "C": 0.0}}}
+  type: Buckingham
+  potential_json: ./mgo_buckingham.json
+  r_cut: 5.0
+  coulomb_method: pppm
+
+born:                       # ADR-0019; this block also turns on NAC in
+                            # phonon, gruneisen and qha
+  epsilon_inf: 2.95         # MgO, experiment (n^2 at optical frequencies);
+                            # omit for the rigid-ion default 1 (warned)
+  # born_charges:           # default: the potential's point charges
+  #   per_species: {Mg: 2.0, O: -2.0}      # scalar, [xx,yy,zz] or 3x3
+  #   per_atom: {1: [[...],[...],[...]]}  # 1-based POSCAR index, wins
+  # clamped_ion_piezo: 3x6 C/m^2           # electronic e (piezo only)
+
+elastic:                    # used when piezo.load_elastic is not given
+  output_dir: ./elastic_output
+  pre_relax: true
+  relax: {method: fire, fmax: 1.0e-3, pmax: 0.01, max_steps: 3000}
+  strains: [0.0025, 0.005, 0.01]
+  fmax: 1.0e-4
+
+piezo:
+  output_dir: ./piezo_output
+  # load_elastic: ./elastic_output   # reuse an elastic run (input hash checked)
+  field:      5.0e-3        # V/A, for the strain-clamped eps by relaxation
+  relax: {method: fire, fmax: 1.0e-5, max_steps: 10000}
+"""
+
 _DUMP_MAP = {
     "relax":  _YAML_RELAX_DEFAULT,
     "md":     _YAML_MD_NVT_DEFAULT,
@@ -985,6 +1075,8 @@ _DUMP_MAP = {
     "elastic": _YAML_ELASTIC_DEFAULT,
     "gruneisen": _YAML_GRUNEISEN_DEFAULT,
     "qha":    _YAML_QHA_DEFAULT,
+    "dielectric": _YAML_DIELECTRIC_DEFAULT,
+    "piezo":  _YAML_PIEZO_DEFAULT,
     "mlip":   _YAML_ELM_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).

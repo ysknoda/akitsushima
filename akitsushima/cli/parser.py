@@ -3,6 +3,7 @@ import argparse
 
 from ..fitting import registry
 from ..fitting.driver import LOCAL_METHOD_OPTIONS
+from .cmd_dielectric import cmd_dielectric
 from .cmd_elastic import cmd_elastic
 from .cmd_esm import cmd_esm
 from .cmd_fit import cmd_fit
@@ -14,6 +15,7 @@ from .cmd_mlip import cmd_mlip
 from .cmd_neb import cmd_neb
 from .cmd_osmc import cmd_osmc
 from .cmd_phonon import cmd_phonon
+from .cmd_piezo import cmd_piezo
 from .cmd_qha import cmd_qha
 from .cmd_relax import cmd_relax
 from .cmd_tsa import cmd_tsa
@@ -40,6 +42,8 @@ _DISPATCH = {
     "elastic": cmd_elastic,
     "gruneisen": cmd_gruneisen,
     "qha":     cmd_qha,
+    "dielectric": cmd_dielectric,
+    "piezo":   cmd_piezo,
     "mlip":    cmd_mlip,
     "fit":     cmd_fit,
 }
@@ -67,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  elastic   Elastic tensor, B/G/E/nu (Voigt/Reuss/Hill), Debye T\n"
             "  gruneisen Mode Grueneisen parameters (+-dV force constants)\n"
             "  qha       Quasi-harmonic thermal expansion, B(T), Cp\n"
+            "  dielectric Static dielectric tensor, LO-TO, IR modes (Born charges)\n"
+            "  piezo     Relaxed-ion piezoelectric e, d and coupling k\n"
             "  mlip      Fit a machine-learning potential (ELM/QELM/NN/linear)\n"
             "  fit       Fit a classical potential "
             "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n\n"
@@ -83,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | elastic | gruneisen | qha | mlip"))
+              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -107,6 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add("elastic", "Elastic tensor, polycrystalline moduli, Debye temperature")
     _add("gruneisen", "Mode Grueneisen parameters from +-dV force constants")
     _add("qha",    "Quasi-harmonic thermal expansion, bulk modulus, Cp")
+    _add("dielectric", "Static dielectric tensor, LO-TO splitting, IR modes")
+    _add("piezo",  "Relaxed-ion piezoelectric tensors e, d and coupling k")
     _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
 
     p_fit = sub.add_parser(

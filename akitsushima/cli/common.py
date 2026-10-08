@@ -27,6 +27,7 @@ __all__ = [
     "_resolve_mu_from_cfg",
     "_input_hash",
     "_cli_force_fn",
+    "_born_setup",
 ]
 
 
@@ -121,6 +122,41 @@ def _cli_force_fn(pot_cfg: dict, caller: str):
         except AttributeError:
             pass
     return force_fn, r_cut
+
+
+def _born_setup(cfg: dict, atom_types, pot_cfg: dict, required: bool = False):
+    """Born charges and eps_inf for this run (ADR-0019): the YAML ``born:``
+    block, completed by the potential's point charges (Buckingham JSON).
+
+    required=False (phonon, gruneisen, qha): NAC only when a ``born:`` key
+    is present.  required=True (dielectric, piezo): the rigid-ion default
+    Z* = q, eps_inf = 1 applies without it, and the run is refused when
+    there are no charges at all.  Prints the rigid-ion warning.  Returns
+    the dict of solvers.dielectric.born_from_config, or None.
+    """
+    from ..solvers.dielectric import born_from_config
+    if "born" not in cfg and not required:
+        return None
+    charges = None
+    if str(pot_cfg.get("type", "")).strip().lower() in ("buckingham", "buck"):
+        from ..fitting.io_utils import _load_potential_json
+        charges = _load_potential_json(
+            pot_cfg.get("potential_json", "./fitting_output/fitted_potential.json"))[1]
+    born = born_from_config(cfg.get("born") or {}, atom_types, charges)
+    if born is None:
+        raise ValueError(
+            "no Born charges: the potential has no point charges and there is "
+            "no born.born_charges block (an MLIP, EAM, Tersoff or SW has no "
+            "dielectric response of its own; give Z* and epsilon_inf, e.g. "
+            "from DFT, under born:).")
+    if _mpi_rank == 0:
+        print(f"\n[Born charges]  sources: {sorted(set(born['sources']))}; "
+              f"sum-rule correction {born['sum_rule_correction']:.2e} e")
+        if not born["epsilon_inf_given"]:
+            print("  WARNING: epsilon_inf not given -> 1 (rigid-ion model, no "
+                  "electronic polarisation): LO-TO splitting is overestimated "
+                  "by about the true eps_inf; eps_0 lacks the electronic part.")
+    return born
 
 
 def _fmt_time(s: float) -> str:

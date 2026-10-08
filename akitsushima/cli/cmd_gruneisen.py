@@ -10,7 +10,6 @@ import numpy as np
 from ..solvers.qha import mean_gruneisen, mode_gruneisen, phonons_at, relax_at_volume
 from .cmd_qha import _volume_setup
 from .common import (
-    _input_hash,
     _print_output_files,
     _print_results_header,
     _print_timing_summary,
@@ -53,14 +52,14 @@ def cmd_gruneisen(args) -> int:
         press.append(r["pressure_GPa"])
         pcs.append(phonons_at(r["lattice"], r["positions"], types, fn,
                               st["supercell"], delta=sec.get("delta", 0.01),
-                              masses=st["masses"], n_jobs=sec.get("n_jobs", 1)))
+                              masses=st["masses"], n_jobs=sec.get("n_jobs", 1),
+                              born=st["born"]))
     st["t_sections"].append(("3 volumes: relax + IFC", _time.perf_counter() - t0))
     # Bulk modulus from the three pressures, for information.
     B = -V0 * (press[2] - press[0]) / (2 * dv * V0)
 
     out = {"command": "gruneisen",
-           "input_hash": _input_hash(st["lattice"], st["positions"], types,
-                                     st["pot_cfg"]),
+           "input_hash": st["input_hash"], "nac": st["born"] is not None,
            "volumes_A3": [abs(float(np.linalg.det(p.lattice_prim))) for p in pcs],
            "pressures_GPa": press, "bulk_modulus_GPa": B}
 

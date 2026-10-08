@@ -11,6 +11,7 @@ from ..solvers import PhononCalculator
 from ..solvers.config_bridge import _build_force_fn_from_yaml
 from .common import (
     _check_poscar,
+    _born_setup,
     _check_yaml,
     _input_hash,
     _print_header,
@@ -70,6 +71,11 @@ def cmd_phonon(args) -> int:
         t0 = _time.perf_counter()
         calc.compute_ifc(n_jobs=ph_cfg.get("n_jobs",1), verbose=verbose)
         t_sections.append(("Compute IFC", _time.perf_counter()-t0))
+
+    born = _born_setup(cfg, calc.atom_types, pot_cfg)
+    if born is not None:
+        calc.set_nac(born["Z"], born["epsilon_inf"])
+        print(f"  NAC        : Gonze-Lee, {calc._nac['n_G']} G-vectors")
 
     bs_cfg = ph_cfg.get("band_structure", {})
     if bs_cfg and bs_cfg.get("q_path"):
@@ -194,6 +200,7 @@ def _write_phonon_json(path, calc, pot_cfg, supercell, ph_cfg, T_D,
         "command": "phonon",
         "input_hash": _input_hash(calc.lattice_prim, calc.positions,
                                   calc.atom_types, pot_cfg),
+        "nac": calc._nac is not None,
         "natoms_cell": calc.N_basis,
         "supercell": list(calc.supercell),
         "delta_A": calc.delta,
