@@ -102,6 +102,13 @@ SW have no dielectric response.  No LO-TO splitting anywhere.
 
 - `PhononCalculator.set_nac`, `build_dynamical_matrix(q, q_direction)`;
   solvers/dielectric.py.  Version 0.2.0a9.
-- Found while timing: `compute_ifc` displaces every supercell atom (6 N_sc
+- Found while timing: `compute_ifc` displaced every supercell atom (6 N_sc
   force calls) though only the origin-cell rows are used -- 27x the
-  necessary work for a 3x3x3 supercell.  Left as a separate task.
+  necessary work for a 3x3x3 supercell.  Fixed in a follow-up commit:
+  only the origin-cell atoms are displaced (6 N_basis calls) and the
+  other columns are filled by lattice translation,
+  Phi[(a, M), (b, L)] = Phi[(a, M - L), (b, 0)], before the unchanged
+  symmetrisation and ASR.  Against the old implementation: IFC equal to
+  2.6e-12 eV/A^2, frequencies to 1.7e-7 THz (Tersoff Si 4x4x4, AlN 5x5x3,
+  five q-points each); check_phonon.py (phonopy) unchanged.  Time: Si
+  1.53 -> 0.34 s, AlN 4.20 -> 0.28 s, MgO 3x3x3 Ewald 147 -> 4.8 s.

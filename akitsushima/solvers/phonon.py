@@ -343,8 +343,12 @@ class PhononCalculator:
         """
         Compute interatomic force constants by central-difference FD.
 
-        Each atom in the supercell is displaced by +/-delta along x, y, z.
-        Cost: 6 * N_sc force evaluations, split across MPI ranks (each
+        Each atom of the ORIGIN cell is displaced by +/-delta along x, y, z;
+        the columns of every other supercell atom follow by lattice
+        translation, Phi[(a, M), (b, L)] = Phi[(a, M - L), (b, 0)] (indices
+        modulo the supercell).  Cost: 6 * N_basis force evaluations (it was
+        6 * N_sc, displacing every supercell atom: the same matrix up to
+        round-off, N_cells times the work), split across MPI ranks (each
         displacement is a fully independent force_fn call) and, within
         each rank's share, optionally further split across n_jobs threads.
 
@@ -383,7 +387,7 @@ class PhononCalculator:
             parallel_str = f", {n_jobs} threads/rank" if n_jobs > 1 else ", serial"
             mpi_str = f", {_mpi_size} MPI ranks" if _HAS_MPI else ""
             print(f"\n  Computing IFC  "
-                  f"({6 * N_sc} force evaluations, delta={delta} A, "
+                  f"({6 * self.N_basis} force evaluations, delta={delta} A, "
                   f"N_sc={N_sc}{parallel_str}{mpi_str}) ...")
 
         def _eval_displacement(j: int, b: int) -> np.ndarray:
@@ -429,7 +433,8 @@ class PhononCalculator:
         # than once per task) so that, even with n_jobs > 1 spawning
         # worker threads inside it, only the single calling thread ever
         # writes the suppression flag -- worker threads only ever read it.
-        tasks = [(j, b) for j in range(N_sc) for b in range(3)]
+        origin = self._origin_indices()
+        tasks = [(j, b) for j in origin for b in range(3)]
         i_start, i_end = _mpi_domain_split(len(tasks))
         local_tasks = tasks[i_start:i_end]
 
@@ -448,7 +453,7 @@ class PhononCalculator:
                         j, b = fut_map[fut]
                         IFC_local[:, j * 3 + b] = fut.result().ravel()
 
-        IFC = _mpi_allreduce_sum(IFC_local)
+        IFC = self._fill_by_translation(_mpi_allreduce_sum(IFC_local), origin)
 
         # 1. Symmetrise (Newton's 3rd law: sum_ij = sum_ji^T)
         IFC = 0.5 * (IFC + IFC.T)
@@ -478,6 +483,28 @@ class PhononCalculator:
                   f"(ASR residual = {np.max(np.abs(row_sums)):.2e} eV/A^2)")
 
         return IFC
+
+    def _fill_by_translation(self, IFC: np.ndarray, origin: List[int]
+                             ) -> np.ndarray:
+        """Complete an IFC whose only filled columns are the origin-cell
+        atoms': the column of atom (b, L) is that of (b, 0) with every row
+        atom (a, M) read from (a, M - L), cell indices modulo the
+        supercell."""
+        S = np.asarray(self.supercell, dtype=np.int64)
+        cells = np.asarray(self._sc_cell, dtype=np.int64)
+        basis = np.asarray(self._sc_to_prim, dtype=np.int64)
+        index = {(int(b), *map(int, c)): k
+                 for k, (b, c) in enumerate(zip(basis, cells))}
+        orig_of = {int(basis[j]): j for j in origin}
+        out = np.empty_like(IFC)
+        for jp in range(self.N_sc):
+            L = cells[jp]
+            src_rows = np.array([index[(int(basis[i]), *map(int, (cells[i] - L) % S))]
+                                 for i in range(self.N_sc)])
+            j0 = orig_of[int(basis[jp])]
+            rows3 = (3 * src_rows[:, None] + np.arange(3)).ravel()
+            out[:, 3 * jp:3 * jp + 3] = IFC[rows3][:, 3 * j0:3 * j0 + 3]
+        return out
 
     def _precompute_dasr(self) -> None:
         """
