@@ -480,6 +480,13 @@ phonon:
     smearing:  5.0
   debye_temperature: false
   free_energy:       null
+  thermal:                       # ADR-0018: q-mesh mode sum
+    t_min:      0.0              # K
+    t_max:      1000.0
+    t_step:     10.0
+    q_mesh:     20               # Gamma-centred; low-T Cv and Theta_D(T)
+                                 # need finer meshes (acoustic modes)
+    cutoff_THz: 1.0e-3           # modes at or below are left out
   verbose: true
 """
 

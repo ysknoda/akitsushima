@@ -23,6 +23,37 @@ __all__ = ["PhononCalculator"]
 
 # cm^-1 -> THz and cm^-1 -> rad/s (c = 2.99792458e10 cm/s)
 _THZ_TO_CM  = 1e12 / 2.99792458e10
+# h [eV s] x 1e12: photon energy of 1 THz in eV (h, e exact SI 2019).
+_THZ_TO_EV  = 6.62607015e-34 * 1e12 / 1.602176634e-19
+_KB_EV      = 1.380649e-23 / 1.602176634e-19
+_EV_TO_KJ_MOL = 1.602176634e-19 * 6.02214076e23 / 1e3   # 96.485 kJ/mol per eV
+_R_J_K_MOL  = 1.380649e-23 * 6.02214076e23               # k_B N_A [J/K/mol]
+
+
+def _debye_cv_ratio(y: float) -> float:
+    """Debye C_v / (3 N k_B) at Theta_D / T = y:
+    (3 / y^3) int_0^y x^4 e^x / (e^x - 1)^2 dx."""
+    from scipy.integrate import quad
+    if y < 1e-8:
+        return 1.0
+    g = lambda x: x**4 * np.exp(-x) / (-np.expm1(-x))**2 if x > 0 else 0.0
+    return 3.0 / y**3 * quad(g, 0.0, y, limit=200)[0]
+
+
+def _debye_theta_from_cv(ratio: float, T: float) -> float:
+    """Theta_D [K] at which the Debye model gives C_v / (3 N k_B) = ratio
+    at temperature T; NaN outside (0, 1) or at T = 0.  D(y) falls
+    monotonically from 1 to 0, so the root is unique."""
+    from scipy.optimize import brentq
+    if T <= 0.0 or not (0.0 < ratio < 1.0 - 1e-10):
+        return float("nan")
+    hi = 1.0
+    while _debye_cv_ratio(hi) > ratio:
+        hi *= 2.0
+        if hi > 1e4:
+            return float("nan")
+    return float(T * brentq(lambda y: _debye_cv_ratio(y) - ratio, 0.0, hi,
+                            xtol=1e-12, rtol=1e-12))
 _CM_TO_RAD_S = 2.0 * np.pi * 2.99792458e10
 
 
@@ -215,6 +246,7 @@ class PhononCalculator:
         self._D_correction: Optional[np.ndarray] = None   # D-ASR correction
         self._band_result : Optional[dict]       = None
         self._dos_result  : Optional[dict]       = None
+        self._thermal_result: Optional[dict]     = None
 
     # ------------------------------------------------------------------ #
     #  1. Supercell construction                                           #
@@ -810,7 +842,8 @@ class PhononCalculator:
 
         .. math::
 
-            v_D = \\left(\\frac{1}{v_L^3} + \\frac{2}{v_T^3}\\right)^{-1/3}
+            v_D = \\left[\\frac{1}{3}\\left(\\frac{1}{v_L^3}
+                  + \\frac{2}{v_T^3}\\right)\\right]^{-1/3}
 
             \\theta_D = \\frac{\\hbar v_D}{k_B}
                         \\left(\\frac{6\\pi^2 n}{V_0}\\right)^{1/3}
@@ -874,7 +907,10 @@ class PhononCalculator:
         sv   = np.array(sound_velocities)          # (n_dir, 3), ascending
         v_L  = float(np.mean(sv[:, 2]))
         v_T  = float(np.mean(sv[:, :2]))
-        v_D  = (1.0 / v_L**3 + 2.0 / v_T**3) ** (-1.0 / 3.0)
+        # Bug-fix note (ADR-0018): the 1/3 was missing, giving v_D and
+        # theta_D 3^(-1/3) = 0.69 times the Debye value (Anderson, J. Phys.
+        # Chem. Solids 24, 909 (1963), eq. (5): 3/v_D^3 = 1/v_L^3 + 2/v_T^3).
+        v_D  = ((1.0 / v_L**3 + 2.0 / v_T**3) / 3.0) ** (-1.0 / 3.0)
 
         V0_m3   = abs(np.linalg.det(self.lattice_prim)) * ang_to_m**3
         omega_D = v_D * (6.0 * np.pi**2 * self.N_basis / V0_m3) ** (1.0 / 3.0)
@@ -888,8 +924,98 @@ class PhononCalculator:
         return float(theta_D)
 
     # ------------------------------------------------------------------ #
-    #  C-2: Harmonic / QHA vibrational free energy                       #
+    #  C-2: Harmonic thermodynamics by a q-mesh mode sum (ADR-0018)       #
     # ------------------------------------------------------------------ #
+
+    def mesh_frequencies(self, q_mesh: Union[int, List[int]] = 20) -> np.ndarray:
+        """
+        Frequencies [THz] on a Gamma-centred q-mesh (q_frac = i / n_i,
+        Gamma included for every n), shape (n_q, 3 N_basis).  Imaginary
+        modes are returned negative.  phonopy's is_gamma_center=True grid
+        is the same set of points.
+        """
+        if self.IFC is None:
+            raise RuntimeError("PhononCalculator: call compute_ifc() first.")
+        if np.isscalar(q_mesh):
+            q_mesh = [int(q_mesh)] * 3
+        n0, n1, n2 = (int(m) for m in q_mesh)
+        rec_lat = 2.0 * np.pi * np.linalg.inv(self.lattice_prim).T
+        grid = np.array([[i / n0, j / n1, k / n2] for i in range(n0)
+                         for j in range(n1) for k in range(n2)])
+        grid -= np.round(grid)
+        out = np.empty((len(grid), 3 * self.N_basis))
+        for i, qf in enumerate(grid):
+            eigs = np.linalg.eigvalsh(self.build_dynamical_matrix(qf @ rec_lat))
+            out[i] = self._eig_to_freq(np.sort(eigs)) / _THZ_TO_CM
+        return out
+
+    def thermal_properties(self,
+                           temperatures : Union[float, List[float]],
+                           q_mesh       : Union[int, List[int]] = 20,
+                           cutoff_THz   : float = 1e-3,
+                           verbose      : bool  = False,
+                           ) -> dict:
+        """
+        Harmonic Helmholtz free energy, entropy, heat capacity and internal
+        energy by a direct sum over the modes of a Gamma-centred q-mesh
+        (ADR-0018 decision 2; the method of phonopy):
+
+            F = sum_qv [hw/2 + k_B T ln(1 - e^{-hw/k_BT})] / n_q
+            U = sum_qv hw [1/2 + n(w)] / n_q,        S = (U - F) / T
+            C_v = sum_qv k_B x^2 e^x / (e^x - 1)^2 / n_q,  x = hw / k_BT
+
+        Modes with frequency <= ``cutoff_THz`` (the three acoustic modes
+        at Gamma, and imaginary modes) are left out; imaginary ones are
+        counted in ``n_imaginary`` and warned about.
+
+        Returns
+        -------
+        dict: ``temperatures`` [K]; per primitive cell ``F_eV``, ``U_eV``,
+        ``S_kB``, ``Cv_kB`` and ``ZPE_eV``; the same per atom (``*_per_atom``);
+        phonopy's units per mole of cells ``F_kJ_mol``, ``S_J_K_mol``,
+        ``Cv_J_K_mol``; ``theta_D_K`` (Debye temperature that reproduces
+        C_v at each T; NaN where C_v is outside (0, 3 N k_B)); ``q_mesh``,
+        ``n_imaginary``, ``min_frequency_THz``.
+        """
+        T = np.atleast_1d(np.asarray(temperatures, dtype=float))
+        f = self.mesh_frequencies(q_mesh)
+        n_q = f.shape[0]
+        n_imag = int(np.sum(f < -cutoff_THz))
+        if n_imag and verbose and _mpi_rank == 0:
+            print(f"  WARNING: {n_imag} imaginary modes on the mesh "
+                  f"(lowest {f.min():.3f} THz) left out of the sums")
+        e = f[f > cutoff_THz] * _THZ_TO_EV                 # hw [eV], flat
+        zpe = 0.5 * e.sum() / n_q
+        F, U, S, Cv = (np.zeros(len(T)) for _ in range(4))
+        for k, t in enumerate(T):
+            if t <= 0.0:
+                F[k] = U[k] = zpe
+                continue
+            x = e / (_KB_EV * t)
+            em = np.expm1(-x)                               # e^{-x} - 1 < 0
+            F[k] = zpe + _KB_EV * t * np.sum(np.log(-em)) / n_q
+            nb = -np.exp(-x) / em                           # Bose 1/(e^x - 1)
+            U[k] = zpe + np.sum(e * nb) / n_q
+            S[k] = (U[k] - F[k]) / (_KB_EV * t)
+            Cv[k] = np.sum(x * x * nb * (nb + 1.0)) / n_q
+        n = self.N_basis
+        theta = np.array([_debye_theta_from_cv(c / (3 * n), t)
+                          for c, t in zip(Cv, T)])
+        res = {
+            "temperatures": T, "F_eV": F, "U_eV": U, "S_kB": S, "Cv_kB": Cv,
+            "ZPE_eV": zpe,
+            "F_eV_per_atom": F / n, "U_eV_per_atom": U / n,
+            "S_kB_per_atom": S / n, "Cv_kB_per_atom": Cv / n,
+            "F_kJ_mol": F * _EV_TO_KJ_MOL, "S_J_K_mol": S * _R_J_K_MOL,
+            "Cv_J_K_mol": Cv * _R_J_K_MOL,
+            "theta_D_K": theta,
+            "q_mesh": list(np.broadcast_to(q_mesh, 3).astype(int).tolist()
+                           if not np.isscalar(q_mesh) else [int(q_mesh)] * 3),
+            "n_imaginary": n_imag, "min_frequency_THz": float(f.min()),
+            "cutoff_THz": float(cutoff_THz),
+        }
+        self._thermal_result = res
+        return res
 
     def phonon_free_energy(self,
                             T       : float,
@@ -897,90 +1023,23 @@ class PhononCalculator:
                             verbose : bool  = True,
                             ) -> float:
         """
-        Helmholtz vibrational free energy F_vib(T) [eV] from the phonon DOS.
+        Helmholtz vibrational free energy F_vib(T) [eV per primitive cell],
+        the mode sum of :meth:`thermal_properties` on an n_q^3
+        Gamma-centred mesh.  T = 0 gives the zero-point energy.
 
-        .. math::
+        Since ADR-0018 this no longer integrates the smeared DOS
+        histogram (bin width and smearing errors, worst at low T).
 
-            F_{\\rm vib}(T) = \\int g(\\omega)
-                \\left[
-                    \\frac{\\hbar\\omega}{2}
-                    + k_B T \\ln\\!\\bigl(1 - e^{-\\hbar\\omega/k_BT}\\bigr)
-                \\right] d\\omega
-
-        This is the foundation of Quasi-Harmonic Approximation (QHA):
-        compute F(V, T) = E_DFT(V) + F_vib(V, T) at several volumes to
-        obtain the thermal expansion curve and temperature-dependent
-        equilibrium volume.
-
-        Parameters
-        ----------
-        T       : temperature [K].  T = 0 returns zero-point energy only.
-        n_q     : q-mesh per direction if DOS not yet computed.
-        verbose : print result.
-
-        Returns
-        -------
-        F_vib : float [eV]
-
-        Raises
-        ------
-        RuntimeError
-            If neither ``compute_dos()`` nor ``compute_ifc()`` has been
-            called.
-
-        Example -- QHA thermal expansion
-        ---------------------------------
-        >>> volumes = np.linspace(0.95, 1.05, 11) * V0
-        >>> F_total = []
-        >>> for scale in np.linspace(0.95, 1.05, 11):
-        ...     lat_v = lattice * scale**(1/3)
-        ...     pc = PhononCalculator(lat_v, pos, types, fn)
-        ...     pc.compute_ifc()
-        ...     E_dft = compute_E(lat_v, pos, types)   # DFT total energy
-        ...     F_vib = pc.phonon_free_energy(T=300.)
-        ...     F_total.append(E_dft + F_vib)
-        >>> V_eq = volumes[np.argmin(F_total)]         # equilibrium volume
+        This is the foundation of the quasi-harmonic approximation:
+        F(V, T) = E(V) + F_vib(V, T) at several volumes (the ``qha``
+        command, ADR-0018).
         """
-        if self._dos_result is None:
-            if self.IFC is None:
-                raise RuntimeError(
-                    "phonon_free_energy: call compute_ifc() first.")
-            self.compute_dos(q_mesh=[n_q, n_q, n_q], verbose=False)
-
-        # Bug-fix note: the DOS axis is in cm^-1 (see compute_dos), and was
-        # read here as THz, putting every omega 33.4x too high (Tersoff Si:
-        # F_vib(300 K) = 2.35 eV/atom against phonopy's 0.046).  g * df is a
-        # mode count and needs no conversion.
-        freqs_cm  = self._dos_result["frequencies"]
-        dos       = self._dos_result["dos"]
-        df        = float(freqs_cm[1] - freqs_cm[0])
-        freqs_THz = freqs_cm / _THZ_TO_CM
-
-        hbar_J  = 6.62607015e-34 / (2.0 * np.pi)
-        kB_J    = 1.380649e-23
-        eV_J    = 1.60217663e-19
-
-        mask  = freqs_THz > 0.01
-        omega = freqs_THz[mask] * 1e12 * 2.0 * np.pi
-        g     = dos[mask]
-
-        ZPE_J = 0.5 * float(np.sum(hbar_J * omega * g * df))
-
-        if T < 1e-3:
-            F_vib_J = ZPE_J
-        else:
-            x        = np.clip(hbar_J * omega / (kB_J * T), 0.0, 500.0)
-            log_term = np.where(x < 1e-4,
-                                np.log(x + 1e-300),
-                                np.log(1.0 - np.exp(-x) + 1e-300))
-            entropy_J = kB_J * T * float(np.sum(log_term * g * df))
-            F_vib_J   = ZPE_J + entropy_J
-
-        F_vib_eV = F_vib_J / eV_J
-        if verbose:
+        r = self.thermal_properties([T], q_mesh=n_q)
+        F_vib_eV = float(r["F_eV"][0])
+        if verbose and _mpi_rank == 0:
             print(f"  F_vib(T={T:.0f} K) = {F_vib_eV:.4f} eV "
-                  f"(ZPE = {ZPE_J/eV_J:.4f} eV)")
-        return float(F_vib_eV)
+                  f"(ZPE = {r['ZPE_eV']:.4f} eV)")
+        return F_vib_eV
 
     # ------------------------------------------------------------------ #
     #  7. Output: save results and plot                                    #

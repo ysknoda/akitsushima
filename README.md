@@ -29,7 +29,10 @@
 > (ADR-0017): clamped- and relaxed-ion elastic tensors from a
 > multi-amplitude stress-strain fit, B / G / E / nu as Voigt, Reuss and
 > Hill averages, Born stability, sound velocities, Debye temperature and
-> the internal strain.
+> the internal strain. 0.2.0a7 adds harmonic thermodynamics to `phonon`
+> (ADR-0018): F, U, S, C_v and Theta_D(T) by a Gamma-centred q-mesh mode
+> sum (F_vib too), and fixes the sound-velocity Debye temperature, which
+> lacked the 1/3 of the Debye mean and was 0.69x too low.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -107,7 +110,7 @@ O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 
 - **CI-NEB** — Climbing-image nudged elastic band
 - **`TransitionStateAnalyser`** — Hessian, IRC, saddle-point verification, TST reaction rate
-- **`PhononCalculator`** — Finite-displacement force constants, band structure, DOS, Debye temperature
+- **`PhononCalculator`** — Finite-displacement force constants, band structure, DOS, Debye temperature, `thermal_properties` (F, U, S, C_v, Theta_D(T); ADR-0018)
 - **`ThermalConductivityCalculator`** — Green-Kubo MD + Slack-Debye estimate
 - **`ElasticConstantsCalculator`, `elastic_moduli`** — elastic tensor and polycrystalline moduli (ADR-0017)
 
@@ -199,7 +202,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `tsa`    | Transition-state analysis (Hessian / IRC / TST rate) |
 | `osmc`   | CFCMC grand-canonical MC/MD (fractional atom) |
 | `esm`    | Effective screening medium |
-| `phonon` | Phonon band structure, DOS, Debye temperature, free energy |
+| `phonon` | Phonon band structure, DOS, Debye temperature, F / U / S / C_v (mode sum) |
 | `kappa`  | Thermal conductivity (Green-Kubo + optional Slack-Debye) |
 | `elastic` | Elastic tensor, B / G / E / ν (Voigt / Reuss / Hill), Born stability, Debye temperature |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
