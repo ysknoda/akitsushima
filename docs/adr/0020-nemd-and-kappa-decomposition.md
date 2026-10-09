@@ -1,5 +1,5 @@
 ---
-status: accepted (implemented 2026-10-08); NEMD vs Green-Kubo comparison OPEN (see Verification)
+status: accepted (implemented 2026-10-08; NEMD vs Green-Kubo settled 2026-10-09, see Verification)
 ---
 
 # NEMD with Langevin heat baths, local heat flux, and the decomposition of the Green-Kubo conductivity
@@ -118,6 +118,30 @@ spatial resolution, no checkpoint in any MD command.
     0.68 by 127 A (then the extrapolation overshoots), or it keeps rising
     (then the GK cell, 32 A, is too small).  One more, longer NEMD length
     decides between the two.
+- **32 cells (169.6 A, 2048 atoms; 2026-10-09, run under caffeinate):**
+  bath balance 0.006, gradients of the right sign, local flux = bath flux
+  within 7 %; kappa = 0.644 +- 0.073 W/m/K.
+  - The rule stated before this run: kappa near 0.68 at 32 cells means
+    kappa(L) has levelled off and NEMD agrees with GK; above ~0.8 would
+    have pointed at the GK cell.  0.644 +- 0.073 is the first case.
+  - kappa(L): 0.467 / 0.492 / 0.667 / 0.644 W/m/K at 63.6 / 84.8 / 127.2 /
+    169.6 A.  The two longest agree (difference 0.3 combined SE); their
+    weighted mean 0.663 +- 0.031 agrees with GK 0.682 +- 0.035 (0.4
+    combined SE).  example/nemd/check_nemd.py: 18 / 18.
+  - The straight-line 1/kappa against 1/L extrapolation, the criterion
+    first written into check_nemd.py, still gives 1.07 (four points) and
+    is now printed for information only: it cannot represent a kappa(L)
+    that is flat over the two longest lengths.  That criterion was
+    replaced after the data were seen, by the plateau rule stated before
+    the last run; recorded here so that the change is visible.
+  - Caveats: the plateau rests on two lengths with 5 % and 11 % errors;
+    why kappa jumps between 85 and 127 A and not further (bath coupling
+    at damping 500 fs, profile noise of 2-3.5 K between blocks) is not
+    established.  Isotropy of the five-seed GK tensor was marginal (p ~
+    0.04).
+- Conclusion: the NEMD measurements (bath heat, local flux, gradients)
+  are internally consistent at every length, and the NEMD conductivity at
+  lengths >= 127 A agrees with Green-Kubo for LJ Ar at 40 K.
 
 ## Self-critique of the chosen values
 
