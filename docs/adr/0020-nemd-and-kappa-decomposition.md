@@ -97,6 +97,27 @@ spatial resolution, no checkpoint in any MD command.
   (damping 500 fs) and the three-point extrapolation (chi^2/dof 1.7) are
   the candidates; a literature value for LJ Ar at 40 K (e.g. McGaughey
   and Kaviany, PRB 69, 094303 (2004)) would anchor it.
+- **Follow-up (2026-10-09): five independent Green-Kubo runs** (seeds
+  101-505, same cell and length; criteria fixed before the runs,
+  example/nemd/check_gk_seeds.py): tau_max 15 ps, mean of the five
+  running kappa at 15 ps, standard error over seeds.
+  - Per seed, iso: 0.70, 0.74, 0.72, 0.54, 0.70 W/m/K; components range
+    0.45-1.04.
+  - kappa_GK = 0.682 +- 0.035 W/m/K (xx 0.717 +- 0.106, yy 0.593 +- 0.039,
+    zz 0.737 +- 0.054).  Seed-averaged running kappa: 0.650 / 0.669 /
+    0.682 at 10 / 12.5 / 15 ps (still rising within its error).
+  - Isotropy criterion (each component within 2 SE of the mean): FAIL,
+    marginally (yy off by 2.3 SE; chi^2 = 6.4 for 2 dof, p ~ 0.04).
+  - Against NEMD: the extrapolation 1.17 (0.96 .. 1.52) is 1.7x the GK
+    value and its lower bound 8 SE above it -- the pre-set comparison
+    FAILS again.  But the longest NEMD length, 0.667 +- 0.034 at 127 A,
+    agrees with GK (0.682 +- 0.035) within one error bar.
+  - Reading (not yet a conclusion): the disagreement sits in the
+    straight-line 1/kappa against 1/L extrapolation through three noisy
+    points, not in the measured currents; either kappa(L) saturates near
+    0.68 by 127 A (then the extrapolation overshoots), or it keeps rising
+    (then the GK cell, 32 A, is too small).  One more, longer NEMD length
+    decides between the two.
 
 ## Self-critique of the chosen values
 
