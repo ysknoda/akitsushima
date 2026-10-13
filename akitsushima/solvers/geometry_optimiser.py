@@ -8,18 +8,18 @@ Cell relaxation: the supercell matrix h and atomic positions are jointly
 optimised by treating the stress as the gradient of the enthalpy with
 respect to the strain tensor.
 """
+
 import inspect
 import os
 import warnings
 from collections import deque
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 import numpy as np
 
 from ..constants import EV_ANG3_TO_GPA
 from ..engine.cell_gradient import cell_force_from_stress
-from ..engine.neighborlist import (NeighbourList,
-                                   wrap_positions_into_cell)
+from ..engine.neighborlist import NeighbourList, wrap_positions_into_cell
 from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
@@ -40,7 +40,7 @@ def _accepts_neigh_list(fn) -> bool:
     """
     try:
         params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):       # C-implemented or unintrospectable
+    except (TypeError, ValueError):  # C-implemented or unintrospectable
         return False
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return True
@@ -142,85 +142,89 @@ class GeometryOptimiser:
     """
 
     # -- FIRE constants ------------------------------------
-    _DT_START    = 0.1    # fs  -- initial time step
-    _DT_MAX      = 1.0    # fs
-    _N_MIN       = 5      # steps before dt can grow
-    _F_INC       = 1.1
-    _F_DEC       = 0.5
+    _DT_START = 0.1  # fs  -- initial time step
+    _DT_MAX = 1.0  # fs
+    _N_MIN = 5  # steps before dt can grow
+    _F_INC = 1.1
+    _F_DEC = 0.5
     _ALPHA_START = 0.1
-    _F_ALPHA     = 0.99
+    _F_ALPHA = 0.99
     # -- common displacement limit -------------------------
-    _MAX_STEP    = 0.2    # A  -- max ionic displacement per step
+    _MAX_STEP = 0.2  # A  -- max ionic displacement per step
     # -- DIIS extrapolation-coefficient bound ----------------
     # If any Pulay coefficient exceeds this magnitude, the linear system
     # is judged too ill-conditioned to trust (signals near-collinear
     # history vectors); fall back to a steepest-descent step instead.
-    _DIIS_C_MAX  = 10.0
+    _DIIS_C_MAX = 10.0
 
-    def __init__(self,
-                 lattice         : np.ndarray,
-                 positions       : np.ndarray,
-                 atom_types      : list,
-                 # -- universal interface (A) ---------------------------
-                 force_fn        : Optional[Callable] = None,
-                 r_cut           : Optional[float] = None,
-                 # -- legacy Buckingham kwargs (B) ----------------------
-                 buck_params     : Optional[dict]  = None,
-                 charges         : Optional[dict]  = None,
-                 ewald_alpha     : Optional[float] = None,
-                 coulomb_method  : str   = "ewald",
-                 pppm_accuracy   : float = 1e-5,
-                 pppm_mesh       : Optional[int] = None,
-                 pppm_order      : int   = 6,
-                 # -- optimiser settings --------------------------------
-                 method          : str   = "fire",
-                 relax_cell      : bool  = False,
-                 # -- convergence criteria (on/off + thresholds) ---------
-                 check_forces    : bool  = True,
-                 check_stress    : Optional[bool] = None,
-                 check_energy    : bool  = False,
-                 fmax            : float = 0.01,
-                 pmax            : float = 0.1,
-                 emax            : float = 1e-6,
-                 max_steps       : int   = 2000,
-                 max_displacement: float = 0.2,
-                 save_best       : bool  = False,
-                 dt_start        : Optional[float] = None,
-                 dt_max          : Optional[float] = None,
-                 # -- cell relaxation control (relax_cell=True only) ----
-                 cell_update_scheme : str = "generalized_force",
-                 lattice_constraints : Optional[object] = None,
-                 # -- real-time output control ---------------------------
-                 flush_every_step : bool = True,
-                 fsync_every_step : bool = False,
-                 # -- L-BFGS / DIIS / RMM-DIIS history size -------------
-                 memory          : Optional[int] = None,
-                 # -- RFO-specific settings -----------------------------
-                 uphill          : bool  = False,
-                 hessian_delta   : float = 0.01,
-                 trust_radius    : float = 0.3,
-                 # -- output --------------------------------------------
-                 output_dir      : str   = ".",
-                 skin_width      : float = 0.5,
-                 verbose         : bool  = True,
-                 # -- constraints ---------------------------------------
-                 fix_atoms       : Optional[np.ndarray] = None,
-                 fix_cell        : Optional[np.ndarray] = None,
-                 fix_volume      : bool  = False,
-                 # -- timing --------------------------------------------
-                 timing          : bool  = False):
+    def __init__(
+        self,
+        lattice: np.ndarray,
+        positions: np.ndarray,
+        atom_types: list,
+        # -- universal interface (A) ---------------------------
+        force_fn: Callable | None = None,
+        r_cut: float | None = None,
+        # -- legacy Buckingham kwargs (B) ----------------------
+        buck_params: dict | None = None,
+        charges: dict | None = None,
+        ewald_alpha: float | None = None,
+        coulomb_method: str = "ewald",
+        pppm_accuracy: float = 1e-5,
+        pppm_mesh: int | None = None,
+        pppm_order: int = 6,
+        # -- optimiser settings --------------------------------
+        method: str = "fire",
+        relax_cell: bool = False,
+        # -- convergence criteria (on/off + thresholds) ---------
+        check_forces: bool = True,
+        check_stress: bool | None = None,
+        check_energy: bool = False,
+        fmax: float = 0.01,
+        pmax: float = 0.1,
+        emax: float = 1e-6,
+        max_steps: int = 2000,
+        max_displacement: float = 0.2,
+        save_best: bool = False,
+        dt_start: float | None = None,
+        dt_max: float | None = None,
+        # -- cell relaxation control (relax_cell=True only) ----
+        cell_update_scheme: str = "generalized_force",
+        lattice_constraints: object | None = None,
+        # -- real-time output control ---------------------------
+        flush_every_step: bool = True,
+        fsync_every_step: bool = False,
+        # -- L-BFGS / DIIS / RMM-DIIS history size -------------
+        memory: int | None = None,
+        # -- RFO-specific settings -----------------------------
+        uphill: bool = False,
+        hessian_delta: float = 0.01,
+        trust_radius: float = 0.3,
+        # -- output --------------------------------------------
+        output_dir: str = ".",
+        skin_width: float = 0.5,
+        verbose: bool = True,
+        # -- constraints ---------------------------------------
+        fix_atoms: np.ndarray | None = None,
+        fix_cell: np.ndarray | None = None,
+        fix_volume: bool = False,
+        # -- timing --------------------------------------------
+        timing: bool = False,
+    ):
 
-        self.lattice     = lattice.copy()
-        self.positions   = positions.copy()
-        self.atom_types  = list(atom_types)
-        self.N           = len(atom_types)
-        self.method      = method.lower()
-        self.relax_cell  = relax_cell
-        self.fix_volume  = bool(fix_volume)
+        self.lattice = lattice.copy()
+        self.positions = positions.copy()
+        self.atom_types = list(atom_types)
+        self.N = len(atom_types)
+        self.method = method.lower()
+        self.relax_cell = relax_cell
+        self.fix_volume = bool(fix_volume)
         if self.fix_volume and not relax_cell:
-            raise ValueError("GeometryOptimiser: fix_volume=True needs "
-                             "relax_cell=True (it relaxes the cell shape).")
-        self._volume0    = abs(float(np.linalg.det(self.lattice)))
+            raise ValueError(
+                "GeometryOptimiser: fix_volume=True needs "
+                "relax_cell=True (it relaxes the cell shape)."
+            )
+        self._volume0 = abs(float(np.linalg.det(self.lattice)))
         # -- Convergence criteria ------------------------------------
         # Each criterion can be independently enabled/disabled.
         # When relax_cell=True, check_stress defaults to True unless the
@@ -251,20 +255,24 @@ class GeometryOptimiser:
                 "cannot converge -- a frozen cell gives the optimiser no way "
                 "to reduce the stress. Set relax_cell=True to relax the cell, "
                 "or leave check_stress at its default (None) to check forces "
-                "only.", UserWarning, stacklevel=2)
-        self.check_stress = (relax_cell if check_stress is None
-                             else bool(check_stress))
+                "only.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self.check_stress = relax_cell if check_stress is None else bool(check_stress)
         self.check_energy = bool(check_energy)
         if not (self.check_forces or self.check_stress or self.check_energy):
-            print("  WARNING: GeometryOptimiser -- all convergence criteria "
-                  "(check_forces, check_stress, check_energy) are disabled. "
-                  "The optimiser will run for the full max_steps regardless "
-                  "of how well-converged the structure is.")
-        self.fmax        = float(fmax)
-        self.pmax        = float(pmax)     # GPa
-        self.emax        = float(emax)     # eV -- |E_new - E_prev| threshold
-        self.max_steps   = max_steps
-        self.save_best   = bool(save_best)
+            print(
+                "  WARNING: GeometryOptimiser -- all convergence criteria "
+                "(check_forces, check_stress, check_energy) are disabled. "
+                "The optimiser will run for the full max_steps regardless "
+                "of how well-converged the structure is."
+            )
+        self.fmax = float(fmax)
+        self.pmax = float(pmax)  # GPa
+        self.emax = float(emax)  # eV -- |E_new - E_prev| threshold
+        self.max_steps = max_steps
+        self.save_best = bool(save_best)
         # FIRE timestep overrides (None = use class-level defaults)
         # Stored as instance attributes so _run_fire picks them up.
         if dt_start is not None:
@@ -296,7 +304,8 @@ class GeometryOptimiser:
         if cell_update_scheme not in ("generalized_force", "vasp"):
             raise ValueError(
                 f"GeometryOptimiser: unknown cell_update_scheme "
-                f"'{cell_update_scheme}'. Choose 'generalized_force' or 'vasp'.")
+                f"'{cell_update_scheme}'. Choose 'generalized_force' or 'vasp'."
+            )
         self.cell_update_scheme = cell_update_scheme
 
         # -- Lattice component constraints (QE cell_dofree-style, but ---
@@ -344,8 +353,9 @@ class GeometryOptimiser:
         # h_new h_old^-1, is 0.0083 deg (fire), 0.0027 deg (lbfgs) and
         # 0.0061 deg (sd), so the risk was overstated as well as
         # misattributed.
-        self._lattice_constraints_mask = \
-            self._parse_lattice_constraints(lattice_constraints)
+        self._lattice_constraints_mask = self._parse_lattice_constraints(
+            lattice_constraints
+        )
 
         # -- Real-time output control -----------------------------------
         # flush_every_step=True (default): after writing each step's row
@@ -379,11 +389,11 @@ class GeometryOptimiser:
         self.fsync_every_step = bool(fsync_every_step)
 
         # Running best-energy tracker (populated during run() if save_best=True)
-        self._best_e        = float('inf')
-        self._best_pos      = None
-        self._best_lat      = None
-        self._best_step     = -1
-        self._MAX_STEP   = float(max_displacement)   # A -- overrides class default
+        self._best_e = float("inf")
+        self._best_pos = None
+        self._best_lat = None
+        self._best_step = -1
+        self._MAX_STEP = float(max_displacement)  # A -- overrides class default
         # The best history length is method-dependent, so a single shared
         # default cannot serve all three consumers.  Measured over three
         # seeds on a perturbed FCC Al supercell, steps to fmax = 1e-3:
@@ -401,16 +411,24 @@ class GeometryOptimiser:
             self.memory = 3 if self.method == "rmmdiis" else 20
         else:
             self.memory = int(memory)
-        self.uphill      = uphill
+        self.uphill = uphill
         self.hessian_delta = float(hessian_delta)
-        self.trust_radius  = float(trust_radius)
-        self.output_dir  = output_dir
-        self.verbose     = verbose
+        self.trust_radius = float(trust_radius)
+        self.output_dir = output_dir
+        self.verbose = verbose
 
         self._force_fn, r_cut = _resolve_force_fn(
-            force_fn, r_cut, buck_params, charges, ewald_alpha,
-            coulomb_method, pppm_accuracy, pppm_mesh, pppm_order,
-            "GeometryOptimiser")
+            force_fn,
+            r_cut,
+            buck_params,
+            charges,
+            ewald_alpha,
+            coulomb_method,
+            pppm_accuracy,
+            pppm_mesh,
+            pppm_order,
+            "GeometryOptimiser",
+        )
         self.r_cut = float(r_cut)
 
         # Verlet neighbour list.  This matters for more than speed:
@@ -425,13 +443,17 @@ class GeometryOptimiser:
         # (ESMCalculator is the one in this package) is driven without one:
         # it does its own spatial bookkeeping, and imposing this list's
         # precondition on it would reject cells it handles correctly.
-        self._nl = (NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
-                    if _accepts_neigh_list(self._force_fn) else None)
+        self._nl = (
+            NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
+            if _accepts_neigh_list(self._force_fn)
+            else None
+        )
 
-        if self.method not in ('fire', 'lbfgs', 'diis', 'rmmdiis', 'rfo', 'sd'):
+        if self.method not in ("fire", "lbfgs", "diis", "rmmdiis", "rfo", "sd"):
             raise ValueError(
                 f"GeometryOptimiser: unknown method '{method}'. "
-                "Choose from 'fire', 'lbfgs', 'diis', 'rmmdiis', 'rfo', 'sd'.")
+                "Choose from 'fire', 'lbfgs', 'diis', 'rmmdiis', 'rfo', 'sd'."
+            )
 
         # -- Constraint masks ----------------------------------
         #
@@ -460,8 +482,9 @@ class GeometryOptimiser:
             if fa.shape != (N, 3):
                 raise ValueError(
                     f"GeometryOptimiser: fix_atoms must have shape ({N}, 3), "
-                    f"got {fa.shape}.")
-            self._fix_ions = fa.ravel()          # (3N,) bool
+                    f"got {fa.shape}."
+                )
+            self._fix_ions = fa.ravel()  # (3N,) bool
         else:
             self._fix_ions = np.zeros(N * 3, dtype=bool)
 
@@ -470,8 +493,9 @@ class GeometryOptimiser:
             if fc.shape != (3, 3):
                 raise ValueError(
                     f"GeometryOptimiser: fix_cell must have shape (3, 3), "
-                    f"got {fc.shape}.")
-            self._fix_cell_mask = fc.ravel()     # (9,) bool
+                    f"got {fc.shape}."
+                )
+            self._fix_cell_mask = fc.ravel()  # (9,) bool
         else:
             self._fix_cell_mask = np.zeros(9, dtype=bool)
 
@@ -482,20 +506,25 @@ class GeometryOptimiser:
         # boundaries and the in-plane cell must stay rectangular, so only
         # a_x and b_y may relax.
         from ..fitting.force_fn import uses_esm
+
         if self.fix_volume and uses_esm(self._force_fn):
             raise ValueError(
                 "GeometryOptimiser: fix_volume is not available with ESM "
                 "electrostatics (the volume rescale moves Lz and the ESM "
-                "boundaries).")
+                "boundaries)."
+            )
         if self.relax_cell and uses_esm(self._force_fn):
-            free = (np.asarray(self._lattice_constraints_mask, dtype=bool)
-                    & ~self._fix_cell_mask)
+            free = (
+                np.asarray(self._lattice_constraints_mask, dtype=bool)
+                & ~self._fix_cell_mask
+            )
             if np.any(free[[1, 2, 3, 5, 6, 7, 8]]):
                 raise ValueError(
                     "GeometryOptimiser: with ESM electrostatics only a_x and b_y "
                     "may relax (Lz places the boundaries; the in-plane cell must "
                     "stay rectangular).  Set lattice_constraints: "
-                    "'1 0 0 0 1 0 0 0 0', or relax_cell: false.")
+                    "'1 0 0 0 1 0 0 0 0', or relax_cell: false."
+                )
 
         # Timing
         self._tc = TimingCollector(enabled=timing)
@@ -506,11 +535,11 @@ class GeometryOptimiser:
 
     def _get_forces_and_stress(self):
         if self._nl is None:
-            return self._force_fn(self.lattice, self.positions,
-                                  self.atom_types)
+            return self._force_fn(self.lattice, self.positions, self.atom_types)
         self._nl.check_and_rebuild(self.lattice, self.positions)
-        return self._force_fn(self.lattice, self.positions, self.atom_types,
-                              neigh_list=self._nl)
+        return self._force_fn(
+            self.lattice, self.positions, self.atom_types, neigh_list=self._nl
+        )
 
     # ------------------------------------------------------------------ #
     #  Constraint helpers                                                  #
@@ -520,7 +549,8 @@ class GeometryOptimiser:
         """Rebuild the flat free-DoF mask from fix_ions / fix_cell_mask."""
         if self.relax_cell:
             self._free_mask = np.concatenate(
-                [~self._fix_ions, ~self._fix_cell_mask])  # (3N+9,)
+                [~self._fix_ions, ~self._fix_cell_mask]
+            )  # (3N+9,)
         else:
             self._free_mask = ~self._fix_ions
 
@@ -558,7 +588,8 @@ class GeometryOptimiser:
                 "lattice_constraints must specify exactly 9 components "
                 "(a1x a1y a1z a2x a2y a2z a3x a3y a3z), "
                 "e.g. '1 0 0 0 1 0 0 0 1'; "
-                f"got {len(parts)} value(s): {lattice_constraints!r}")
+                f"got {len(parts)} value(s): {lattice_constraints!r}"
+            )
         return np.array([bool(int(v)) for v in parts], dtype=bool)
 
     def _generalised_force(self, forces, stress):
@@ -634,15 +665,16 @@ class GeometryOptimiser:
             # Apply the lattice_constraints mask directly to the 9 raw
             # components, in the same row-major order as the lattice
             # matrix itself (a1x, a1y, a1z, a2x, a2y, a2z, a3x, a3y, a3z).
-            f_cell = (f_cell_raw.ravel() * self._lattice_constraints_mask
-                     ).reshape(3, 3)
+            f_cell = (f_cell_raw.ravel() * self._lattice_constraints_mask).reshape(3, 3)
             if self.fix_volume:
                 # Remove the component along dV/dh = V h^-T (within the
                 # free components), so a step is volume-preserving to
                 # first order; _retract_volume removes the rest.
-                n = (np.linalg.inv(self.lattice).T.ravel()
-                     * self._lattice_constraints_mask
-                     * ~self._fix_cell_mask)
+                n = (
+                    np.linalg.inv(self.lattice).T.ravel()
+                    * self._lattice_constraints_mask
+                    * ~self._fix_cell_mask
+                )
                 nn = float(n @ n)
                 if nn > 0.0:
                     fc = f_cell.ravel()
@@ -666,9 +698,9 @@ class GeometryOptimiser:
         self.positions += g_disp[:n_ion].reshape(self.N, 3)
         if self.relax_cell:
             d_cell = g_disp[n_ion:].reshape(3, 3)
-            frac   = self.positions @ np.linalg.inv(self.lattice)
-            self.lattice   += d_cell
-            self.positions  = frac @ self.lattice
+            frac = self.positions @ np.linalg.inv(self.lattice)
+            self.lattice += d_cell
+            self.positions = frac @ self.lattice
             self._retract_volume()
         # Deliberately NOT wrapped.  The optimiser's state vector must
         # be a continuous function of the step it just took: `s = x_new
@@ -708,8 +740,11 @@ class GeometryOptimiser:
         """
         n_ion = self.N * 3
         d_max_ion = np.max(np.abs(step[:n_ion])) if n_ion > 0 else 0.0
-        d_max_cell = (np.max(np.abs(step[n_ion:]))
-                     if self.relax_cell and step.size > n_ion else 0.0)
+        d_max_cell = (
+            np.max(np.abs(step[n_ion:]))
+            if self.relax_cell and step.size > n_ion
+            else 0.0
+        )
         d_max = max(d_max_ion, d_max_cell)
         if d_max > self._MAX_STEP:
             step = step * (self._MAX_STEP / d_max)
@@ -718,8 +753,7 @@ class GeometryOptimiser:
     def _get_x(self) -> np.ndarray:
         """Flatten current positions (+ cell) into a 1-D vector."""
         if self.relax_cell:
-            return np.concatenate([self.positions.ravel(),
-                                   self.lattice.ravel()])
+            return np.concatenate([self.positions.ravel(), self.lattice.ravel()])
         return self.positions.ravel().copy()
 
     def _save_state(self) -> tuple:
@@ -750,7 +784,7 @@ class GeometryOptimiser:
         self.positions = x[:n_ion].reshape(self.N, 3).copy()
         if self.relax_cell:
             frac = self.positions @ np.linalg.inv(self.lattice)
-            self.lattice   = x[n_ion:].reshape(3, 3).copy()
+            self.lattice = x[n_ion:].reshape(3, 3).copy()
             self.positions = frac @ self.lattice
             self._retract_volume()
         # Not wrapped -- see _apply_generalised_displacement.
@@ -761,8 +795,9 @@ class GeometryOptimiser:
         if not self.fix_volume:
             return
         frac = self.positions @ np.linalg.inv(self.lattice)
-        self.lattice  = self.lattice * (self._volume0
-                        / abs(float(np.linalg.det(self.lattice)))) ** (1.0 / 3.0)
+        self.lattice = self.lattice * (
+            self._volume0 / abs(float(np.linalg.det(self.lattice)))
+        ) ** (1.0 / 3.0)
         self.positions = frac @ self.lattice
 
     def _checked_stress(self, stress: np.ndarray) -> np.ndarray:
@@ -786,12 +821,12 @@ class GeometryOptimiser:
         converged, n_steps.
         """
         dispatch = {
-            'fire'    : self._run_fire,
-            'lbfgs'   : self._run_lbfgs,
-            'diis'    : self._run_diis,
-            'rmmdiis' : self._run_rmmdiis,
-            'rfo'     : self._run_rfo,
-            'sd'      : self._run_sd,
+            "fire": self._run_fire,
+            "lbfgs": self._run_lbfgs,
+            "diis": self._run_diis,
+            "rmmdiis": self._run_rmmdiis,
+            "rfo": self._run_rfo,
+            "sd": self._run_sd,
         }
         self._tc.start("total")
         result = dispatch[self.method]()
@@ -817,16 +852,19 @@ class GeometryOptimiser:
         # duplicated console output rather than corruption -- but the
         # interleaving is only safe by accident, and flush_every_step
         # (the default) multiplies the traffic.
-        self._is_root = (_mpi_rank == 0)
+        self._is_root = _mpi_rank == 0
         if self.verbose and not self._is_root:
             self.verbose = False
         if self._is_root:
             os.makedirs(self.output_dir, exist_ok=True)
-        log_path = (os.path.join(self.output_dir, "relax.log")
-                    if self._is_root else os.devnull)
-        header = (f"{'Step':>6}  {'Energy(eV)':>16}  "
-                  f"{'Fmax(eV/A)':>12}  {'Pmax(GPa)':>10}  "
-                  f"{extra_col:>12}")
+        log_path = (
+            os.path.join(self.output_dir, "relax.log") if self._is_root else os.devnull
+        )
+        header = (
+            f"{'Step':>6}  {'Energy(eV)':>16}  "
+            f"{'Fmax(eV/A)':>12}  {'Pmax(GPa)':>10}  "
+            f"{extra_col:>12}"
+        )
         if self.verbose:
             print(f"\n  GeometryOptimiser [{self.method.upper()}]")
             print("\n" + header)
@@ -842,8 +880,11 @@ class GeometryOptimiser:
         #                     before the optimisation loop starts, and
         #                     each step only appends a
         #                     "Direct configuration=" block.
-        xdatcar_path = (os.path.join(self.output_dir, "XDATCAR_relax")
-                        if self._is_root else os.devnull)
+        xdatcar_path = (
+            os.path.join(self.output_dir, "XDATCAR_relax")
+            if self._is_root
+            else os.devnull
+        )
         self._xdatcar_fh = open(xdatcar_path, "w")
         self._xdatcar_frame_idx = 1
         # Bug-fix note (code-check follow-up): the S9 fix wraps every
@@ -861,8 +902,11 @@ class GeometryOptimiser:
         try:
             if not self.relax_cell:
                 _write_xdatcar_header(
-                    self._xdatcar_fh, self.lattice, self.atom_types,
-                    comment=f"akitsushima.py relax [{self.method.upper()}]")
+                    self._xdatcar_fh,
+                    self.lattice,
+                    self.atom_types,
+                    comment=f"akitsushima.py relax [{self.method.upper()}]",
+                )
             log_fh = open(log_path, "w")
         except Exception:
             self._xdatcar_fh.close()
@@ -870,26 +914,32 @@ class GeometryOptimiser:
 
         return log_fh, header, log_path
 
-    def _log_row(self, log_fh, step, e, forces, stress, extra,
-                 GPa=EV_ANG3_TO_GPA):
+    def _log_row(self, log_fh, step, e, forces, stress, extra, GPa=EV_ANG3_TO_GPA):
         fmax_val = float(np.max(np.abs(forces)))
         pmax_val = float(np.max(np.abs(self._checked_stress(stress)))) * GPa
-        row = (f"{step:6d}  {float(e):16.6f}  "
-               f"{fmax_val:12.4f}  {pmax_val:10.4f}  {str(extra):>12}")
+        row = (
+            f"{step:6d}  {float(e):16.6f}  "
+            f"{fmax_val:12.4f}  {pmax_val:10.4f}  {extra!s:>12}"
+        )
         log_fh.write(row + "\n")
         if self.verbose and step % 10 == 0:
             print("  " + row)
 
         # Append this step's configuration to XDATCAR_relax.
-        comment = (f"akitsushima.py relax [{self.method.upper()}]  "
-                  f"step={step}  E={float(e):.6f}eV  "
-                  f"Fmax={fmax_val:.4f}eV/A  Pmax={pmax_val:.4f}GPa")
+        comment = (
+            f"akitsushima.py relax [{self.method.upper()}]  "
+            f"step={step}  E={float(e):.6f}eV  "
+            f"Fmax={fmax_val:.4f}eV/A  Pmax={pmax_val:.4f}GPa"
+        )
         _write_xdatcar_frame(
             self._xdatcar_fh,
             wrap_positions_into_cell(self.positions, self.lattice),
-            self.lattice, self.atom_types,
-            self._xdatcar_frame_idx, variable_header=self.relax_cell,
-            comment=comment)
+            self.lattice,
+            self.atom_types,
+            self._xdatcar_frame_idx,
+            variable_header=self.relax_cell,
+            comment=comment,
+        )
         self._xdatcar_frame_idx += 1
 
         # Push this step's output to disk immediately so it can be
@@ -928,10 +978,14 @@ class GeometryOptimiser:
         GPa = EV_ANG3_TO_GPA
         ok_forces = (not self.check_forces) or (fmax_val < self.fmax)
         ok_stress = (not self.check_stress) or (
-            float(np.max(np.abs(self._checked_stress(stress)))) * GPa < self.pmax)
+            float(np.max(np.abs(self._checked_stress(stress)))) * GPa < self.pmax
+        )
         if self.check_energy:
-            ok_energy = (e_curr is not None and e_prev is not None
-                        and abs(float(e_curr) - float(e_prev)) < self.emax)
+            ok_energy = (
+                e_curr is not None
+                and e_prev is not None
+                and abs(float(e_curr) - float(e_prev)) < self.emax
+            )
         else:
             ok_energy = True
         return ok_forces and ok_stress and ok_energy
@@ -948,9 +1002,9 @@ class GeometryOptimiser:
         if not self.save_best:
             return
         if float(e) < self._best_e:
-            self._best_e    = float(e)
-            self._best_pos  = self.positions.copy()
-            self._best_lat  = self.lattice.copy()
+            self._best_e = float(e)
+            self._best_pos = self.positions.copy()
+            self._best_lat = self.lattice.copy()
             self._best_step = step
 
     def _finalise(self, e, forces, stress, converged, n_steps):
@@ -966,70 +1020,81 @@ class GeometryOptimiser:
         # This is what POSCAR_relaxed will contain regardless of save_best.
         final_pos = self.positions.copy()
         final_lat = self.lattice.copy()
-        e_final   = float(e)
+        e_final = float(e)
 
         # If save_best=True, write POSCAR_best with the lowest-energy
         # structure seen during the run, then restore it into
         # self.positions/self.lattice for the returned result dict.
         if self.save_best and self._best_pos is not None:
-            best_is_different = (self._best_step != n_steps - 1)
+            best_is_different = self._best_step != n_steps - 1
             if best_is_different:
                 if talk:
-                    print(f"  Best energy found at step {self._best_step}: "
-                          f"{self._best_e:.6f} eV")
-                    print(f"  (Final step energy was {e_final:.6f} eV; "
-                          f"best structure saved to POSCAR_best)")
+                    print(
+                        f"  Best energy found at step {self._best_step}: "
+                        f"{self._best_e:.6f} eV"
+                    )
+                    print(
+                        f"  (Final step energy was {e_final:.6f} eV; "
+                        f"best structure saved to POSCAR_best)"
+                    )
                 # Restore best into self for the force re-evaluation and
                 # for the returned result dict (callers receive best).
                 # NOT rank-guarded: _get_forces_and_stress is collective
                 # under MPI, so every rank must reach it.
                 self.positions = self._best_pos
-                self.lattice   = self._best_lat
+                self.lattice = self._best_lat
                 e, forces, stress = self._get_forces_and_stress()
             elif talk:
-                print(f"  Best energy coincides with final step "
-                      f"({self._best_e:.6f} eV)")
+                print(
+                    f"  Best energy coincides with final step ({self._best_e:.6f} eV)"
+                )
 
             best_out = os.path.join(self.output_dir, "POSCAR_best")
-            fa_out = (self._fix_ions.reshape(self.N, 3)
-                      if np.any(self._fix_ions) else None)
+            fa_out = (
+                self._fix_ions.reshape(self.N, 3) if np.any(self._fix_ions) else None
+            )
             if self._is_root:
-                write_poscar(best_out, self.lattice,
-                             wrap_positions_into_cell(self.positions,
-                                                      self.lattice),
-                             self.atom_types,
-                             title="Best-energy structure (akitsushima.py)",
-                             fix_atoms=fa_out)
+                write_poscar(
+                    best_out,
+                    self.lattice,
+                    wrap_positions_into_cell(self.positions, self.lattice),
+                    self.atom_types,
+                    title="Best-energy structure (akitsushima.py)",
+                    fix_atoms=fa_out,
+                )
                 if talk:
                     print(f"  Best structure written to {best_out}")
 
         # POSCAR_relaxed always contains the LAST step structure,
         # regardless of whether save_best is active.
         out = os.path.join(self.output_dir, "POSCAR_relaxed")
-        fa_out = (self._fix_ions.reshape(self.N, 3)
-                  if np.any(self._fix_ions) else None)
+        fa_out = self._fix_ions.reshape(self.N, 3) if np.any(self._fix_ions) else None
         if self._is_root:
             if talk:
                 print(f"  Final energy : {e_final:.6f} eV")
                 print(f"  Final Fmax   : {np.max(np.abs(forces)):.4f} eV/A")
-            write_poscar(out, final_lat,
-                         wrap_positions_into_cell(final_pos, final_lat),
-                         self.atom_types, title="Relaxed by akitsushima.py",
-                         fix_atoms=fa_out)
+            write_poscar(
+                out,
+                final_lat,
+                wrap_positions_into_cell(final_pos, final_lat),
+                self.atom_types,
+                title="Relaxed by akitsushima.py",
+                fix_atoms=fa_out,
+            )
             if talk:
                 print(f"  Relaxed structure written to {out}")
         return {
-            "energy"    : float(e),
-            "lattice"   : self.lattice.copy(),
-            "positions" : self.positions.copy(),
+            "energy": float(e),
+            "lattice": self.lattice.copy(),
+            "positions": self.positions.copy(),
             "atom_types": self.atom_types,
-            "forces"    : forces.copy(),
-            "converged" : converged,
-            "n_steps"   : n_steps,
-            "fix_atoms" : self._fix_ions.reshape(self.N, 3).copy(),
-            "fix_cell"  : self._fix_cell_mask.reshape(3, 3).copy(),
+            "forces": forces.copy(),
+            "converged": converged,
+            "n_steps": n_steps,
+            "fix_atoms": self._fix_ions.reshape(self.N, 3).copy(),
+            "fix_cell": self._fix_cell_mask.reshape(3, 3).copy(),
             "best_energy": self._best_e if self.save_best else None,
-            "best_step" : self._best_step if self.save_best else None,
+            "best_step": self._best_step if self.save_best else None,
         }
 
     def _run_fire(self) -> dict:
@@ -1044,9 +1109,11 @@ class GeometryOptimiser:
         try:
             log_fh.write(header + "\n")
 
-            dt = self._DT_START; alpha = self._ALPHA_START; n_pos = 0
+            dt = self._DT_START
+            alpha = self._ALPHA_START
+            n_pos = 0
             ndof = self.N * 3 + (9 if self.relax_cell else 0)
-            v    = np.zeros(ndof)
+            v = np.zeros(ndof)
 
             e, forces, stress = self._get_forces_and_stress()
             g = self._generalised_force(forces, stress)
@@ -1068,7 +1135,8 @@ class GeometryOptimiser:
                 # branch.  The log contradicted the template's own
                 # description of the decay.
                 P = np.dot(v, g)
-                g_norm = np.linalg.norm(g); v_norm = np.linalg.norm(v)
+                g_norm = np.linalg.norm(g)
+                v_norm = np.linalg.norm(v)
                 if g_norm > 1e-12:
                     v = (1.0 - alpha) * v + alpha * (v_norm / g_norm) * g
                 if P > 0.0:
@@ -1077,28 +1145,33 @@ class GeometryOptimiser:
                         dt = min(dt * self._F_INC, self._DT_MAX)
                         alpha *= self._F_ALPHA
                 else:
-                    v = np.zeros(ndof); n_pos = 0
-                    dt *= self._F_DEC; alpha = self._ALPHA_START
+                    v = np.zeros(ndof)
+                    n_pos = 0
+                    dt *= self._F_DEC
+                    alpha = self._ALPHA_START
 
-                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
-                                           f"{dt:.4f}")
-                self._tc.lap("step")   # timing
+                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress, f"{dt:.4f}")
+                self._tc.lap("step")  # timing
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
-                    converged = True; break
+                    converged = True
+                    break
                 e_prev = e
 
                 v += 0.5 * dt * g
-                raw  = dt * v
-                disp = self._clamp_step(raw)
-                # Keep the fictitious velocity consistent with the step
-                # actually taken.  When _clamp_step shortens the
-                # displacement, v used to keep its full magnitude and go
-                # on being integrated, so the FIRE dynamics carried a
-                # velocity the trajectory never had.
-                raw_max = float(np.max(np.abs(raw)))
-                if raw_max > 1e-30:
-                    v *= float(np.max(np.abs(disp))) / raw_max
+                disp = self._clamp_step(dt * v)
+                # v is NOT rescaled when _clamp_step shortens the step
+                # (as in Bitzek et al. and ASE's FIRE).  A rescale was
+                # added in fc5de00 to keep v "consistent with the step
+                # taken", but it broke FIRE's uphill test: with v shrunk
+                # by the clamp factor (0.03-0.5 on a fitted GeSn SW cell),
+                # the second half-kick below dominates, v ~ 0.5 dt g_new,
+                # and P = v . g ~ 0.5 dt |g|^2 > 0 on every step.  The
+                # reset never fired, dt sat at dt_max and the run became
+                # fixed-length (0.2 A) steepest descent: a limit cycle
+                # with Fmax 5.6 eV/A, at an energy above the start, where
+                # L-BFGS converged (tests/test_solvers.py,
+                # test_fire_variable_cell_does_not_limit_cycle).
                 self._apply_generalised_displacement(disp)
                 e, forces, stress = self._get_forces_and_stress()
                 g = self._generalised_force(forces, stress)
@@ -1128,11 +1201,11 @@ class GeometryOptimiser:
             log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
-            g = -self._generalised_force(forces, stress)   # gradient (grad E)
+            g = -self._generalised_force(forces, stress)  # gradient (grad E)
             x = self._get_x()
 
-            s_hist : deque = deque(maxlen=self.memory)
-            y_hist : deque = deque(maxlen=self.memory)
+            s_hist: deque = deque(maxlen=self.memory)
+            y_hist: deque = deque(maxlen=self.memory)
 
             converged = False
             # -1 so that _finalise(step + 1) reports 0 steps when the
@@ -1140,19 +1213,21 @@ class GeometryOptimiser:
             # at 0 and report 1 step for a run that did nothing, which
             # also fed _finalise's best_is_different comparison.
             step = -1
-            step_size_prev = 1.0   # warm-start guess, updated after each accepted step
+            step_size_prev = 1.0  # warm-start guess, updated after each accepted step
             e_prev = None
             for step in range(self.max_steps):
                 self._tc.start("step")  # timing
-                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
-                                           f"{np.linalg.norm(g):.3e}")
+                fmax_v, _ = self._log_row(
+                    log_fh, step, e, forces, stress, f"{np.linalg.norm(g):.3e}"
+                )
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
-                    self._tc.lap("step")   # timing
-                    converged = True; break
+                    self._tc.lap("step")  # timing
+                    converged = True
+                    break
                 e_prev = e
 
-                p = self._lbfgs_direction(g, s_hist, y_hist)   # H^-1 g
+                p = self._lbfgs_direction(g, s_hist, y_hist)  # H^-1 g
 
                 # Pre-scale p so that step_size=1.0 corresponds exactly to the
                 # clamped (_MAX_STEP) displacement.  Without this, _clamp_step
@@ -1191,7 +1266,9 @@ class GeometryOptimiser:
                     self._restore_state(_ls_base)
                     self._set_x(x + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
-                    if float(e_new) <= float(e) - 1e-4 * step_size * float(np.dot(g, p)):
+                    if float(e_new) <= float(e) - 1e-4 * step_size * float(
+                        np.dot(g, p)
+                    ):
                         accepted = True
                         break
                     step_size *= 0.5
@@ -1202,14 +1279,15 @@ class GeometryOptimiser:
                     e_new, f_new, st_new = self._get_forces_and_stress()
                 if accepted:
                     step_size_prev = step_size
-                self._tc.lap("step")   # timing (covers full line search)
+                self._tc.lap("step")  # timing (covers full line search)
 
                 g_new = -self._generalised_force(f_new, st_new)
                 s = self._get_x() - x
                 y = g_new - g
                 sy = float(np.dot(s, y))
                 if sy > 1e-14 * np.linalg.norm(s) * np.linalg.norm(y):
-                    s_hist.append(s.copy()); y_hist.append(y.copy())
+                    s_hist.append(s.copy())
+                    y_hist.append(y.copy())
                     # deque(maxlen=memory) auto-evicts oldest entry -- no pop(0) needed
 
                 x = self._get_x()
@@ -1222,24 +1300,23 @@ class GeometryOptimiser:
         return self._finalise(e, forces, stress, converged, step + 1)
 
     @staticmethod
-    def _lbfgs_direction(g: np.ndarray,
-                          s_hist: list, y_hist: list) -> np.ndarray:
+    def _lbfgs_direction(g: np.ndarray, s_hist: list, y_hist: list) -> np.ndarray:
         """L-BFGS two-loop recursion -> p ~= H^-1 g."""
         if not s_hist:
             return g.copy()
         m = len(s_hist)
-        rho = [1.0 / (np.dot(y, s) + 1e-30)
-               for s, y in zip(s_hist, y_hist)]
-        q = g.copy(); alpha = np.zeros(m)
+        rho = [1.0 / (np.dot(y, s) + 1e-30) for s, y in zip(s_hist, y_hist)]
+        q = g.copy()
+        alpha = np.zeros(m)
         for i in range(m - 1, -1, -1):
             alpha[i] = rho[i] * np.dot(s_hist[i], q)
-            q        -= alpha[i] * y_hist[i]
+            q -= alpha[i] * y_hist[i]
         sy = np.dot(s_hist[-1], y_hist[-1])
         yy = np.dot(y_hist[-1], y_hist[-1])
-        r  = q * (sy / yy if yy > 1e-30 else 1.0)
+        r = q * (sy / yy if yy > 1e-30 else 1.0)
         for i in range(m):
             beta = rho[i] * np.dot(y_hist[i], r)
-            r   += s_hist[i] * (alpha[i] - beta)
+            r += s_hist[i] * (alpha[i] - beta)
         return r
 
     # ------------------------------------------------------------------ #
@@ -1262,8 +1339,8 @@ class GeometryOptimiser:
             log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
-            x_buf : deque = deque(maxlen=self.memory)
-            e_buf : deque = deque(maxlen=self.memory)   # error = residual = -force
+            x_buf: deque = deque(maxlen=self.memory)
+            e_buf: deque = deque(maxlen=self.memory)  # error = residual = -force
 
             converged = False
             # -1 so that _finalise(step + 1) reports 0 steps when the
@@ -1274,17 +1351,20 @@ class GeometryOptimiser:
             e_prev = None
             for step in range(self.max_steps):
                 self._tc.start("step")  # timing
-                g     = self._generalised_force(forces, stress)
-                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
-                                           f"{len(x_buf)}")
+                g = self._generalised_force(forces, stress)
+                fmax_v, _ = self._log_row(
+                    log_fh, step, e, forces, stress, f"{len(x_buf)}"
+                )
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
-                    self._tc.lap("step")   # timing
-                    converged = True; break
+                    self._tc.lap("step")  # timing
+                    converged = True
+                    break
                 e_prev = e
 
                 x_cur = self._get_x()
-                x_buf.append(x_cur.copy()); e_buf.append(-g.copy())
+                x_buf.append(x_cur.copy())
+                e_buf.append(-g.copy())
                 # deque(maxlen) auto-evicts oldest entry
 
                 m = len(x_buf)
@@ -1295,11 +1375,13 @@ class GeometryOptimiser:
                 else:
                     # Pulay B-matrix via NumPy matrix multiply (O(m*ndof))
                     # instead of a Python double-loop (O(m^2*ndof)).
-                    E_mat = np.array(e_buf)             # (m, ndof)
-                    B     = np.zeros((m + 1, m + 1))
-                    B[:m, :m] = E_mat @ E_mat.T         # single BLAS call
-                    B[m, :m]  = 1.0; B[:m, m] = 1.0
-                    rhs   = np.zeros(m + 1); rhs[m] = 1.0
+                    E_mat = np.array(e_buf)  # (m, ndof)
+                    B = np.zeros((m + 1, m + 1))
+                    B[:m, :m] = E_mat @ E_mat.T  # single BLAS call
+                    B[m, :m] = 1.0
+                    B[:m, m] = 1.0
+                    rhs = np.zeros(m + 1)
+                    rhs[m] = 1.0
 
                     # Plain np.linalg.solve fails catastrophically when B is
                     # (near-)singular -- which happens whenever two stored
@@ -1318,15 +1400,16 @@ class GeometryOptimiser:
                     try:
                         c = np.linalg.lstsq(B, rhs, rcond=1e-10)[0]
                     except np.linalg.LinAlgError:
-                        c = np.zeros(m + 1); c[m - 1] = 1.0
+                        c = np.zeros(m + 1)
+                        c[m - 1] = 1.0
 
                     # Fix 2: reject pathological extrapolations outright.
                     use_sd_fallback = np.max(np.abs(c[:m])) > self._DIIS_C_MAX
 
                     if not use_sd_fallback:
-                        x_arr = np.array(x_buf)             # (m, ndof)
-                        x_new = c[:m] @ x_arr               # weighted sum
-                        dx    = self._clamp_step(x_new - x_cur)
+                        x_arr = np.array(x_buf)  # (m, ndof)
+                        x_new = c[:m] @ x_arr  # weighted sum
+                        dx = self._clamp_step(x_new - x_cur)
                         self._set_x(x_cur + dx)
                         e_trial, f_trial, st_trial = self._get_forces_and_stress()
 
@@ -1345,7 +1428,7 @@ class GeometryOptimiser:
                         dx = self._clamp_step(g * 0.05)
                         self._set_x(x_cur + dx)
                         e, forces, stress = self._get_forces_and_stress()
-                self._tc.lap("step")   # timing (covers trial energy evaluation)
+                self._tc.lap("step")  # timing (covers trial energy evaluation)
 
             log_fh.write(f"\nConverged: {converged}\n")
         finally:
@@ -1377,8 +1460,8 @@ class GeometryOptimiser:
             log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
-            x_buf : List[np.ndarray] = []
-            r_buf : List[np.ndarray] = []
+            x_buf: list[np.ndarray] = []
+            r_buf: list[np.ndarray] = []
 
             converged = False
             # -1 so that _finalise(step + 1) reports 0 steps when the
@@ -1387,30 +1470,33 @@ class GeometryOptimiser:
             # also fed _finalise's best_is_different comparison.
             step = -1
             e_prev = None
-            alpha_prev = 1.0   # warm-start guess, updated after each accepted step
+            alpha_prev = 1.0  # warm-start guess, updated after each accepted step
             for step in range(self.max_steps):
                 self._tc.start("step")  # timing
-                g = self._generalised_force(forces, stress)   # residual
+                g = self._generalised_force(forces, stress)  # residual
                 fmax_v, _ = self._log_row(log_fh, step, e, forces, stress, "---")
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
-                    self._tc.lap("step")   # timing
-                    converged = True; break
+                    self._tc.lap("step")  # timing
+                    converged = True
+                    break
                 e_prev = e
 
                 x_cur = self._get_x()
-                x_buf.append(x_cur.copy()); r_buf.append(g.copy())
+                x_buf.append(x_cur.copy())
+                r_buf.append(g.copy())
                 if len(x_buf) > self.memory:
-                    x_buf.pop(0); r_buf.pop(0)
+                    x_buf.pop(0)
+                    r_buf.pop(0)
 
                 m = len(r_buf)
                 if m < 2:
                     p = g.copy()
                 else:
                     # Build delta_r matrix and project r onto it
-                    dr = np.array([r_buf[i] - r_buf[i-1] for i in range(1, m)])
-                    A  = dr @ dr.T + 1e-12 * np.eye(m - 1)
-                    b  = dr @ g
+                    dr = np.array([r_buf[i] - r_buf[i - 1] for i in range(1, m)])
+                    A = dr @ dr.T + 1e-12 * np.eye(m - 1)
+                    b = dr @ g
                     try:
                         c = np.linalg.lstsq(A, b, rcond=None)[0]
                     except np.linalg.LinAlgError:
@@ -1431,7 +1517,8 @@ class GeometryOptimiser:
 
                 # Backtracking line search, warm-started from the alpha_ls
                 # that worked on the previous outer iteration.
-                alpha_ls = min(1.0, alpha_prev * 2.0); e0 = float(e)
+                alpha_ls = min(1.0, alpha_prev * 2.0)
+                e0 = float(e)
                 accepted = False
                 # Every trial starts from the SAME state.  _set_x is not
                 # a pure function of its argument under relax_cell -- it
@@ -1461,7 +1548,7 @@ class GeometryOptimiser:
                     e_new, f_new, st_new = self._get_forces_and_stress()
                 if accepted:
                     alpha_prev = alpha_ls
-                self._tc.lap("step")   # timing (covers full line search)
+                self._tc.lap("step")  # timing (covers full line search)
 
                 e, forces, stress = e_new, f_new, st_new
 
@@ -1517,16 +1604,17 @@ class GeometryOptimiser:
             log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
-            g = -self._generalised_force(forces, stress)   # gradient grad E
+            g = -self._generalised_force(forces, stress)  # gradient grad E
             x = self._get_x()
             ndof = len(g)
 
             if self.verbose:
-                print(f"  Computing initial Hessian ({2*ndof} FD evaluations) ...")
+                print(f"  Computing initial Hessian ({2 * ndof} FD evaluations) ...")
             H = self._fd_hessian(ndof)
 
             trust = self.trust_radius
-            x_prev = x.copy(); g_prev = g.copy()
+            x_prev = x.copy()
+            g_prev = g.copy()
             converged = False
             # -1 so that _finalise(step + 1) reports 0 steps when the
             # loop body never runs (max_steps = 0).  It used to start
@@ -1537,12 +1625,14 @@ class GeometryOptimiser:
 
             for step in range(self.max_steps):
                 self._tc.start("step")  # timing
-                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
-                                           f"{trust:.4f}")
-                self._tc.lap("step")   # timing
+                fmax_v, _ = self._log_row(
+                    log_fh, step, e, forces, stress, f"{trust:.4f}"
+                )
+                self._tc.lap("step")  # timing
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
-                    converged = True; break
+                    converged = True
+                    break
                 e_prev = e
 
                 # RFO or P-RFO step direction
@@ -1552,7 +1642,7 @@ class GeometryOptimiser:
                     p, _ = self._rfo_step(g, H)
 
                 # Trust-region clamp
-                p_ion_norm = np.linalg.norm(p[:self.N*3])
+                p_ion_norm = np.linalg.norm(p[: self.N * 3])
                 if p_ion_norm > trust:
                     p = p * (trust / (p_ion_norm + 1e-16))
 
@@ -1566,7 +1656,7 @@ class GeometryOptimiser:
                 g_new = -self._generalised_force(f_new, st_new)
 
                 # Trust-radius update (rho = actual / predicted energy change)
-                pred_de  = float(np.dot(g, dx) + 0.5 * float(dx @ H @ dx))
+                pred_de = float(np.dot(g, dx) + 0.5 * float(dx @ H @ dx))
                 actual_de = float(e_new) - float(e)
                 rho = actual_de / pred_de if abs(pred_de) > 1e-14 else 1.0
                 if rho > 0.75:
@@ -1600,8 +1690,13 @@ class GeometryOptimiser:
                     # all re-read; _run_rfo was the only one that did
                     # not.  Fixed-cell RFO was never affected, because
                     # with relax_cell off _set_x IS the identity.
-                    x, e, forces, stress, g = (self._get_x(), e_new,
-                                               f_new, st_new, g_new)
+                    x, e, forces, stress, g = (
+                        self._get_x(),
+                        e_new,
+                        f_new,
+                        st_new,
+                        g_new,
+                    )
                 else:
                     # Exact restore.  This used to call self._set_x(x),
                     # which is not an undo: self.lattice is the rejected
@@ -1617,11 +1712,13 @@ class GeometryOptimiser:
                     continue
 
                 # Hessian update
-                s_vec = x - x_prev; y_vec = g - g_prev
+                s_vec = x - x_prev
+                y_vec = g - g_prev
                 sy = float(np.dot(s_vec, y_vec))
                 sn = np.linalg.norm(s_vec) * np.linalg.norm(y_vec)
                 if sy > 1e-14 * sn:
-                    Hs = H @ s_vec; sHs = float(np.dot(s_vec, Hs))
+                    Hs = H @ s_vec
+                    sHs = float(np.dot(s_vec, Hs))
                     if self.uphill:
                         # SR1 (preserves negative curvature)
                         diff = y_vec - Hs
@@ -1630,8 +1727,7 @@ class GeometryOptimiser:
                             H = H + np.outer(diff, diff) / denom
                     else:
                         # Symmetric BFGS
-                        H = (H - np.outer(Hs, Hs) / sHs
-                               + np.outer(y_vec, y_vec) / sy)
+                        H = H - np.outer(Hs, Hs) / sHs + np.outer(y_vec, y_vec) / sy
 
                 x_prev, g_prev = x.copy(), g.copy()
 
@@ -1657,7 +1753,7 @@ class GeometryOptimiser:
             log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
-            g = self._generalised_force(forces, stress)   # descent direction = +g
+            g = self._generalised_force(forces, stress)  # descent direction = +g
 
             converged = False
             # -1 so that _finalise(step + 1) reports 0 steps when the
@@ -1669,12 +1765,14 @@ class GeometryOptimiser:
             e_prev = None
             for step in range(self.max_steps):
                 self._tc.start("step")  # timing
-                fmax_v, _ = self._log_row(log_fh, step, e, forces, stress,
-                                           f"{step_size_prev:.3e}")
+                fmax_v, _ = self._log_row(
+                    log_fh, step, e, forces, stress, f"{step_size_prev:.3e}"
+                )
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
-                    self._tc.lap("step")   # timing
-                    converged = True; break
+                    self._tc.lap("step")  # timing
+                    converged = True
+                    break
                 e_prev = e
 
                 x = self._get_x()
@@ -1703,7 +1801,9 @@ class GeometryOptimiser:
                     self._restore_state(_ls_base)
                     self._set_x(x + dx)
                     e_new, f_new, st_new = self._get_forces_and_stress()
-                    if float(e_new) <= float(e) - 1e-4 * step_size * float(np.dot(g, p)):
+                    if float(e_new) <= float(e) - 1e-4 * step_size * float(
+                        np.dot(g, p)
+                    ):
                         accepted = True
                         break
                     step_size *= 0.5
@@ -1714,7 +1814,7 @@ class GeometryOptimiser:
                     e_new, f_new, st_new = self._get_forces_and_stress()
                 if accepted:
                     step_size_prev = step_size
-                self._tc.lap("step")   # timing
+                self._tc.lap("step")  # timing
 
                 e, forces, stress = e_new, f_new, st_new
                 g = self._generalised_force(forces, stress)
@@ -1727,7 +1827,7 @@ class GeometryOptimiser:
 
     def _fd_hessian(self, ndof: int) -> np.ndarray:
         """Central-difference Hessian via force finite differences."""
-        delta  = self.hessian_delta
+        delta = self.hessian_delta
         x_save = self._get_x()
         # Snapshot to reset from before EVERY probe.  _set_x is not a
         # pure function of x under relax_cell (see _save_state), so
@@ -1736,14 +1836,18 @@ class GeometryOptimiser:
         # reference: 31.5% error against a Hessian that resets between
         # probes, feeding straight into the RFO/P-RFO search direction.
         state_save = self._save_state()
-        H      = np.zeros((ndof, ndof))
+        H = np.zeros((ndof, ndof))
         for j in range(ndof):
             self._restore_state(state_save)
-            xp = x_save.copy(); xp[j] += delta; self._set_x(xp)
+            xp = x_save.copy()
+            xp[j] += delta
+            self._set_x(xp)
             _, fp, sp = self._get_forces_and_stress()
             gp = -self._generalised_force(fp, sp)
             self._restore_state(state_save)
-            xm = x_save.copy(); xm[j] -= delta; self._set_x(xm)
+            xm = x_save.copy()
+            xm[j] -= delta
+            self._set_x(xm)
             _, fm, sm = self._get_forces_and_stress()
             gm = -self._generalised_force(fm, sm)
             H[:, j] = (gp - gm) / (2.0 * delta)
@@ -1797,7 +1901,9 @@ class GeometryOptimiser:
         """
         n = len(g)
         A = np.zeros((n + 1, n + 1))
-        A[:n, :n] = H; A[:n, n] = g; A[n, :n] = g
+        A[:n, :n] = H
+        A[:n, n] = g
+        A[n, :n] = g
         A = 0.5 * (A + A.T)
         eigvals, eigvecs = np.linalg.eigh(A)
 
@@ -1878,7 +1984,8 @@ class GeometryOptimiser:
         # Mode 0: RFO maximisation (follow imaginary/softest mode uphill).
         # Upper root nu_0 >= lam_0  =>  denom0 <= 0  =>  p_0 has the same
         # sign as b_0, i.e. the step ascends this mode.
-        lam0 = eigvals[0]; b0 = g_modal[0]
+        lam0 = eigvals[0]
+        b0 = g_modal[0]
         disc0 = lam0**2 + 4.0 * b0**2
         nu_0 = (lam0 + np.sqrt(disc0)) / 2.0
         denom0 = lam0 - nu_0
@@ -1888,7 +1995,8 @@ class GeometryOptimiser:
         # Lower root nu_k <= lam_k  =>  denom_k >= 0  =>  p_k has the
         # opposite sign to b_k, i.e. the step descends these modes.
         for k in range(1, n):
-            lk = eigvals[k]; bk = g_modal[k]
+            lk = eigvals[k]
+            bk = g_modal[k]
             disc_k = lk**2 + 4.0 * bk**2
             nu_k = (lk - np.sqrt(disc_k)) / 2.0
             denom_k = lk - nu_k

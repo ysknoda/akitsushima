@@ -2348,3 +2348,35 @@ def test_fix_volume_refusals():
     with pytest.raises(ValueError, match="fix_volume"):
         GeometryOptimiser(lat, pos, types, force_fn=esm, relax_cell=True,
                           fix_volume=True)
+
+
+def test_fire_variable_cell_does_not_limit_cycle(tmp_path):
+    """FIRE + relax_cell on a 63-atom GeSn vacancy cell with a fitted SW
+    (tests/data/fire_gesn, from the ADR-0021 GeSn CLI test).  FIRE used to
+    rescale v by the clamp factor whenever _clamp_step shortened a step;
+    the following half-kick then dominated v, P = v.g stayed > 0, the
+    reset never fired and the run settled into a limit cycle (1000 steps,
+    Fmax 5.6 eV/A, E = -244.55 eV, above the start) while L-BFGS converged.
+    """
+    import os
+
+    import yaml
+
+    from akitsushima.cli.common import _cli_force_fn
+    from akitsushima.io import parse_poscar
+
+    d = os.path.join(os.path.dirname(__file__), "data", "fire_gesn")
+    p = parse_poscar(os.path.join(d, "POSCAR"))
+    fn, rc = _cli_force_fn(yaml.safe_load(open(os.path.join(d, "potential.yaml"))),
+                           "test")
+    common = dict(force_fn=fn, r_cut=rc, relax_cell=True, fmax=0.01, pmax=0.1,
+                  max_steps=1000, verbose=False, output_dir=str(tmp_path))
+    e0 = fn(p["lattice"], p["positions"], p["atom_types"])[0]
+    fire = GeometryOptimiser(p["lattice"], p["positions"], p["atom_types"],
+                             method="fire", **common).run()
+    lbfgs = GeometryOptimiser(p["lattice"], p["positions"], p["atom_types"],
+                              method="lbfgs", **common).run()
+    assert lbfgs["converged"]
+    assert fire["converged"], f"FIRE did not converge in {fire['n_steps']} steps"
+    assert fire["energy"] < e0
+    assert abs(fire["energy"] - lbfgs["energy"]) < 0.1   # -251.67 vs -251.63 eV

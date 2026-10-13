@@ -113,8 +113,14 @@ calculations are PBEsol without SOC.
   table to columns with std > 1e-4, with z-score plus reg_search for ELM
   and QELM, gives test F of 0.17-0.23 eV/A (mlip/ext_sweep).
 - relax with FIRE and relax_cell falls into limit cycles on this data,
-  while L-BFGS converges on the same input.  L-BFGS is the judged run, and
-  the FIRE fault was handed off as a separate task.  With L-BFGS, 117/190
+  while L-BFGS converges on the same input.  L-BFGS is the judged run.
+  The FIRE fault was fixed on 2026-10-14.  The cause: FIRE rescaled v by
+  the clamp factor whenever _clamp_step shortened a step.  The half-kick
+  that followed then dominated v, so P = v.g stayed positive, the reset
+  never fired, and the run became fixed-length steepest descent.  After
+  the fix, the FIRE relaxations number 54 not converged before / 13 after,
+  28 crashed before / 17 after, and 135 passing before / 138 after; L-BFGS
+  has 117 passing.  With L-BFGS, 117/190
   test relaxations are within 5 % of the DFT final volume.  Most failures
   are MLIP collapse under extrapolation: the energy runs away and the cell
   shrinks until the minimum-image guard stops the run.  The training data
