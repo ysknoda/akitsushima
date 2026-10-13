@@ -675,13 +675,19 @@ def build_table(
 def write_table_csv(
     path, targets, labels, weights, X, columns: Sequence[str] | None = None
 ) -> None:
-    """Write a table in the load_mlip_csv layout."""
+    """Write a table in the load_mlip_csv layout.
+
+    17 significant digits: float64 values read back bit for bit.  With 12
+    (the former format) an ELM retrained from the table differed by up to
+    2e-4 in its predictions on the GeSn data (rounding of 5e-12 amplified
+    by the ill-conditioned solve), so the written table did not reproduce
+    the model it came from."""
     names = (
         list(columns) if columns is not None else [f"f{j}" for j in range(X.shape[1])]
     )
     with open(path, "w") as fh:
         fh.write("target,label,weight," + ",".join(names) + "\n")
         fh.writelines(
-            f"{y:.12g},{l},{w:.12g}," + ",".join(f"{v:.12g}" for v in x) + "\n"
+            f"{y:.17g},{l},{w:.17g}," + ",".join(f"{v:.17g}" for v in x) + "\n"
             for y, l, w, x in zip(targets, labels, weights, X)
         )

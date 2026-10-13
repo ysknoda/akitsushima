@@ -860,3 +860,17 @@ def test_written_descriptor_tables_retrain_to_the_same_model(model, tmp_path,
                                  verbose=False)
     pa, pb = ma.predict_table(lab, X), mb.predict_table(lab, X)
     assert np.max(np.abs(pa - pb)) < 1e-8
+
+
+def test_write_table_csv_round_trips_bit_for_bit(tmp_path):
+    from akitsushima.fitting.descriptors import write_table_csv
+    from akitsushima.fitting.models.csv_io import load_mlip_csv
+
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(7, 4)) * 10.0 ** rng.integers(-12, 4, size=(7, 4))
+    y, w = rng.normal(size=7), rng.uniform(0.1, 70.0, size=7)
+    lab = np.array(["E"] + ["F"] * 6)
+    write_table_csv(tmp_path / "t.csv", y, lab, w, X)
+    y2, lab2, w2, X2 = load_mlip_csv(str(tmp_path / "t.csv"), verbose=False)
+    assert np.array_equal(y2, y) and np.array_equal(w2, w) and np.array_equal(X2, X)
+    assert list(lab2) == list(lab)

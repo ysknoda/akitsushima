@@ -70,3 +70,60 @@ tests/test_vasp_dataset.py covers four things:
 
 The `--dump-default dataset` template runs as shipped
 (tests/test_cli_templates.py).
+
+## CLI test on the GeSn data (2026-10-13)
+
+Runner: example/GeSn/run_cli_tests.py.  The ledger is runs/ledger.jsonl
+(example/ is not tracked).
+
+**Stages that passed**
+- dataset: 3/3.  405 structures, 40/10 runs; the fit and mlip copies are
+  byte-identical.
+- fit: SW and Tersoff both pass, loss below the initial one.
+  - SW: test RMSE E 13 meV/atom, F 0.32 eV/A.
+  - Tersoff: test RMSE E 5.8 meV/atom, F 0.20 eV/A.
+- mlip: 23/23.  ACSF tabular and atom-centred models, the physics options
+  and the write_table round trip all pass.  The external-descriptor cases
+  pass after the fixes below.  Test RMSE: E 0.5-3.8 meV/atom, F 0.06-0.23
+  eV/A.
+
+**References.**  VASP references are in example/GeSn/vasp_ref.
+E_coh is Ge 4.13 and Sn 3.59 eV/atom against 3.85 / 3.14 measured; the
+calculations are PBEsol without SOC.
+
+**Findings and fixes**
+- `write_table_csv` now writes 17 significant digits.  With 12 digits an
+  ELM retrained from the written table differed by up to 2e-4 in its
+  predictions: rounding of 5e-12 was amplified by the ill-conditioned
+  solve.  Bit-for-bit round trip is now tested.
+- `write_table` also writes `descriptor_table_test.csv`.
+- Outside this package, atomic_descriptor_ver2.0.0.py had three problems:
+  - Its OUTCAR energy-line rule also matched VASP 6's per-SCF lines.  The
+    ionic-step line is now recognised by "entropy=".
+  - It wrote weights F -> 1 and S -> V, where `load_mlip_csv` reads r0 and
+    eps0*V, so stress rows were 1e4 times too heavy.  It now writes r0 and
+    eps0*V.
+  - Stale numba caches in its __pycache__ made every batch directory fail
+    with "No module named '<dynamic>'".
+- External descriptors.  Of the 5006 columns, only about 190 vary over the
+  training E rows.  ADF1/2 and ODF1/2 are constant: the ADF/ODF subtypes
+  use the central atom's per-element rc1 (1.5 A for Ge), whereas RDF and
+  CN use the pair sum.  Z-scoring or whitening the near-constant columns
+  made ELM, QELM and NN blow up, with test F of 12-26 eV/A.  Cutting the
+  table to columns with std > 1e-4, with z-score plus reg_search for ELM
+  and QELM, gives test F of 0.17-0.23 eV/A (mlip/ext_sweep).
+- relax with FIRE and relax_cell falls into limit cycles on this data,
+  while L-BFGS converges on the same input.  L-BFGS is the judged run, and
+  the FIRE fault was handed off as a separate task.  With L-BFGS, 117/190
+  test relaxations are within 5 % of the DFT final volume.  Most failures
+  are MLIP collapse under extrapolation: the energy runs away and the cell
+  shrinks until the minimum-image guard stops the run.  The training data
+  hold near-equilibrium vacancy cells only.  Atom-centred ELM with
+  isolated_atom_energy passed 9/10, against 2/10 without it.
+- Stress (example/GeSn/stress_check.py, test set, DFT std 2.79 GPa):
+  - ACSF MLIPs: RMSE 0.17-0.35 GPa, R^2 0.985-0.996.
+  - External-descriptor models: 0.26-0.42 GPa.
+  - SW: 0.91 GPa, R^2 0.89.
+  - Tersoff: 1.33 GPa, R^2 0.77, with a systematic negative offset of
+    about 2 GPa on the diagonal.  This matches its 3-8 % volume shrinkage
+    in relax.
