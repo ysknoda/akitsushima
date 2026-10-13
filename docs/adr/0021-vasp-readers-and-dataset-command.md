@@ -113,8 +113,9 @@ calculations are PBEsol without SOC.
   table to columns with std > 1e-4, with z-score plus reg_search for ELM
   and QELM, gives test F of 0.17-0.23 eV/A (mlip/ext_sweep).
 - relax with FIRE and relax_cell falls into limit cycles on this data,
-  while L-BFGS converges on the same input.  L-BFGS is the judged run.
-  The FIRE fault was fixed on 2026-10-14.  The cause: FIRE rescaled v by
+  while L-BFGS converges on the same input.  L-BFGS was the judged run
+  until the FIRE fault was fixed on 2026-10-14; since then the fixed FIRE,
+  relax's default, is the judged run again (user decision, 2026-10-14).  The cause: FIRE rescaled v by
   the clamp factor whenever _clamp_step shortened a step.  The half-kick
   that followed then dominated v, so P = v.g stayed positive, the reset
   never fired, and the run became fixed-length steepest descent.  After

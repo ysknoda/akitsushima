@@ -45,7 +45,12 @@
 > species / region decomposition of the Green-Kubo kappa (ADR-0020).
 > 0.2.0a11 adds VASP readers (vasprun.xml / OUTCAR, every ionic step) and
 > the `dataset` command, which turns VASP runs into a `fit` / `mlip`
-> training set split by run (ADR-0021).
+> training set split by run (ADR-0021). It also changes `relax` with FIRE,
+> the default method. FIRE no longer shrinks its velocity when a step is
+> clamped: that had defeated its uphill reset and trapped variable-cell
+> runs in limit cycles. Runs whose steps are never clamped are unchanged.
+> `write_table` now writes 17 significant digits plus a test-set table,
+> and numba no longer aborts when torch is imported first.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
