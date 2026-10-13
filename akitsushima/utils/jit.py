@@ -11,8 +11,9 @@ Activation
 ----------
 The JIT kernels are used automatically whenever numba is importable.
 Set ``NUMBA_ENABLE=0`` to force the NumPy path -- for a like-for-like
-comparison, or to sidestep the macOS duplicate-OpenMP conflict between
-numba and pip's torch wheel (see the README).  ``use_numba=True`` on a
+comparison.  (The duplicate-OpenMP conflict with torch, for which this was
+once the suggested way out, is handled below: "OpenMP and torch".)
+``use_numba=True`` on a
 potential's ``compute()`` still forces the JIT path regardless, and the
 legacy alias ``BUCKINGHAM_NUMBA=1`` is still accepted.
 
@@ -26,8 +27,25 @@ in tests/test_engine_forces.py and tests/test_neighborlist.py.
 
 Thread count for ``parallel=True`` kernels is controlled by the
 ``NUMBA_NUM_THREADS`` environment variable (numba's own convention).
+
+OpenMP and torch
+----------------
+numba's default threading layer is ``omp``, and torch ships its own copy
+of ``libomp``.  When torch's copy is initialised first, the first numba
+``parallel=True`` kernel aborts the process ("OMP: Error #15: Initializing
+libomp.dylib, but found libomp.dylib already initialized", then a bare
+"Fatal Python error: Aborted"); the other way round both work.  Which came
+first used to depend on the order of the caller's imports and calls -- in
+the test suite, on the order of the test files.  So this module starts
+numba's threading layer as soon as it is imported (a tiny cached kernel,
+~0.2 s), and every torch import in the package goes through
+utils/optional_torch.py, which imports this module first.  If torch was
+already imported before akitsushima (by the caller), the ``workqueue``
+layer is selected instead, which loads no OpenMP runtime.  An explicit
+``NUMBA_THREADING_LAYER`` is always respected.
 """
 import os
+import sys
 
 try:
     import numba as _numba
@@ -55,3 +73,29 @@ else:
         return fn
 
     _numba_par = _numba_njit
+
+
+if _HAS_NUMBA:
+    @_numba.njit(cache=True, parallel=True)
+    def _warm_threading_layer(n):
+        s = 0
+        for i in _numba.prange(n):
+            s += i
+        return s
+
+
+def _start_threading_layer() -> None:
+    """Launch numba's threading layer now (see the module docstring)."""
+    if not _HAS_NUMBA:
+        return
+    if "torch" in sys.modules and not os.environ.get("NUMBA_THREADING_LAYER"):
+        # torch's libomp is (or may already be) initialised: numba's omp
+        # layer would abort on its first launch.
+        _numba.config.THREADING_LAYER = "workqueue"
+    try:
+        _warm_threading_layer(2)
+    except Exception:  # pragma: no cover - leave the error to the first real kernel
+        pass
+
+
+_start_threading_layer()

@@ -617,16 +617,18 @@ pytest tests/
 that results agree across rank counts; it is skipped automatically if
 `mpirun` or `mpi4py` is not available.
 
-On macOS, a pure-pip environment with both `[numba]` and `[torch]`
-installed can abort at import time (`Fatal Python error: Aborted`):
-numba and pip's torch wheel each bundle their own OpenMP runtime, and
-loading both into one process is not supported. This is an ecosystem
-packaging conflict, not an akitsushima bug -- it does not occur under
-conda, which coordinates a single shared `libomp`. Work around it with:
-
-```bash
-KMP_DUPLICATE_LIB_OK=TRUE OMP_NUM_THREADS=1 pytest tests/
-```
+torch ships its own OpenMP runtime (`libomp`), and so does numba's
+default `omp` threading layer. When torch's copy is initialised first,
+the first numba `parallel=True` kernel aborts the process with
+`OMP: Error #15` and then `Fatal Python error: Aborted`. This was
+observed on macOS, also under miniconda with pip's torch wheel. The
+reverse order works. Since 0.2.0a11, akitsushima starts numba's
+threading layer when it is imported, and every torch import inside the
+package happens after that. If torch was imported before akitsushima,
+the `workqueue` layer is chosen instead, which loads no OpenMP. So the
+order of imports, and of test files, no longer matters
+(tests/test_openmp_order.py). An explicit `NUMBA_THREADING_LAYER` is
+respected.
 
 ## License
 
