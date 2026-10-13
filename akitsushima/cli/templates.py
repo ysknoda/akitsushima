@@ -30,6 +30,7 @@ __all__ = [
     "_YAML_DIELECTRIC_DEFAULT",
     "_YAML_PIEZO_DEFAULT",
     "_YAML_NEMD_DEFAULT",
+    "_YAML_ANNEAL_DEFAULT",
     "_DUMP_MAP",
 ]
 
@@ -1102,6 +1103,91 @@ piezo:
   relax: {method: fire, fmax: 1.0e-5, max_steps: 10000}
 """
 
+_YAML_ANNEAL_DEFAULT = """\
+# akitsushima anneal -- global structure search (ADR-0022)
+# Usage: akitsushima anneal anneal.yaml
+#
+# Cycle 0 relaxes the input (the relax-only reference).  Then:
+#   md_quench     : one continuous MD run from that relaxed structure, cut
+#                   into chunks of quench_every steps; a copy of the
+#                   structure is relaxed after every chunk.  The target
+#                   temperature follows `schedule`, one value per segment.
+#   basin_hopping : random displacement -> relax -> Metropolis on the
+#                   relaxed energy (enthalpy when pressure != 0).
+# Every cycle is logged to anneal_log.jsonl and checkpointed; set
+# restart: true to continue an interrupted run.  Distinct minima go to
+# POSCAR_rank01.. and minima.csv, the lowest to POSCAR_best.
+
+structure:
+  poscar: POSCAR
+
+potential:
+  type: SW
+  species: [Si]
+  params:                          # Stillinger-Weber Si (Stillinger & Weber 1985)
+    epsilon: 2.1682
+    sigma:   2.0951
+    A:       7.049556
+    B:       0.6022246
+    p:       4
+    q:       0
+    a:       1.80
+    lambda:  21.0
+    gamma:   1.20
+    costheta0: -0.333333
+
+anneal:
+  method:     md_quench            # md_quench | basin_hopping
+  output_dir: ./anneal_output
+  seed:       42
+  pressure:   0.0                  # GPa: NPT target and H = E + PV in every quench
+  restart:    false
+  max_consecutive_failures: 5      # stop after this many failed cycles in a row
+  min_energy_per_atom: null        # eV/atom; lower = failed (MLIP collapse guard)
+  keep_best:  10                   # distinct minima written as POSCAR_rankNN
+  dedup_energy: 1.0e-4             # eV/atom  } same minimum when both
+  dedup_volume: 1.0e-3             # relative } differences are this small
+
+  # -- md_quench -----------------------------------------------------
+  # 1500 K is below the melting point of SW silicon (1691 K, Broughton &
+  # Li, PRB 35, 9120 (1987)): the crystal anneals instead of melting.
+  schedule:
+    type:       geometric          # constant | linear | geometric | list
+    n_segments: 8
+    T_start:    1500.0             # K
+    T_end:      300.0              # K
+    # temperatures: [1500, 1200, 900, 600, 300]   # for type: list
+  segment_steps: 2000              # MD steps per segment
+  quench_every:  500               # MD steps between quenches
+  md:
+    ensemble:     nvt              # nvt | npt (npt uses `pressure`)
+    timestep:     1.0              # fs
+    tau_nhc:      20.0             # fs
+    tau_baro:     1000.0           # fs (npt)
+    traj_every:   50
+    thermo_every: 50
+    skin_width:   0.5
+
+  # -- basin_hopping -------------------------------------------------
+  basin_hopping:
+    n_trials:          100
+    temperature:       1000.0      # K, Metropolis on the relaxed energy
+    step:              0.3         # A, radius of the per-atom displacement
+    cell_step:         0.02        # max symmetric strain (relax_cell only)
+    adapt_every:       10          # trials between step updates
+    adapt_factor:      0.9         # step *= 0.9 below target, /= 0.9 above
+    target_acceptance: 0.5
+
+  # -- every quench (same keys as the relax command) -------------------
+  relax:
+    method:     fire               # fire | lbfgs | sd | diis | rmmdiis | rfo
+    relax_cell: false
+    fmax:       0.05               # eV/A
+    pmax:       0.1                # GPa (relax_cell)
+    max_steps:  2000
+    max_displacement: 0.2          # A
+"""
+
 _YAML_DATASET_DEFAULT = """\
 # akitsushima dataset -- fit / mlip training set from VASP runs (ADR-0021)
 #
@@ -1149,6 +1235,7 @@ _DUMP_MAP = {
     "nemd":   _YAML_NEMD_DEFAULT,
     "mlip":   _YAML_ELM_DEFAULT,
     "dataset": _YAML_DATASET_DEFAULT,
+    "anneal": _YAML_ANNEAL_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).
 }

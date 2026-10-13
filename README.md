@@ -51,6 +51,10 @@
 > runs in limit cycles. Runs whose steps are never clamped are unchanged.
 > `write_table` now writes 17 significant digits plus a test-set table,
 > and numba no longer aborts when torch is imported first.
+> 0.2.0a12 adds the `anneal` command (ADR-0022): MD-quench annealing on a
+> temperature schedule, or basin hopping, with every quench a `relax`,
+> optional pressure (enthalpy), checkpoint / restart and a list of
+> distinct minima. `md`'s NVT / NPT classes take `initial_velocities`.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -121,6 +125,7 @@ O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 | `fit`   | Fit classical or ML potential parameters against DFT reference data (POSCAR geometry + CSV energy/force/stress). |
 | `relax` | Geometry optimisation: FIRE, L-BFGS, DIIS, RMM-DIIS, RFO — ionic or variable-cell, with transition-state refinement. |
 | `md`    | Molecular dynamics: NVE, NVT (Nosé-Hoover chain), NPT. |
+| `anneal` | Global structure search: MD-quench annealing on a temperature schedule, or basin hopping (ADR-0022). |
 | `gcmc` / `osmc` | Grand-canonical (μVT) MC/MD: discrete insertion/deletion (`gcmc`) or a continuous fractional atom, CFCMC (`osmc`, ADR-0009). |
 | `elastic` | Elastic tensor (clamped- and relaxed-ion), B / G / E / ν as Voigt, Reuss and Hill averages, Born stability, sound velocities, Debye temperature, internal strain (ADR-0017). |
 
@@ -215,6 +220,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 |---|---|
 | `relax`  | Geometry optimisation (FIRE / L-BFGS / DIIS / RMM-DIIS / RFO) |
 | `md`     | Molecular dynamics (NVT / NVE / NPT) |
+| `anneal` | MD-quench annealing or basin hopping; distinct minima, restartable |
 | `gcmc`   | Grand-canonical Monte Carlo MD (μVT) |
 | `neb`    | Climbing-image NEB transition-state search |
 | `tsa`    | Transition-state analysis (Hessian / IRC / TST rate) |
@@ -317,6 +323,34 @@ for bit.
 `kappa.decompose: {species: true, regions: {axis: c, bounds: [0, 0.5, 1]}}`
 splits the Green-Kubo tensor into kappa_g = (V/k_B T^2) int <J_g(0) J(t)>,
 which add up to kappa exactly.
+
+### Global structure search (ADR-0022)
+
+`akitsushima anneal anneal.yaml` (template: `--dump-default anneal`).
+Cycle 0 relaxes the input, which is the relax-only reference. Then:
+
+- `method: md_quench` runs one continuous NVT or NPT trajectory from that
+  relaxed structure. The trajectory follows a temperature schedule
+  (constant, linear, geometric or a list), and a copy of the structure
+  is relaxed every `quench_every` steps.
+- `method: basin_hopping` (Wales & Doye 1997) displaces every atom
+  inside a sphere and, with `relax_cell`, strains the cell. It relaxes
+  the trial and accepts it by the Metropolis rule on the relaxed energy.
+  The step adapts towards 50 % acceptance.
+
+The `anneal.relax` and `anneal.md` blocks take the `relax` and `md` key
+names. With `pressure` set, every quench minimises H = E + PV.
+
+A cycle fails when the solver raises, the energy is not finite, or the
+energy drops below `min_energy_per_atom`, which guards against an MLIP
+that collapses under extrapolation. A failed cycle is logged and
+skipped, and `max_consecutive_failures` failures in a row stop the run.
+
+Every cycle is appended to `anneal_log.jsonl` and checkpointed, so
+`restart: true` continues an interrupted run and reproduces the
+uninterrupted one. Distinct minima go to `POSCAR_rank01..` and
+`minima.csv`, the lowest to `POSCAR_best`, and the history to
+`anneal.png`.
 
 ### Fitting a classical potential
 

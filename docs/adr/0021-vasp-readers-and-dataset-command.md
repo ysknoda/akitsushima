@@ -134,3 +134,43 @@ calculations are PBEsol without SOC.
   - Tersoff: 1.33 GPa, R^2 0.77, with a systematic negative offset of
     about 2 GPa on the diagonal.  This matches its 3-8 % volume shrinkage
     in relax.
+
+## Addendum (2026-10-14): atomic_descriptor ver2.1.0
+
+The ADF / ODF cutoff inconsistency above was fixed in a new file,
+atomic_descriptor_ver2.1.0.py. ver2.0.0 is kept, and the directory is
+now a git repository.
+
+**The fix**
+- Each leg B-X of a triplet uses the pair cutoffs
+  rc_pair(B, X) = rc[B] + rc[X] for the subtype and for fc, as RDF, CN
+  and the dihedral already did.
+- The ODF bin ranges use the largest pair cutoff of the central species.
+
+**Tests (93 pass)**
+- A two-species cluster with every subtype and angle worked out by
+  hand.
+- Finite differences of F and S with unequal leg cutoffs.
+- The numba kernels against the Python fallback.
+- Diamond Ge with the GeSn config: ADF1 at 109.47 deg and ODF1 at
+  d2 = 4.03 A.
+
+**GeSn rerun (mlip/extdesc_v21, same std > 1e-4 reduction)**
+- Columns: 6518, of which 1801 vary (ver2.0.0: 5006 and about 190).
+- Test RMSE, ver2.0.0 -> ver2.1.0 (E in meV/atom, F in eV/A, stress in
+  GPa):
+
+  | model | E | F | stress |
+  |---|---|---|---|
+  | ridge | 2.6 -> 0.9 | 0.228 -> 0.093 | 0.42 -> 0.20 |
+  | ELM | 1.5 -> 0.9 | 0.179 -> 0.151 | 0.31 -> 0.26 |
+  | QELM | 1.4 -> 1.0 | 0.172 -> 0.156 | 0.29 -> 0.26 |
+
+- The NN, which passed on ver2.0.0 (test F 0.19 eV/A), fails on the
+  ver2.1.0 table: test F is 3-6 eV/A. Learning rate 1e-4, z-scoring and
+  weight decay up to 1e-2 were tried (mlip/ext_sweep v21_*).
+- The cause is extrapolation in sparse three-body columns. The Sn-Sn-Sn
+  ADF1 / ODF bins exist only in Sn-rich cells. On the test E rows they
+  reach |z| = 20, against 6 on the training rows.
+- The regularised linear and ELM models tolerate these columns; the
+  unregularised network does not.

@@ -44,6 +44,7 @@ _COMMAND = {
     "nemd": "nemd",
     "mlip": "mlip",
     "dataset": "dataset",
+    "anneal": "anneal",
 }
 
 # Only step/cycle counts are overridden (section -> {key: value}).
@@ -68,6 +69,9 @@ _SHRINK = {
     "nemd": {"nemd": {"equil_steps": 20, "n_steps": 120}},
     "mlip": {},
     "dataset": {},
+    "anneal": {"anneal": {"segment_steps": 20, "quench_every": 10,
+                          "schedule": {"n_segments": 2},
+                          "md": {"traj_every": 5, "thermo_every": 5}}},
 }
 
 
@@ -202,6 +206,8 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         write_mgo(tmp_path, n=1 if key == "dielectric" else 3)
     elif key == "mlip":
         _write_mlip_csv(tmp_path / st["training_csv"])
+    elif key == "anneal":
+        _write_si(tmp_path / st["poscar"], jitter=0.05)
     elif key == "dataset":
         from vasp_synth import make_frames, write_run
         for r in range(5):

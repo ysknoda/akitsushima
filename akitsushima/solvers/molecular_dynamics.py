@@ -147,6 +147,20 @@ class _BaseMDSimulation:
         return v
 
     # ------------------------------------------------------------------ #
+    def _initial_or_mb(self, initial_velocities, draw) -> np.ndarray:
+        """Velocities to start from: a copy of ``initial_velocities``
+        (A/fs, shape (N, 3)) when given, so a run can continue another
+        one's trajectory (the ``anneal`` command chains segments this way,
+        ADR-0022); otherwise ``draw()``, the Maxwell-Boltzmann draw."""
+        if initial_velocities is None:
+            return draw()
+        v = np.array(initial_velocities, dtype=float)
+        if v.shape != (self.N, 3) or not np.all(np.isfinite(v)):
+            raise ValueError(
+                f"{self.__class__.__name__}: initial_velocities must be a finite "
+                f"({self.N}, 3) array, got shape {v.shape}")
+        return v
+
     @staticmethod
     def _kinetic_energy(velocities : np.ndarray,
                         masses     : np.ndarray,
@@ -421,6 +435,9 @@ class NVTSimulation(_BaseMDSimulation):
     thermo_every : thermo log output interval [steps].
     skin_width   : Verlet skin width [A] for neighbour-list lazy rebuild.
     seed         : RNG seed for initial velocity generation.
+    initial_velocities : (N, 3) A/fs to start from instead of a
+                   Maxwell-Boltzmann draw (continuing a trajectory).
+    save_plots   : write md_timeseries plots at the end (default True).
 
     Output files
     ------------
@@ -461,7 +478,10 @@ class NVTSimulation(_BaseMDSimulation):
                  timing          : bool  = False,
                  velocity_rescale_steps : int  = 0,
                  flush_every_step : bool = True,
-                 fsync_every_step : bool = False):
+                 fsync_every_step : bool = False,
+                 initial_velocities : Optional[np.ndarray] = None,
+                 save_plots     : bool = True):
+        self.save_plots     = bool(save_plots)
         self.lattice        = lattice.copy()
         self.positions      = positions.copy()
         self.atom_types     = list(atom_types)
@@ -505,7 +525,8 @@ class NVTSimulation(_BaseMDSimulation):
         self.masses = self._build_masses(atom_types, masses)
         self._warn_if_timestep_too_large_for_masses()
 
-        self.velocities     = self._init_velocities()
+        self.velocities     = self._initial_or_mb(initial_velocities,
+                                              self._init_velocities)
         self._fix_mask = self._build_fix_mask(
             self.N, fix_atoms, self.__class__.__name__)
         self.velocities[self._fix_mask] = 0.0
@@ -785,7 +806,8 @@ class NVTSimulation(_BaseMDSimulation):
             print(f"  Final POSCAR: {out_poscar}")
 
         # ---- Optional plots --------------------------------------------
-        if HAS_MATPLOTLIB and len(self._thermo_log) > 1 and _mpi_rank == 0:
+        if (self.save_plots and HAS_MATPLOTLIB and len(self._thermo_log) > 1
+                and _mpi_rank == 0):
             self._save_md_plots()
 
         self._tc.stop("total")  # timing
@@ -1262,6 +1284,9 @@ class NPTSimulation(_BaseMDSimulation):
     thermo_every : log interval [steps].
     skin_width   : Verlet skin [A].
     seed         : RNG seed.
+    initial_velocities : (N, 3) A/fs to start from instead of a
+                   Maxwell-Boltzmann draw (continuing a trajectory).
+    save_plots   : write the time-series plot at the end (default True).
 
     Output files
     ------------
@@ -1309,7 +1334,9 @@ class NPTSimulation(_BaseMDSimulation):
                  timing         : bool  = False,
                  velocity_rescale_steps : int = 0,
                  flush_every_step : bool = True,
-                 fsync_every_step : bool = False):
+                 fsync_every_step : bool = False,
+                 initial_velocities : Optional[np.ndarray] = None,
+                 save_plots     : bool = True):
         from ..fitting.force_fn import check_esm_for_solver
         check_esm_for_solver(
             force_fn, "NPTSimulation",
@@ -1319,6 +1346,7 @@ class NPTSimulation(_BaseMDSimulation):
         self.flush_every_step = bool(flush_every_step)
         self.fsync_every_step = bool(fsync_every_step)
         self.velocity_rescale_steps = int(velocity_rescale_steps)
+        self.save_plots   = bool(save_plots)
         self.lattice      = lattice.copy()
         self.positions    = positions.copy()
         self.atom_types   = list(atom_types)
@@ -1362,7 +1390,8 @@ class NPTSimulation(_BaseMDSimulation):
         self.masses = self._build_masses(atom_types, masses)
         self._warn_if_timestep_too_large_for_masses()
 
-        self.velocities = self._init_velocities(temperature)
+        self.velocities = self._initial_or_mb(
+            initial_velocities, lambda: self._init_velocities(temperature))
         # -- fix_atoms constraint mask -------------------------
         # fix_atoms : (N, 3) bool array.  True = frozen.  Under NPT that
         # means the FRACTIONAL coordinate is frozen: the barostat's
@@ -1772,7 +1801,8 @@ class NPTSimulation(_BaseMDSimulation):
             print(f"  Trajectory  : {traj_path}")
             print(f"  Final POSCAR: {out_poscar}")
 
-        if HAS_MATPLOTLIB and len(T_list) > 1 and _mpi_rank == 0:
+        if (self.save_plots and HAS_MATPLOTLIB and len(T_list) > 1
+                and _mpi_rank == 0):
             self._save_plots(T_list, P_list, V_list)
 
         self._tc.stop("total")  # timing
