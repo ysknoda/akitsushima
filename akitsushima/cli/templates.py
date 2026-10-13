@@ -678,6 +678,7 @@ mlip:
   #   inner_cutoff: [1.8, 2.0]  # pairs < 1.8 A leave G (ADR-0014); use with
   #                             # mlip.baseline covering that range
   # write_table: false       # also write the descriptor table CSV
+  #                          # (and descriptor_table_test.csv with test_csv)
 
 # ----------------------------------------------------------------------
 # Example: form: atom_centred  (Behler-Parrinello, ADR-0005)

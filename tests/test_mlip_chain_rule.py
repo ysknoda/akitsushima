@@ -811,3 +811,52 @@ def test_nn_batch_structures_and_lbfgs_train_and_stay_consistent():
             assert pt[k] == pytest.approx(fd, rel=1e-4, abs=1e-6)
     with pytest.raises(ValueError, match="optimizer"):
         NNModel(optimizer="sgd", verbose=False)
+
+
+@pytest.mark.parametrize("model", ["elm", "linear"])
+def test_written_descriptor_tables_retrain_to_the_same_model(model, tmp_path,
+                                                            monkeypatch):
+    """write_table round trip (ADR-0021 plan, F2): the training and test
+    tables written by an ACSF run, read back as a descriptor CSV, give the
+    same model and the same test score."""
+    import json
+
+    import yaml
+    from test_cli_smoke import _ns
+
+    from akitsushima.cli.parser import _DISPATCH
+    from akitsushima.fitting.models.csv_io import load_mlip_csv
+
+    monkeypatch.chdir(tmp_path)
+    _write_layout_b(tmp_path / "train", _sw_si_structures(16, 1))
+    _write_layout_b(tmp_path / "test", _sw_si_structures(6, 2))
+    desc = {"type": "acsf", "r_cut": 3.771,
+            "g2": {"eta": [4.0], "rs": [2.2, 2.6, 3.0]},
+            "g4": {"eta": [0.05], "zeta": [1, 2], "lambda": [-1, 1]}}
+    common = {"model": model, "r0": 0.1, "eps0": 0.01, "n_hidden": 20,
+              "method": "ridge", "alpha": 1e-6, "val_fraction": 0.2}
+    (tmp_path / "a.yaml").write_text(yaml.safe_dump(
+        {"structure": {"training_csv": "train/structures.csv"},
+         "potential": {"species": ["Si"]},
+         "mlip": {**common, "output_dir": "a", "descriptor": desc,
+                  "write_table": True, "test_csv": "test/structures.csv"}}))
+    assert _DISPATCH["mlip"](_ns(tmp_path / "a.yaml")) == 0
+    assert (tmp_path / "a" / "descriptor_table_test.csv").is_file()
+    (tmp_path / "b.yaml").write_text(yaml.safe_dump(
+        {"structure": {"training_csv": "a/descriptor_table.csv"},
+         "mlip": {**common, "output_dir": "b",
+                  "test_csv": "a/descriptor_table_test.csv"}}))
+    assert _DISPATCH["mlip"](_ns(tmp_path / "b.yaml")) == 0
+
+    sa = json.loads((tmp_path / "a" / "mlip_summary.json").read_text())
+    sb = json.loads((tmp_path / "b" / "mlip_summary.json").read_text())
+    for c in ("E", "F", "S"):
+        assert sb["rmse_test"][c] == pytest.approx(sa["rmse_test"][c], rel=1e-6)
+    from akitsushima.fitting import ELMModel, LinearModel
+    cls = ELMModel if model == "elm" else LinearModel
+    fname = {"elm": "elm_model.npz", "linear": "linear_model.npz"}[model]
+    ma, mb = (cls.load(str(tmp_path / d / fname)) for d in ("a", "b"))
+    _, lab, _, X = load_mlip_csv(str(tmp_path / "a" / "descriptor_table_test.csv"),
+                                 verbose=False)
+    pa, pb = ma.predict_table(lab, X), mb.predict_table(lab, X)
+    assert np.max(np.abs(pa - pb)) < 1e-8

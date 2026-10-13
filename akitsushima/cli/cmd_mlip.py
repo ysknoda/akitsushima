@@ -506,10 +506,19 @@ def cmd_mlip(args) -> int:
             tdir = ml_cfg.get(
                 "test_poscar_dir", os.path.dirname(os.path.abspath(test_csv))
             )
-            ty, tl, _, tX, *_ = _descriptor_table(
+            ty, tl, tw, tX, *_ = _descriptor_table(
                 desc, test_csv, tdir, ml_cfg, desc.species, False, baseline=base
             )
             test_table = (ty, tl, tX)
+            if ml_cfg.get("write_table", False):
+                # the test set's table too, so a model trained from
+                # descriptor_table.csv can be scored on the same rows
+                from ..fitting.descriptors import write_table_csv
+
+                write_table_csv(
+                    os.path.join(output_dir, "descriptor_table_test.csv"),
+                    ty, tl, tw, tX, desc.feature_names(),
+                )
     else:
         if ml_cfg.get("baseline") or ml_cfg.get("isolated_atom_energy"):
             print("ERROR: mlip.baseline / isolated_atom_energy need in-package "
