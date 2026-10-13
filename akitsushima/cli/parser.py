@@ -3,6 +3,7 @@ import argparse
 
 from ..fitting import registry
 from ..fitting.driver import LOCAL_METHOD_OPTIONS
+from .cmd_dataset import cmd_dataset
 from .cmd_dielectric import cmd_dielectric
 from .cmd_elastic import cmd_elastic
 from .cmd_esm import cmd_esm
@@ -48,6 +49,7 @@ _DISPATCH = {
     "nemd":    cmd_nemd,
     "mlip":    cmd_mlip,
     "fit":     cmd_fit,
+    "dataset": cmd_dataset,
 }
 
 
@@ -78,7 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  nemd      Non-equilibrium MD: T profile, local heat flux, Kapitza\n"
             "  mlip      Fit a machine-learning potential (ELM/QELM/NN/linear)\n"
             "  fit       Fit a classical potential "
-            "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n\n"
+            "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n"
+            "  dataset   Training set (fit / mlip layout) from VASP runs\n\n"
             "Examples\n"
             "--------\n"
             "  akitsushima --dump-default nvt    > md_nvt.yaml\n"
@@ -92,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip"))
+              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip | dataset"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -120,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("piezo",  "Relaxed-ion piezoelectric tensors e, d and coupling k")
     _add("nemd",   "Non-equilibrium MD with Langevin heat baths (kappa, Kapitza)")
     _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
+    _add("dataset", "Training set (fit / mlip layout) from VASP vasprun.xml / OUTCAR")
 
     p_fit = sub.add_parser(
         "fit", help="Fit a classical potential "

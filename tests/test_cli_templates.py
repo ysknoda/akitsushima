@@ -43,6 +43,7 @@ _COMMAND = {
     "piezo": "piezo",
     "nemd": "nemd",
     "mlip": "mlip",
+    "dataset": "dataset",
 }
 
 # Only step/cycle counts are overridden (section -> {key: value}).
@@ -66,6 +67,7 @@ _SHRINK = {
     "piezo": {},
     "nemd": {"nemd": {"equil_steps": 20, "n_steps": 120}},
     "mlip": {},
+    "dataset": {},
 }
 
 
@@ -200,6 +202,11 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         write_mgo(tmp_path, n=1 if key == "dielectric" else 3)
     elif key == "mlip":
         _write_mlip_csv(tmp_path / st["training_csv"])
+    elif key == "dataset":
+        from vasp_synth import make_frames, write_run
+        for r in range(5):
+            write_run(tmp_path / cfg["dataset"]["sources"][0] / f"{r:03d}",
+                      make_frames([("Si", 4 + r)], n_steps=2, seed=r))
     else:  # pragma: no cover - guarded by test_every_template_key_is_covered
         raise KeyError(key)
 

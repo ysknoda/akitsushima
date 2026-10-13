@@ -43,6 +43,9 @@
 > `nemd` command (Langevin heat baths, temperature profile, local heat
 > flux, kappa and Kapitza resistance, checkpoint / restart) and the
 > species / region decomposition of the Green-Kubo kappa (ADR-0020).
+> 0.2.0a11 adds VASP readers (vasprun.xml / OUTCAR, every ionic step) and
+> the `dataset` command, which turns VASP runs into a `fit` / `mlip`
+> training set split by run (ADR-0021).
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -222,6 +225,7 @@ energy, forces, stress = fn(lattice, positions, atom_types)
 | `nemd`   | Non-equilibrium MD: T profile, local heat flux, kappa, Kapitza resistance |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
 | `fit`    | Fit a classical potential (LJ / Mie / Morse / Born-Mayer / Yukawa / Buckingham / Stillinger-Weber / Tersoff / EAM) |
+| `dataset` | `fit` / `mlip` training set from VASP runs (vasprun.xml / OUTCAR), split by run |
 
 ### Elastic constants (ADR-0017)
 

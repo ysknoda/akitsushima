@@ -1101,6 +1101,32 @@ piezo:
   relax: {method: fire, fmax: 1.0e-5, max_steps: 10000}
 """
 
+_YAML_DATASET_DEFAULT = """\
+# akitsushima dataset -- fit / mlip training set from VASP runs (ADR-0021)
+#
+# Every ionic step becomes one structure: <output_dir>/{train,test}/
+# structures.csv (target,label,weight,struct_idx; E in eV/atom, F in eV/A,
+# Voigt stress xx yy zz yz zx xy in eV/A^3, compressive-positive) and
+# <k>/POSCAR, plus manifest.csv (run, step, composition, raw energy).
+# Runs are split as a whole: the steps of one relaxation never end up on
+# both sides.
+
+dataset:
+  sources:                  # a run directory, or a parent whose sub-directories are runs
+    - ./vasp_runs
+  reader:      vasprun      # vasprun (vasprun.xml) | outcar (OUTCAR)
+  cross_check: true         # also read the other file; stop if any step disagrees
+  energy:      wo_entropy   # wo_entropy | free | sigma0
+  frames:      all          # all | last | first_last | <stride>
+  # isolated_atom_energy: {Si: -0.8}   # eV; target = (E - sum n_s E_s) / N
+  split:
+    test_fraction: 0.2      # fraction of RUNS held out (0 = train only)
+    stratify:      composition   # composition | none
+    seed:          0
+  r_cut_check: null         # A; warn when half the smallest cell width <= this
+  output_dir:  ./training_set
+"""
+
 _DUMP_MAP = {
     "relax":  _YAML_RELAX_DEFAULT,
     "md":     _YAML_MD_NVT_DEFAULT,
@@ -1121,6 +1147,7 @@ _DUMP_MAP = {
     "piezo":  _YAML_PIEZO_DEFAULT,
     "nemd":   _YAML_NEMD_DEFAULT,
     "mlip":   _YAML_ELM_DEFAULT,
+    "dataset": _YAML_DATASET_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).
 }
