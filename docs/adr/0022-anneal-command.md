@@ -181,3 +181,6 @@ and a global search drives it out of that domain within picoseconds.
 `anneal` is therefore also a quick stress test of an MLIP. A floor
 relative to a trusted energy is necessary, but it is not sufficient: a
 spurious minimum just above the floor passes.
+
+Open findings from this ADR are tracked in ADR-0010, "Open findings
+(2026-10-14)".

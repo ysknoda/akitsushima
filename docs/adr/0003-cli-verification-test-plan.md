@@ -251,6 +251,14 @@ temperature.
 - Real DFT data (`example/fit/GeSnVac_SW/`), including physical `mlip`
   descriptors: when the user asks.
 
+Status of this list (2026-10-14):
+- JZG LJ EOS: superseded.  The CFCMC rebuild was verified against the
+  ideal gas, the NIST SRSW LJ vapour point and `gcmc` instead (ADR-0009).
+- Tersoff Si `kappa`: still open (cluster run); see ADR-0010, open findings.
+- LO-TO splitting: done, Gonze-Lee NAC (ADR-0019).
+- Fitted MLIP from `relax` / `md`: done, MLIP in every solver (ADR-0007).
+- Real DFT data: done, GeSn vacancy data (ADR-0021).
+
 ## Appendix A: McGaughey and Kaviany, PRB 69, 094303 (2004), Table I
 
 All 16 rows extracted: one T = 0 K row plus 5 temperatures x h = 4, 5, 6.

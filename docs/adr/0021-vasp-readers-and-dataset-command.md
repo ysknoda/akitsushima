@@ -195,3 +195,6 @@ now a git repository.
 - **Known limitation.** With the full ver2.1.0 external tables, use
   ridge, ELM or QELM, or give the NN the RDF / CN / COMP columns only.
   The runner's ext21_nn case is left failing as the record.
+
+Open findings from this ADR are tracked in ADR-0010, "Open findings
+(2026-10-14)".

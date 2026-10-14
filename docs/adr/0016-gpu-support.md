@@ -153,5 +153,6 @@ its own ADR or as an addendum here.
 ## Recording (Q16)
 
 This file; status accepted as a plan; no version bump.  Per the user,
-ADR-0016 is **not committed** for now, and in any case is to be committed
-on its own, separate from the uncommitted ADR-0015 work in the tree.
+ADR-0016 was to be committed on its own, separate from the ADR-0015
+work; it was, in e111c14 (2026-10-08).  Implementation still waits for
+the user.

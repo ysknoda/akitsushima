@@ -225,6 +225,11 @@ hard data set shows that a single hidden layer is not enough (ADR-0013).
 Moved here from docs/future-work.md (recorded 2026-09-25, ADR-0004 /
 ADR-0005 discussion).
 
+**Priority (user, 2026-10-14): lowered.**  The atom-centred ACSF MLIPs
+are accurate enough on the GeSn data (ADR-0021), so driving the solvers
+with an external-descriptor model is not needed for now, although
+ver2.1.0 + ridge has the lowest test F error of all models.
+
 **Goal.**  Let the MLIP models use descriptors chosen outside akitsushima --
 in particular those of the user's own script `atomic_descriptor_ver2.0.0.py`
 (`/Users/yusuke/Claude_Code/atomic_descriptor/`, under development) -- both
@@ -269,6 +274,9 @@ Moved here from docs/future-work.md (recorded 2026-09-25, ADR-0004).
 - **Huber regression** (iteratively reweighted): robust to outlying
   structures in real DFT data (e.g. poorly converged SCF); its benefit
   cannot show on noise-free labels, so it waits for real data.
+  (2026-10-14: that precondition is met.  The GeSn data of ADR-0021 were
+  computed with a loose EDIFF of 0.064 eV and unconverged relaxations.
+  Whether to start waits for the A1 data below.)
 
 docs/future-work.md is removed.  Its FW-2 (additive per-atom LightGBM
 energy model) and FW-4 (force / stress row subsampling for LightGBM) were
@@ -313,3 +321,81 @@ request.
 **Open questions:** ACSF second derivatives (cost, memory: N x 3 x N x 3
 per structure); which data (phonon Hessians, elastic constants from
 DFT); weights of Hessian rows in the ADR-0004 rule.
+
+## Open findings (2026-10-14)
+
+Collected in a review of the backlog with the user (Q1-Q18, 2026-10-14).
+Unlike items 1-11, these come from running the package on real data
+(ADR-0021, ADR-0022).  Full test suite at the time: 735 passed.
+
+**A1. MLIP collapse under extrapolation (top priority).**
+- relax (fixed FIRE, 10 test structures): SW 10/10; atom-centred ELM
+  variants 8/10; QELM 7/10; NN 5/10.  The structures that fail most
+  are 00010 and 00009.  Their DFT reference frames still carry |P| of
+  16-30 kB, so the reference volume itself is off.
+- anneal (ADR-0022): atom-centred ELM with `isolated_atom_energy`
+  collapses even in 300 K MD; basin hopping drifts to a spurious minimum
+  just above the floor.  The training data hold near-equilibrium vacancy
+  cells only.
+- Plan, in order:
+  - (a) Re-run the anneal demo with `isolated_atom_energy` combined with
+    a ZBL or Born-Mayer baseline.  The two were never combined.
+  - (b) One round of extra training data: rattled, strained and MD
+    snapshots of existing cells.  The user computes them with the
+    training data's VASP 6.4.2.
+  - (c) Ensemble-ELM active learning (item 7), only if (b) is not
+    enough.
+- Solved when all three hold:
+  - relax: >= 9/10 within 5 % of rebuilt DFT volumes.  00006, 00009 and
+    00010 are re-relaxed with EDIFFG -0.01 eV/A and |P| < 1 kB.
+  - anneal: md_quench 800 -> 300 K with 6 quenches on all 10 test
+    structures runs without collapse.  No quench falls below the relax
+    energy - 0.05 eV/atom.
+  - DFT check: 3 anneal minima are within 10 meV/atom of a VASP single
+    point.
+  - These thresholds are judgement calls (UNCERTAIN).
+- The label noise of the loose EDIFF is measured first:
+  - Five training frames are recomputed at EDIFF 1e-6.
+  - One frame is also run at 1e-4 and 1e-5.
+  - These diagnostic runs use a local VASP 6.6.1.
+
+**A2. External descriptors at inference** -- item 9, priority lowered.
+
+**A3. Tabular NN on the ver2.1.0 tables** -- known limitation
+(ADR-0021); not pursued.
+
+**A4. Near-constant descriptor columns.**  The z-score floor of 1e-12
+lets near-constant columns blow up ELM / QELM / NN; the workaround was
+the external reduce_tables.py (std > 1e-4).  To add: a
+`min_feature_std` option (default 1e-12, results unchanged) shared by
+the linear, ELM / QELM, NN and atom-centred models.  Columns below it
+are masked, the mask is stored in the model file and applied to the
+gradients.
+
+**A5. Tersoff GeSn** -- Sn parameters are placeholders (Ge lengths
+scaled, chi = 1).  The result is a diagonal stress offset of about
+-2 GPa and a volume shrinkage of 3-8 %.  Recorded only, since the
+GeSn tests did not aim at accuracy.
+
+**A6. Training data quality** -- the GeSn relaxations are unconverged
+(no EDIFFG, POTIM 0.01) and use EDIFF 0.064 eV.  This is measured under
+A1 before any relabelling is considered.
+
+**B1. atomic_descriptor test** -- the test
+`test_test_suite_numba_cache_is_isolated_from_project_pycache` fails
+whenever a plain run has written a numba cache.  It is to check only
+that NUMBA_CACHE_DIR is isolated.
+
+**Unchanged:** items 1-8, 10, 11 and the deferred property-CLI work
+stay deferred until the user decides.  The property-CLI work is:
+- directional E / G / nu
+- a BORN reader
+- shell model / QEq
+- 3rd-order IFC / BTE
+- eps(omega)
+- target pressure in relax
+- in-plane NEMD + ESM
+- multi-length NEMD
+- md / kappa checkpoints
+Also unchanged: GPU (ADR-0016), the dispersion baseline (ADR-0014) and
+Tersoff Si kappa (ADR-0003).
