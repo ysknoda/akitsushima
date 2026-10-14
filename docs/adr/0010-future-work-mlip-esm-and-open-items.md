@@ -380,6 +380,31 @@ GeSn tests did not aim at accuracy.
 **A6. Training data quality** -- the GeSn relaxations are unconverged
 (no EDIFFG, POTIM 0.01) and use EDIFF 0.064 eV.  This is measured under
 A1 before any relabelling is considered.
+- Measured (2026-10-15).  Five training frames were recomputed locally
+  with VASP 6.6.1 at EDIFF 1e-6 and compared with the old 6.4.2 /
+  EDIFF 0.064 labels:
+  - Energy: within 0.32 meV/atom.
+  - Forces: RMS <= 0.008 eV/A, maximum 0.0225 eV/A.  The maximum is
+    just above the 0.02 set beforehand.  The user accepted the old force
+    labels as they are (Q22), since the noise is far below the models'
+    test F RMSE of 0.06-0.23 eV/A.
+  - Stress: the first frames of a relaxation differ by about -0.12 GPa
+    on the diagonal.  The last frames differ by up to 0.28 GPa off the
+    diagonal and, for run 00013, by +0.54 GPa on it.  The suspected cause
+    (UNVERIFIED) is the plane-wave basis, which stays fixed at the
+    starting cell during an ISIF 3 relaxation.  This is recorded only,
+    until the single-point round-0 data can test it (Q23).
+  - EDIFF 1e-4 is the loosest value within 0.01 eV/A of 1e-6 (0.0006
+    eV/A), so it is used for the round-0 single points.
+- A1 (b), round 0: 120 single points are requested from the user's
+  cluster (VASP 6.4.2).  They come from the 40 training runs' last
+  frames: rattled (sigma 0.1 A), strained (dV -6 to +6 %, shear 2 %), and
+  MLIP 800 K MD frames just before the collapse.  A1 (a) did not help:
+  iso, iso + ZBL and iso + BM all passed anneal 0/10, with identical
+  numbers.  The collapse happens at Ge-Ge distances of 2.0-2.3 A,
+  outside both baselines (r_outer 2.0 A).
+- The reference re-relaxations of 00006 / 00009 / 00010 (about 90 h
+  locally) also go to the user's cluster (Q24).
 
 **B1. atomic_descriptor test** -- the test
 `test_test_suite_numba_cache_is_isolated_from_project_pycache` fails
