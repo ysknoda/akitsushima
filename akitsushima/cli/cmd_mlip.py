@@ -49,6 +49,7 @@ _ELM_KEYS = (
     "standardize",
     "pca_eps",
     "pca_drop",
+    "min_feature_std",
     "w_correlation",
     "w_corr_length",
     "w_corr_length_search",
@@ -92,6 +93,7 @@ def _build_model(model_type, ml, verbose):
             standardize=ml.get("standardize", "zscore"),
             pca_eps=ml.get("pca_eps", 1e-3),
             pca_drop=ml.get("pca_drop", 0.0),
+            min_feature_std=ml.get("min_feature_std", 1e-12),
             **common,
         )
     if model_type in ("lgbm", "lightgbm"):
@@ -107,6 +109,7 @@ def _build_model(model_type, ml, verbose):
             l1_ratio=ml.get("l1_ratio", 0.5),
             n_components=ml.get("n_components", 20),
             alpha_search=ml.get("alpha_search", None),
+            min_feature_std=ml.get("min_feature_std", 1e-12),
             **common,
         )
     if model_type in ("elm", "qelm"):
@@ -296,6 +299,7 @@ def _build_atomic_model(model_type, ml, verbose):
             standardize=ml.get("standardize", "zscore"),
             pca_eps=ml.get("pca_eps", 1e-3),
             pca_drop=ml.get("pca_drop", 0.0),
+            min_feature_std=ml.get("min_feature_std", 1e-12),
             **common,
         )
     if model_type in ("elm", "qelm"):

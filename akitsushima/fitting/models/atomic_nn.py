@@ -36,7 +36,7 @@ class AtomicNNModel:
     early_stopping_patience, optimizer 'adam' only, deterministic, seed,
     device, category weights, r0, eps0) and the input standardisation of
     the atom-centred ELM: standardize ('zscore', the default, or 'pca'),
-    pca_eps, pca_drop.
+    pca_eps, pca_drop, min_feature_std.
     """
 
     atom_centred = True
@@ -64,6 +64,7 @@ class AtomicNNModel:
         standardize: str = "zscore",
         pca_eps: float = 1e-3,
         pca_drop: float = 0.0,
+        min_feature_std: float = 1e-12,
     ):
         if not HAS_TORCH:
             raise ImportError("AtomicNNModel requires PyTorch.")
@@ -74,7 +75,8 @@ class AtomicNNModel:
             )
         # read by atomic._prepare, which builds the per-species maps
         self.unit_kw = dict(standardize=standardize, pca_eps=float(pca_eps),
-                            pca_drop=float(pca_drop))
+                            pca_drop=float(pca_drop),
+                            min_feature_std=float(min_feature_std))
         self._X_P = None
         self.hidden_layers = list(hidden_layers) if hidden_layers else [64, 64]
         self.activation = str(activation).lower()

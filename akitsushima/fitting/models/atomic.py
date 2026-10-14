@@ -29,7 +29,7 @@ import time as _time
 import numpy as np
 
 from .csv_io import load_weights_csv, structure_grouped_split
-from .elm import ELMModel, pca_whitening, solve_constrained
+from .elm import ELMModel, feature_std, pca_whitening, solve_constrained
 from .quantized_elm import QuantizedELMModel
 
 __all__ = ["AtomicData", "AtomicELMModel", "AtomicQELMModel"]
@@ -147,8 +147,7 @@ def _prepare(model, structures, descriptor, weight_csv, val_fraction, val_seed):
         Gsp = np.concatenate([J.G[J.sp == s] for J in Gs])
         if len(Gsp):
             mean[s] = Gsp.mean(axis=0)
-            sd = Gsp.std(axis=0)
-            std[s] = np.where(sd < 1e-12, 1.0, sd)
+            std[s] = feature_std(Gsp, kw.get("min_feature_std", 1e-12))
         # ADR-0013: per-species whitening map; training atoms kept for
         # bias_init 'data' (dropped after the fit)
         P.append(

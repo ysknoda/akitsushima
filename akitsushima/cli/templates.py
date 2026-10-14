@@ -647,6 +647,9 @@ mlip:
   # pca_eps:       1.0e-3      # the correlation-matrix eigenvalues) | zscore
   # pca_drop:      0.0         # drop directions below pca_drop * max
   #                            # eigenvalue (0: keep all, recommended)
+  # min_feature_std: 1.0e-12   # mask columns whose training std is below
+  #                            # it (all models; 1e-4 suits external tables
+  #                            # with near-constant columns, ADR-0010 A4)
   # w_correlation: none        # none | radial: G2 weights correlated along
   # w_corr_length: 0.2         # r_s [A] (in-package ACSF only)
   # w_corr_length_search: [0.1, 0.2, 0.4, 0.8]   # (radial implies zscore)
@@ -709,6 +712,7 @@ mlip:
 #   l1_ratio:     0.5       # elastic_net
 #   n_components: 20        # pls
 #   alpha_search: null      # e.g. [1.0e-8, 1.0e-6, 1.0e-4]; pls: [5, 10, 20]
+#   min_feature_std: 1.0e-12  # mask near-constant columns (ADR-0010 A4)
 
 # ----------------------------------------------------------------------
 # Example: model: nn  (PyTorch feedforward neural network)
@@ -737,6 +741,7 @@ mlip:
 #   standardize:   zscore     # zscore (default for nn) | pca: the ELM's
 #   pca_eps:       1.0e-3     # whitening map (also form: atom_centred,
 #   pca_drop:      0.0        # per species; ADR-0013 addendum)
+#   min_feature_std: 1.0e-12  # mask near-constant columns (ADR-0010 A4)
 #   device:        auto      # auto | cpu | cuda
 #   seed:          42
 #   verbose:       true

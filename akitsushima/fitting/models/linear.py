@@ -62,7 +62,7 @@ from .csv_io import (
     load_weights_csv,
     structure_grouped_split,
 )
-from .elm import ELMModel
+from .elm import ELMModel, feature_std
 
 __all__ = ["LinearModel", "descriptor_blocks"]
 
@@ -132,6 +132,7 @@ class LinearModel:
         max_iter: int = 5000,
         tol: float = 1e-8,
         verbose: bool = True,
+        min_feature_std: float = 1e-12,
     ):
         method = str(method).lower()
         if method not in METHODS:
@@ -154,6 +155,8 @@ class LinearModel:
         self.max_iter = int(max_iter)
         self.tol = float(tol)
         self.verbose = bool(verbose)
+        # mask columns with training std below it (ADR-0010 A4)
+        self.min_feature_std = float(min_feature_std)
         # There is no row-independent form: every row is exact.
         self.row_independent = False
         self.descriptor_config = ""  # see ELMModel.descriptor_config
@@ -404,8 +407,7 @@ class LinearModel:
 
         E_tr = e_row[np.unique(sid[idx_tr])]
         self._X_mean = X[E_tr].mean(axis=0)
-        self._X_std = X[E_tr].std(axis=0)
-        self._X_std[self._X_std < 1e-12] = 1.0
+        self._X_std = feature_std(X[E_tr], self.min_feature_std)
         self._columns = list(columns) if columns is not None else None
         blocks = descriptor_blocks(self._columns, D)
 

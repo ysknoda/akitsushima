@@ -58,6 +58,12 @@
 > The NN models (tabular and atom-centred) take the ELM's input
 > standardisation keys (`standardize: zscore | pca`, `pca_eps`,
 > `pca_drop`). The NN default stays z-score.
+> 0.2.0a13 adds `min_feature_std` to every MLIP model (linear, ELM /
+> QELM, NN, tabular and atom-centred): input columns whose training std
+> is below it are masked (stored as an infinite std, so they add nothing
+> to E, F or S).  The default 1e-12 masks nothing; 1e-4 replaces the
+> external column reduction needed for near-constant columns of external
+> descriptor tables (ADR-0010, open finding A4).
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -535,7 +541,8 @@ the force error in 22 of 24 cases (by 7 % on average, up to 30 %).
 models saved before ADR-0013 load as z-score models. Since 0.2.0a12 the NN
 (tabular and atom-centred) takes the same keys, with `zscore` as its
 default: `standardize: pca` feeds the network the whitened descriptor,
-and `pca_drop` narrows its input.  Options without a
+and `pca_drop` narrows its input.  `min_feature_std` (all models, default
+1e-12) masks input columns that hardly vary in the training data.  Options without a
 measurable gain there: `w_init_scale_search` (factors on the Glorot
 scale of W, b, picked on the validation split), `bias_init: data` (each
 unit centred on a training input), `w_correlation: radial` with

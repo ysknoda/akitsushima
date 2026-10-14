@@ -212,6 +212,11 @@ def test_cli_passes_the_standardize_keys_to_both_nn_forms():
     tab = _build_model("nn", ml, verbose=False)
     assert (tab.standardize, tab.pca_eps, tab.pca_drop) == ("pca", 1e-2, 1e-5)
     atom = _build_atomic_model("nn", ml, verbose=False)
-    assert atom.unit_kw == {"standardize": "pca", "pca_eps": 1e-2, "pca_drop": 1e-5}
+    assert atom.unit_kw == {
+        "standardize": "pca",
+        "pca_eps": 1e-2,
+        "pca_drop": 1e-5,
+        "min_feature_std": 1e-12,  # default (ADR-0010 A4)
+    }
     assert _build_model("nn", {}, verbose=False).standardize == "zscore"
     assert _build_atomic_model("nn", {}, verbose=False).unit_kw["standardize"] == "zscore"

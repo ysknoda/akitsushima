@@ -13,7 +13,7 @@ from .csv_io import (
     load_weights_csv,
     structure_grouped_split,
 )
-from .elm import ELMModel, pca_whitening
+from .elm import ELMModel, feature_std, pca_whitening
 
 __all__ = ["NNModel"]
 
@@ -113,6 +113,8 @@ class NNModel:
                       linear map without the mean.
     pca_eps, pca_drop : whitening regulariser and relative eigenvalue
                       cut (see :func:`pca_whitening`); used with 'pca'.
+    min_feature_std : mask input columns whose training std is below it
+                      (default 1e-12: none; see :func:`feature_std`).
     device         : 'auto' | 'cpu' | 'cuda'. 'auto' selects CUDA if
                       available, otherwise CPU.
     seed           : RNG seed (numpy, torch, and the train/val split).
@@ -142,7 +144,8 @@ class NNModel:
                  optimizer      : str   = 'adam',
                  standardize    : str   = 'zscore',
                  pca_eps        : float = 1e-3,
-                 pca_drop       : float = 0.0):
+                 pca_drop       : float = 0.0,
+                 min_feature_std: float = 1e-12):
         if not HAS_TORCH:
             raise ImportError(
                 "NNModel requires PyTorch, which is not installed. "
@@ -177,6 +180,7 @@ class NNModel:
                              f"got {standardize!r}.")
         self.pca_eps        = float(pca_eps)
         self.pca_drop       = float(pca_drop)
+        self.min_feature_std = float(min_feature_std)
         self.descriptor_config = ""   # see ELMModel.descriptor_config
         # physics-informed parts (ADR-0014): pair baseline, isolated atom
         self.physics_config = ""
@@ -383,8 +387,7 @@ class NNModel:
                 labels, struct_ids, n_atoms, caller='NNModel.fit')
             X_stat = X[e_row[np.unique(sid[idx_train])]]
         self._X_mean = X_stat.mean(axis=0)
-        self._X_std  = X_stat.std(axis=0)
-        self._X_std[self._X_std < 1e-12] = 1.0
+        self._X_std  = feature_std(X_stat, self.min_feature_std)
         self._P = (pca_whitening((X_stat - self._X_mean) / self._X_std,
                                  self.pca_eps, self.pca_drop)
                    if self.standardize == 'pca' else None)
@@ -666,6 +669,7 @@ class NNModel:
             'standardize'   : self.standardize,
             'pca_eps'       : self.pca_eps,
             'pca_drop'      : self.pca_drop,
+            'min_feature_std': self.min_feature_std,
             'X_P'           : self._P,
             'row_independent'  : self.row_independent,
             'direct_link'      : self.direct_link,
@@ -698,6 +702,7 @@ class NNModel:
             standardize   = ckpt.get('standardize', 'zscore'),
             pca_eps       = ckpt.get('pca_eps', 1e-3),
             pca_drop      = ckpt.get('pca_drop', 0.0),
+            min_feature_std = ckpt.get('min_feature_std', 1e-12),
         )
         obj._D      = int(ckpt['D'])
         obj._P      = ckpt.get('X_P')

@@ -55,6 +55,22 @@ def solve_constrained(Gp: np.ndarray, rhs: np.ndarray, C, e) -> np.ndarray:
                       assume_a='sym')[:m]
 
 
+def feature_std(X_stat: np.ndarray, min_feature_std: float = 1e-12) -> np.ndarray:
+    """
+    Per-column standard deviation used to standardise descriptor inputs.
+
+    Columns with std < 1e-12 are constant in the training data and keep
+    the historical unit scale (std 1).  Columns whose std lies in
+    [1e-12, min_feature_std) are masked: their std is stored as +inf, so
+    the standardised input and every gradient through it are exactly 0
+    and the mask travels with X_std in the model file (ADR-0010, open
+    finding A4).  The default 1e-12 masks nothing.
+    """
+    sd = np.asarray(X_stat, dtype=float).std(axis=0)
+    out = np.where(sd < 1e-12, 1.0, sd)
+    return np.where((sd >= 1e-12) & (sd < float(min_feature_std)), np.inf, out)
+
+
 def pca_whitening(Xz: np.ndarray, eps: float = 1e-3,
                   drop_rel: float = 0.0) -> np.ndarray:
     """
@@ -199,6 +215,7 @@ class ELMModel:
                  standardize     : Optional[str] = None,
                  pca_eps         : float = 1e-3,
                  pca_drop        : float = 0.0,
+                 min_feature_std : float = 1e-12,
                  w_correlation   : str   = 'none',
                  w_corr_length   : float = 0.2,
                  w_corr_length_search: Optional[list] = None):
@@ -297,6 +314,8 @@ class ELMModel:
         pca_eps    : float, added to the correlation-matrix eigenvalues.
         pca_drop   : float, drop directions with eigenvalue <= pca_drop *
             max (default 0: keep all; see :func:`pca_whitening`).
+        min_feature_std : float, mask input columns whose training std is
+            below it (default 1e-12: none; see :func:`feature_std`).
         w_correlation : 'none' (default) | 'radial'
             'radial': the weights of the G2 channels of one (species, eta)
             group are drawn with correlation exp(-(r_s,k - r_s,l)^2 /
@@ -357,6 +376,7 @@ class ELMModel:
         self.standardize      = standardize
         self.pca_eps          = float(pca_eps)
         self.pca_drop         = float(pca_drop)
+        self.min_feature_std  = float(min_feature_std)
         self.w_correlation    = w_correlation
         self.w_corr_length    = float(w_corr_length)
         self.w_corr_length_search = ([float(v) for v in w_corr_length_search]
@@ -643,8 +663,7 @@ class ELMModel:
         """Mean, standard deviation and (standardize 'pca') the whitening
         map from the training inputs."""
         self._X_mean = X_stat.mean(axis=0)
-        self._X_std  = X_stat.std(axis=0)
-        self._X_std[self._X_std < 1e-12] = 1.0
+        self._X_std  = feature_std(X_stat, self.min_feature_std)
         self._P = (pca_whitening((X_stat - self._X_mean) / self._X_std,
                                  self.pca_eps, self.pca_drop)
                    if self.standardize == 'pca' else None)
@@ -1589,6 +1608,7 @@ X_n = X / X_std, each followed by the PCA map with standardize 'pca').
         """ADR-0013 options, with the values the searches selected."""
         return dict(bias_init=self.bias_init, standardize=self.standardize,
                     pca_eps=self.pca_eps, pca_drop=self.pca_drop,
+                    min_feature_std=self.min_feature_std,
                     w_correlation=self.w_correlation,
                     w_corr_length=self.w_corr_length,
                     w_scale_factor=self._w_scale_factor)
