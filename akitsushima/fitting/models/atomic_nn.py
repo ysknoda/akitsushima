@@ -3,6 +3,10 @@ NN, PRL 98, 146401 (2007)), ADR-0005.
 
 E = sum_i eps_{s(i)}(x_i), x_i = (G_i - mean_s) / std_s, one MLP per
 species (with NNModel's options: hidden_layers, activation, direct_link).
+With ``standardize: pca`` each species' MLP sees x_i P_s, P_s the
+per-species whitening map that AtomicELMModel uses (ADR-0013; for the NN
+since 0.2.0a12), held as a fixed first layer, so everything outside the
+networks stays in z-score space.
 Forces and stress come from g_i = d eps_i / dx_i (torch autograd,
 create_graph during training) contracted with the stored ACSF Jacobians:
 
@@ -30,7 +34,9 @@ class AtomicNNModel:
     Parameters as NNModel (hidden_layers, activation, direct_link,
     learning_rate, epochs, batch_structures, weight_decay,
     early_stopping_patience, optimizer 'adam' only, deterministic, seed,
-    device, category weights, r0, eps0).
+    device, category weights, r0, eps0) and the input standardisation of
+    the atom-centred ELM: standardize ('zscore', the default, or 'pca'),
+    pca_eps, pca_drop.
     """
 
     atom_centred = True
@@ -55,9 +61,21 @@ class AtomicNNModel:
         direct_link: bool = True,
         deterministic: bool = False,
         verbose: bool = True,
+        standardize: str = "zscore",
+        pca_eps: float = 1e-3,
+        pca_drop: float = 0.0,
     ):
         if not HAS_TORCH:
             raise ImportError("AtomicNNModel requires PyTorch.")
+        standardize = str(standardize).lower()
+        if standardize not in ("zscore", "pca"):
+            raise ValueError(
+                f"AtomicNNModel: standardize must be 'zscore' or 'pca', got {standardize!r}."
+            )
+        # read by atomic._prepare, which builds the per-species maps
+        self.unit_kw = dict(standardize=standardize, pca_eps=float(pca_eps),
+                            pca_drop=float(pca_drop))
+        self._X_P = None
         self.hidden_layers = list(hidden_layers) if hidden_layers else [64, 64]
         self.activation = str(activation).lower()
         self.w_energy, self.w_forces, self.w_stress = (
@@ -88,9 +106,10 @@ class AtomicNNModel:
         self._fitted = False
 
     # ------------------------------------------------------------------
-    def _build(self, n_sp, Dc):
+    def _build(self, n_sp, Dc, P=None):
         # One NNModel per species builds the MLP (same layers, activation
-        # and direct link as the tabular NN).
+        # and direct link as the tabular NN).  With a whitening map P_s the
+        # MLP takes x P_s through a fixed (untrained) first layer.
         proto = NNModel(
             hidden_layers=self.hidden_layers,
             activation=self.activation,
@@ -98,9 +117,21 @@ class AtomicNNModel:
             device=self.device,
             verbose=False,
         )
-        return _torch_nn.ModuleList([proto._build_network(Dc) for _ in range(n_sp)]).to(
-            self.device
-        )
+        nets = []
+        for s in range(n_sp):
+            Ps = None if P is None else P[s]
+            if Ps is None:
+                nets.append(proto._build_network(Dc))
+            else:
+                nets.append(_Projected(Ps, proto._build_network(Ps.shape[1])))
+        return _torch_nn.ModuleList(nets).to(self.device)
+
+    @staticmethod
+    def _last_linear(net):
+        """The output layer of one species' network (its bias is the
+        energy offset)."""
+        net = getattr(net, "core", net)
+        return (net.mlp if hasattr(net, "mlp") else net)[-1]
 
     def _init_energy_offsets(self, data, y, ptr, tr):
         """Start each species' output bias at its least-squares reference
@@ -113,8 +144,7 @@ class AtomicNNModel:
         e_ref = np.linalg.lstsq(C, E, rcond=None)[0]
         with torch.no_grad():
             for s, net in enumerate(self._nets):
-                last = (net.mlp if hasattr(net, "mlp") else net)[-1]
-                last.bias.fill_(float(e_ref[s]))
+                self._last_linear(net).bias.fill_(float(e_ref[s]))
 
     def _eps(self, xn, sp):
         """Per-atom energies of normalised descriptors xn (A, Dc).  While
@@ -158,8 +188,7 @@ class AtomicNNModel:
         self._iso_t = None
         with torch.no_grad():
             for s, net in enumerate(self._nets):
-                last = (net.mlp if hasattr(net, "mlp") else net)[-1]
-                last.bias += ea[s] - net(x0[s : s + 1]).view(-1)[0]
+                self._last_linear(net).bias += ea[s] - net(x0[s : s + 1]).view(-1)[0]
 
     # ------------------------------------------------------------------
     def _tensors(self, data, structs):
@@ -284,7 +313,12 @@ class AtomicNNModel:
                 )
         Dc = data.descriptor.n_per_atom
         torch.manual_seed(self.seed)
-        self._nets = self._build(len(self.species), Dc)
+        if self.unit_kw["standardize"] != "pca":
+            self._X_P = None
+        self._nets = self._build(len(self.species), Dc, self._X_P)
+        if self.verbose and self._X_P is not None:
+            dims = [Dc if Ps is None else Ps.shape[1] for Ps in self._X_P]
+            print(f"  PCA whitening per species: {Dc} -> {dims} input directions")
         self._init_energy_offsets(data, y, ptr, tr)
         self._iso_t = self._iso_setup()
         opt = torch.optim.Adam(
@@ -440,6 +474,7 @@ class AtomicNNModel:
                 "direct_link",
             )
         }
+        hyper.update(self.unit_kw)
         torch.save(
             {
                 "atom_centred": True,
@@ -447,6 +482,7 @@ class AtomicNNModel:
                 "species": self.species,
                 "X_mean": self._X_mean,
                 "X_std": self._X_std,
+                "X_P": self._X_P,
                 "state_dict": self._nets.state_dict(),
                 "descriptor_config": self.descriptor_config,
                 "physics_config": self.physics_config,
@@ -463,9 +499,24 @@ class AtomicNNModel:
         obj._X_mean, obj._X_std = ck["X_mean"], ck["X_std"]
         obj.descriptor_config = ck["descriptor_config"]
         obj.physics_config = ck.get("physics_config", "")
-        obj._nets = obj._build(len(obj.species), obj._X_mean.shape[1])
+        # files before 0.2.0a12 have no X_P: z-score models
+        obj._X_P = ck.get("X_P")
+        obj._nets = obj._build(len(obj.species), obj._X_mean.shape[1], obj._X_P)
         obj._nets.load_state_dict(ck["state_dict"])
         obj._nets.eval()
         obj._fitted = True
         return obj
 
+
+
+if HAS_TORCH:
+    class _Projected(_torch_nn.Module):
+        """core(x @ P): a fixed whitening map in front of a species' MLP."""
+
+        def __init__(self, P, core):
+            super().__init__()
+            self.register_buffer("P", torch.as_tensor(np.asarray(P), dtype=torch.float32))
+            self.core = core
+
+        def forward(self, x):
+            return self.core(x @ self.P)

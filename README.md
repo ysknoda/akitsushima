@@ -55,6 +55,9 @@
 > temperature schedule, or basin hopping, with every quench a `relax`,
 > optional pressure (enthalpy), checkpoint / restart and a list of
 > distinct minima. `md`'s NVT / NPT classes take `initial_velocities`.
+> The NN models (tabular and atom-centred) take the ELM's input
+> standardisation keys (`standardize: zscore | pca`, `pca_eps`,
+> `pca_drop`). The NN default stays z-score.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -529,7 +532,10 @@ with the training PCA (`standardize: pca`; all directions kept,
 F / S rows without the mean) -- in the ADR-0013 comparison this lowered
 the force error in 22 of 24 cases (by 7 % on average, up to 30 %).
 `standardize: zscore` gives the former per-feature standardisation;
-models saved before ADR-0013 load as z-score models.  Options without a
+models saved before ADR-0013 load as z-score models. Since 0.2.0a12 the NN
+(tabular and atom-centred) takes the same keys, with `zscore` as its
+default: `standardize: pca` feeds the network the whitened descriptor,
+and `pca_drop` narrows its input.  Options without a
 measurable gain there: `w_init_scale_search` (factors on the Glorot
 scale of W, b, picked on the validation split), `bias_init: data` (each
 unit centred on a training input), `w_correlation: radial` with

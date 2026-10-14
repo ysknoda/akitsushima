@@ -734,6 +734,9 @@ mlip:
 #   batch_size:    256        # rows per batch (row_independent, or batch_structures: null)
 #   weight_decay:  1.0e-6
 #   early_stopping_patience: 150
+#   standardize:   zscore     # zscore (default for nn) | pca: the ELM's
+#   pca_eps:       1.0e-3     # whitening map (also form: atom_centred,
+#   pca_drop:      0.0        # per species; ADR-0013 addendum)
 #   device:        auto      # auto | cpu | cuda
 #   seed:          42
 #   verbose:       true

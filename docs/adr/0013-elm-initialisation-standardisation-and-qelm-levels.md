@@ -410,3 +410,55 @@ tabular N_h 2000.  `standardize: zscore` stores two D-vectors instead,
 which brings that file to about 0.95 MB.  The cost is the PCA accuracy
 gain (7 % force error on average here).  Storing the map in float32
 would halve it without giving up whitening; not done.
+
+## Addendum (2026-10-14, 0.2.0a12): the same standardisation for the NN
+
+User decision: where the ELM family (ELMModel, QuantizedELMModel,
+AtomicELMModel, AtomicQELMModel) has `standardize` / `pca_eps` /
+`pca_drop`, the NN family (NNModel, AtomicNNModel) takes them too.
+Before this change the NN read none of these keys, so a config that set
+them ran with the z-score default.
+
+**Implementation**
+- `standardize: zscore | pca`. The NN default stays `zscore`, so
+  existing results and model files are unchanged.
+- `NNModel` applies one map to the whole table, as `ELMModel` does. E
+  rows are z-scored and then multiplied by `pca_whitening`'s P. F and S
+  rows get the same map without the mean. The network and its direct
+  link see the D' whitened inputs. `energy_and_gradient` maps the
+  gradient back with P^T / std.
+- `AtomicNNModel` uses the per-species maps that `atomic._prepare`
+  already built for the atom-centred ELM. Each map is a fixed first
+  layer (a buffer x P_s) in front of that species' MLP. Everything
+  outside the networks stays in z-score space: the Jacobians, the
+  isolated-atom point x0, and the engine gradient.
+- The map is saved with the model. Files written without it load as
+  z-score models.
+
+**Verification** (tests/test_nn_standardize.py)
+- The F and S rows of a `pca` model equal finite differences of its
+  energy.
+- The map equals `pca_whitening` of the training structures' E rows.
+- `pca_drop` narrows the input of both the MLP and the direct link.
+- Save / load round-trips, and the atom-centred engine stays
+  conservative.
+- The isolated-atom constraint holds exactly.
+- The CLI passes the keys to both NN forms.
+- A one-off comparison against the previous commit showed bit-for-bit
+  equal predictions with the z-score default: 960 tabular rows and 93
+  atom-centred values.
+
+**Use on the GeSn ver2.1.0 tables**
+PCA did not rescue the tabular NN on the 1801-column external tables
+(ADR-0021 addendum).  The test force error depended on `pca_drop`:
+
+| pca_drop | directions kept | test F (eV/A) |
+|---|---|---|
+| 0 | 1801 | 74 |
+| 1e-6 | 163 | 8.7 |
+| 1e-4 | 95 | 1.1 |
+| 1e-3 | 56 | 3.6 |
+| 1e-2 | 23 | 0.78 |
+
+The error is not monotonic in `pca_drop`. Training itself is unstable
+here: the training-set F error tracks the test error.

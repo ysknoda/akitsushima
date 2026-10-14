@@ -13,7 +13,7 @@ from .csv_io import (
     load_weights_csv,
     structure_grouped_split,
 )
-from .elm import ELMModel
+from .elm import ELMModel, pca_whitening
 
 __all__ = ["NNModel"]
 
@@ -105,6 +105,14 @@ class NNModel:
                       stop training if validation loss does not
                       improve for this many consecutive epochs (0 disables
                       early stopping, always running the full `epochs`).
+    standardize    : 'zscore' (default) or 'pca'.  Inputs are z-scored
+                      with the training structures' mean and std; 'pca'
+                      then applies the whitening map of
+                      :func:`pca_whitening`, as ELMModel does (ADR-0013;
+                      for NN since 0.2.0a12).  F and S rows get the same
+                      linear map without the mean.
+    pca_eps, pca_drop : whitening regulariser and relative eigenvalue
+                      cut (see :func:`pca_whitening`); used with 'pca'.
     device         : 'auto' | 'cpu' | 'cuda'. 'auto' selects CUDA if
                       available, otherwise CPU.
     seed           : RNG seed (numpy, torch, and the train/val split).
@@ -131,7 +139,10 @@ class NNModel:
                  direct_link    : bool  = True,
                  deterministic  : bool  = False,
                  batch_structures: Optional[int] = 30,
-                 optimizer      : str   = 'adam'):
+                 optimizer      : str   = 'adam',
+                 standardize    : str   = 'zscore',
+                 pca_eps        : float = 1e-3,
+                 pca_drop       : float = 0.0):
         if not HAS_TORCH:
             raise ImportError(
                 "NNModel requires PyTorch, which is not installed. "
@@ -160,6 +171,12 @@ class NNModel:
         if self.optimizer not in ('adam', 'lbfgs'):
             raise ValueError(f"NNModel: optimizer must be 'adam' or 'lbfgs', "
                              f"got {optimizer!r}.")
+        self.standardize    = str(standardize).lower()
+        if self.standardize not in ('zscore', 'pca'):
+            raise ValueError(f"NNModel: standardize must be 'zscore' or 'pca', "
+                             f"got {standardize!r}.")
+        self.pca_eps        = float(pca_eps)
+        self.pca_drop       = float(pca_drop)
         self.descriptor_config = ""   # see ELMModel.descriptor_config
         # physics-informed parts (ADR-0014): pair baseline, isolated atom
         self.physics_config = ""
@@ -185,6 +202,7 @@ class NNModel:
         self._net      = None   # built lazily in fit(), once D is known
         self._X_mean   = None
         self._X_std    = None
+        self._P        = None   # PCA whitening map (D, D') or None
         self._D        = None
         self._fitted   = False
 
@@ -206,8 +224,25 @@ class NNModel:
 
     # ------------------------------------------------------------------
     def _normalise(self, X: np.ndarray) -> np.ndarray:
-        """Z-score normalise using statistics from fit()."""
-        return (X - self._X_mean) / self._X_std
+        """Network input of descriptors X: z-score, then the PCA map."""
+        Z = (X - self._X_mean) / self._X_std
+        return Z if self._P is None else Z @ self._P
+
+    def _direction(self, X: np.ndarray) -> np.ndarray:
+        """The same linear map without the mean (F / S rows): d x_n for
+        a change X in the raw descriptor."""
+        Z = X / self._X_std
+        return Z if self._P is None else Z @ self._P
+
+    def _raw_gradient(self, g: np.ndarray) -> np.ndarray:
+        """Gradient w.r.t. the network input -> w.r.t. the raw descriptor."""
+        if self._P is not None:
+            g = g @ self._P.T
+        return g / self._X_std
+
+    @property
+    def _D_in(self) -> int:
+        return self._D if self._P is None else int(self._P.shape[1])
 
     # ------------------------------------------------------------------
     def _row_weights(self, labels, w_unit, w_user) -> np.ndarray:
@@ -350,10 +385,15 @@ class NNModel:
         self._X_mean = X_stat.mean(axis=0)
         self._X_std  = X_stat.std(axis=0)
         self._X_std[self._X_std < 1e-12] = 1.0
+        self._P = (pca_whitening((X_stat - self._X_mean) / self._X_std,
+                                 self.pca_eps, self.pca_drop)
+                   if self.standardize == 'pca' else None)
         self._D = D
+        if self.verbose and self._P is not None:
+            print(f"  PCA whitening: {D} -> {self._D_in} input directions")
 
         torch.manual_seed(self.seed)
-        self._net = self._build_network(D)
+        self._net = self._build_network(self._D_in)
         if self.optimizer == 'lbfgs':
             opt = torch.optim.LBFGS(self._net.parameters(),
                                     lr=self.learning_rate, max_iter=20,
@@ -393,7 +433,7 @@ class NNModel:
             ends = np.append(starts[1:], len(order_rows))
             dn_all = _t(self._normalise(X[e_row]))
             nat_all = _t(n_at.astype(np.float64))
-            Xdir_all = _t(X / self._X_std)
+            Xdir_all = _t(self._direction(X))
             isE_all = _t(labels == 'E', torch.bool)
             sid_all = _t(sid, torch.long)
             pos = torch.full((len(e_row),), -1, dtype=torch.long, device=dev)
@@ -541,7 +581,7 @@ class NNModel:
         with torch.enable_grad():
             p = self._chain_predict_t(
                 torch.as_tensor(self._normalise(X[e_row]), dtype=f32, device=dev),
-                torch.as_tensor(X / self._X_std, dtype=f32, device=dev),
+                torch.as_tensor(self._direction(X), dtype=f32, device=dev),
                 torch.as_tensor(labels == 'E', device=dev),
                 torch.as_tensor(sid, dtype=torch.long, device=dev),
                 torch.as_tensor(n_at, dtype=f32, device=dev),
@@ -562,7 +602,7 @@ class NNModel:
             f = self._net(dn).sum()
             g = torch.autograd.grad(f, dn)[0]
         return (float(f.detach()),
-                g.detach().cpu().numpy()[0].astype(np.float64) / self._X_std)
+                self._raw_gradient(g.detach().cpu().numpy()[0].astype(np.float64)))
 
     # ------------------------------------------------------------------
     def fit_csv(self,
@@ -623,6 +663,10 @@ class NNModel:
             'D'             : self._D,
             'X_mean'        : self._X_mean,
             'X_std'         : self._X_std,
+            'standardize'   : self.standardize,
+            'pca_eps'       : self.pca_eps,
+            'pca_drop'      : self.pca_drop,
+            'X_P'           : self._P,
             'row_independent'  : self.row_independent,
             'direct_link'      : self.direct_link,
             'descriptor_config': self.descriptor_config,
@@ -650,9 +694,14 @@ class NNModel:
             direct_link   = bool(ckpt.get('direct_link', False)),
             device        = 'cpu',
             verbose       = verbose,
+            # checkpoints before 0.2.0a12 are z-score models
+            standardize   = ckpt.get('standardize', 'zscore'),
+            pca_eps       = ckpt.get('pca_eps', 1e-3),
+            pca_drop      = ckpt.get('pca_drop', 0.0),
         )
         obj._D      = int(ckpt['D'])
-        obj._net    = obj._build_network(obj._D)
+        obj._P      = ckpt.get('X_P')
+        obj._net    = obj._build_network(obj._D_in)
         obj._net.load_state_dict(ckpt['state_dict'])
         obj._X_mean = ckpt['X_mean']
         obj._X_std  = ckpt['X_std']

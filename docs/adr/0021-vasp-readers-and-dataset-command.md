@@ -167,10 +167,31 @@ now a git repository.
   | QELM | 1.4 -> 1.0 | 0.172 -> 0.156 | 0.29 -> 0.26 |
 
 - The NN, which passed on ver2.0.0 (test F 0.19 eV/A), fails on the
-  ver2.1.0 table: test F is 3-6 eV/A. Learning rate 1e-4, z-scoring and
-  weight decay up to 1e-2 were tried (mlip/ext_sweep v21_*).
-- The cause is extrapolation in sparse three-body columns. The Sn-Sn-Sn
-  ADF1 / ODF bins exist only in Sn-rich cells. On the test E rows they
-  reach |z| = 20, against 6 on the training rows.
-- The regularised linear and ELM models tolerate these columns; the
-  unregularised network does not.
+  ver2.1.0 table: test F is 3-6 eV/A. The training F is about as bad, so
+  this is a fitting failure, not extrapolation. (An earlier note blamed
+  test extrapolation in sparse Sn-Sn-Sn columns; that was not the
+  cause.)
+- The column-group test (default NN, mlip/ext_sweep v21_nn_*) gives:
+
+  | columns | count | test E (meV/atom) | test F (eV/A) | result |
+  |---|---|---|---|---|
+  | RDF + CN + COMP | 151 | 2.7 | 0.224 | passes |
+  | + ADF | 605 | 11.2 | 0.49 | worse |
+  | + ODF | 1347 | 112 | 5.4 | collapses |
+  | all | 1801 | 127 | 6.1 | collapses |
+
+  The ODF columns are what break the training.
+- On all columns, none of these reached the target of test F <= 0.25
+  eV/A and E <= 3 meV/atom:
+  - `direct_link: false`: test F 3.8 eV/A.
+  - Hidden layers [64, 32]: test F 7.2 eV/A.
+  - Learning rate 1e-4: test F 4.6 eV/A.
+  - Weight decay up to 1e-2: test F 3.4 eV/A.
+  - `standardize: pca` (new, ADR-0013 addendum) with `pca_drop` from 0
+    to 1e-2: test F 0.78 eV/A at best.
+  - `optimizer: lbfgs`: test F 0.35 eV/A with E 5.8 meV/atom, the best
+    of all, but it overfits (train F 0.12).
+  - PCA with `pca_drop` 1e-4 plus lbfgs: test F 1.04 eV/A.
+- **Known limitation.** With the full ver2.1.0 external tables, use
+  ridge, ELM or QELM, or give the NN the RDF / CN / COMP columns only.
+  The runner's ext21_nn case is left failing as the record.

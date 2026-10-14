@@ -89,6 +89,9 @@ def _build_model(model_type, ml, verbose):
             deterministic=ml.get("deterministic", False),
             batch_structures=ml.get("batch_structures", 30),
             optimizer=ml.get("optimizer", "adam"),
+            standardize=ml.get("standardize", "zscore"),
+            pca_eps=ml.get("pca_eps", 1e-3),
+            pca_drop=ml.get("pca_drop", 0.0),
             **common,
         )
     if model_type in ("lgbm", "lightgbm"):
@@ -290,6 +293,9 @@ def _build_atomic_model(model_type, ml, verbose):
             batch_structures=ml.get("batch_structures", 30),
             deterministic=ml.get("deterministic", False),
             device=ml.get("device", "auto"),
+            standardize=ml.get("standardize", "zscore"),
+            pca_eps=ml.get("pca_eps", 1e-3),
+            pca_drop=ml.get("pca_drop", 0.0),
             **common,
         )
     if model_type in ("elm", "qelm"):
