@@ -57,6 +57,13 @@ class RadialDistributionFunction:
 
     Usage
     -----
+    >>> import numpy as np
+    >>> from akitsushima import RadialDistributionFunction
+    >>> base = np.array([[0, 0, 0], [.5, .5, 0], [.5, 0, .5], [0, .5, .5]])
+    >>> cells = np.array([[i, j, k] for i in range(4) for j in range(4) for k in range(4)])
+    >>> lattice = np.eye(3) * 4 * 5.256                  # 4x4x4 fcc Ar, a = 5.256 A
+    >>> positions = (base[None] + cells[:, None]).reshape(-1, 3) * 5.256
+    >>> atom_types = ["Ar"] * len(positions)
     >>> rdf = RadialDistributionFunction(r_max=8.0, n_bins=200)
     >>> rdf.add_frame(lattice, positions, atom_types)   # one or more frames
     >>> result = rdf.compute()

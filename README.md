@@ -235,6 +235,56 @@ energy, forces, stress = fn(lattice, positions, atom_types, nl)
 # energy = -9.4170e-03 eV (force-shifted LJ, the default shift=True)
 ```
 
+### Python API: a machine-learning potential
+
+Training data, an atom-centred ELM on ACSF descriptors, and the model as a
+force field (the same steps as `akitsushima mlip` and `akitsushima relax`):
+
+```python
+import numpy as np
+import akitsushima as ak
+from akitsushima.fitting import AtomicELMModel
+from akitsushima.fitting.descriptors import ACSF
+
+# Training data.  Real data come from DFT: akitsushima.io.build_training_set
+# turns VASP runs into a training set and akitsushima.io.load_training_set
+# reads it back as the structure dicts below.  Here Stillinger-Weber silicon
+# (Stillinger & Weber, PRB 31, 5262 (1985)) stands in for DFT.
+sw = ak.force_fn_from_config({"type": "SW", "species": ["Si"], "params": {
+    "epsilon": 2.1683, "sigma": 2.0951, "a": 1.80, "gamma": 1.20, "lambda": 21.0,
+    "A": 7.049556277, "B": 0.6022245584, "p": 4.0, "q": 0.0, "costheta0": -1 / 3}})
+diamond = np.array([[0, 0, 0], [0, .5, .5], [.5, 0, .5], [.5, .5, 0],
+                    [.25, .25, .25], [.25, .75, .75], [.75, .25, .75], [.75, .75, .25]])
+cells = np.array([[i, j, k] for i in range(2) for j in range(2) for k in range(2)])
+frac = (diamond[None] + cells[:, None]).reshape(-1, 3) / 2       # 64-atom 2x2x2 cell
+rng = np.random.default_rng(0)
+structures = []
+for _ in range(8):
+    lattice = np.eye(3) * 10.862 * rng.uniform(0.98, 1.02)
+    positions = frac @ lattice + rng.normal(0.0, 0.05, frac.shape)
+    types = ["Si"] * len(positions)
+    e, f, s = sw(lattice, positions, types)
+    structures.append({"lattice": lattice, "positions": positions, "atom_types": types,
+                       "ref_energy": e / len(types),        # eV/atom
+                       "ref_forces": f,                     # eV/A, (N, 3)
+                       "ref_stress": s})                    # eV/A^3, compressive-positive
+
+# Descriptor and model.  A pair baseline (e.g. ZBL) and isolated-atom
+# energies go in the constructor: AtomicELMModel(baseline=..., isolated_atom_energy=...).
+acsf = ACSF.from_grid(["Si"], 3.771, g2={"eta": [4.0], "rs": [2.2, 2.6, 3.0, 3.4]},
+                      g4={"eta": [0.05], "zeta": [1, 2], "lambda": [-1, 1]})
+model = AtomicELMModel(n_hidden=64, seed=42, verbose=False).fit(structures, acsf)
+print(model.score_structures(structures, acsf)["F"]["RMSE"], "eV/A training force RMSE")
+model.save("si_model.npz")
+
+# The model is a force field for every solver.
+fn = ak.make_force_fn(model)
+result = ak.GeometryOptimiser(structures[0]["lattice"], structures[0]["positions"],
+                              structures[0]["atom_types"], force_fn=fn, relax_cell=True,
+                              fmax=0.01, verbose=False).run()
+print(result["energy"] / 64, "eV/atom after relaxation")
+```
+
 ## CLI reference
 
 | Command | Purpose |

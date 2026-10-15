@@ -37,7 +37,7 @@ from typing import Callable, List, Optional
 import numpy as np
 
 from ..constants import ATOMIC_MASS, EV_ANG3_TO_GPA, EV_ANG_TO_AMU_ANG_FS2, K_B
-from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.optional_matplotlib import have_matplotlib, plt
 from .molecular_dynamics import NVTSimulation
 from .phonon import PhononCalculator
 
@@ -1057,7 +1057,7 @@ class ThermalConductivityCalculator:
                         fh.write(f"{a},{b},{self._kappa[a,b]:.4f},{std:.4f}\n")
             if verbose: print(f"  ... tensor -> {path}")
 
-        if HAS_MATPLOTLIB:
+        if have_matplotlib():
             self._plot_hcacf(output_dir)
             self._plot_kappa_running(output_dir)
 

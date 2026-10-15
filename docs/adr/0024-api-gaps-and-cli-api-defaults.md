@@ -88,8 +88,47 @@ timing summary now prints only when `verbose` is on, so the internal
 relaxations of elastic, qha, dielectric and tsa stay quiet.
 `tests/test_api_workflows.py` pins each default to the CLI's.
 
-Held back: NVT `tau_nhc`.  The CLI's 20 fs is below the 50-200 fs that
-NVTSimulation's own docstring calls typical (UNCERTAIN which is right;
-a reference for Nose-Hoover chain coupling times in solids would settle
-it), and kappa, the diffusion analyser and anneal rely on the 100 fs
-default.  Put back to the user.
+NVT `tau_nhc` was then decided the other way (user, 2026-10-15): the
+CLI's 20 fs fallback is below the 50-200 fs NVTSimulation documents as
+typical, and kappa, the diffusion analyser and anneal rely on 100 fs, so
+the CLI `md` fallback and the nvt / npt templates became 100 fs; the API
+is unchanged.  (UNCERTAIN which coupling time suits solids best; a
+reference for Nose-Hoover chain coupling times would settle it.  The
+anneal template keeps its tuned 20 fs.)
+
+## Stage 3 (Q23-Q26)
+
+- **MLIP API (Q23).** Every model constructor takes `baseline=`
+  (a PairBaseline) and `isolated_atom_energy=`, written into the same
+  `physics_config` the CLI writes; `model.baseline`, `model.set_physics()`.
+  Tabular models: `fit(..., descriptor=)` sets `descriptor_config`, and
+  `fit_structures(structures, descriptor)` (user decision, 2026-10-15)
+  builds the table minus the baseline and fits -- a tabular `fit` gets a
+  table, so it cannot subtract the baseline itself.  Atom-centred models
+  subtract their baseline in `fit` and `score_structures`; the CLI now
+  passes raw structures.  One class decorator per kind
+  (fitting/models/_api.py) adds all of this without touching each
+  signature.  `akitsushima.io.load_training_set()` is the fit-layout loader
+  (moved from cli/cmd_fit.py).  Tests: the CLI and the API agree bit for
+  bit with a baseline that reaches the data, and, independently of the
+  CLI, a model with `baseline=` equals a baseline-free model on
+  subtracted labels plus the baseline (subtracted exactly once).
+- **Q24.** `akitsushima.io.build_training_set()` does the dataset work
+  (moved from cli/cmd_dataset.py; the CLI keeps reading the YAML and
+  printing).  On the GeSn data the CLI's training_set and log are
+  byte-identical to the baseline run.  `akitsushima.force_fn_from_config()`
+  is the YAML `potential:` bridge, with `fn.r_cut` the CLI's cutoff.
+- **Q25.** README: a self-contained Python MLIP example (SW silicon as
+  stand-in data, ACSF, AtomicELMModel, save, relax), executed by
+  tests/test_public_api.py (relaxed energy within 0.02 eV/atom of SW's
+  own diamond minimum).  `read_vasprun` / `read_outcar` docstrings list
+  the frame keys, units and stress convention; `fit_potential` and the
+  MLIP `fit` docstrings point at `load_training_set` for the structure
+  dicts.  The RDF, TimingCollector and Buckingham `make_force_fn`
+  docstring examples are self-contained.
+- **Q26.** matplotlib: `have_matplotlib()` warns once, when a plot is
+  asked for, not on import (O1).  `fit --config` takes the config's
+  `potential:` unless `--potential` is given (O4).  The ELM score table
+  prints E in eV/atom (O8).  The relax template's `fix_cell` example is
+  the (3, 3) mask the code takes (O9; the 6-element "Voigt mask" was
+  rejected).  `seed` vs `val_seed` is stated in the fit docstrings.

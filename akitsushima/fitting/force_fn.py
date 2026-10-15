@@ -186,7 +186,12 @@ def make_force_fn(backend,
 
     Examples
     --------
-    >>> # Buckingham + Coulomb (ionic crystals)
+    >>> # Buckingham + Coulomb (ionic crystals): MgO, Lewis & Catlow,
+    >>> # J. Phys. C 18, 1149 (1985)
+    >>> from akitsushima import make_force_fn
+    >>> bp = {frozenset({'Mg', 'O'}): {'A': 1428.5, 'rho': 0.2945, 'C': 0.0},
+    ...       frozenset({'O'}): {'A': 22764.0, 'rho': 0.1490, 'C': 27.88}}
+    >>> ch = {'Mg': 2.0, 'O': -2.0}
     >>> fn = make_force_fn('buckingham',
     ...         buck_params=bp, charges=ch, r_cut=8.0)
 

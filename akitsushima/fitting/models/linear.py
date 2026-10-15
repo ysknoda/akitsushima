@@ -63,6 +63,7 @@ from .csv_io import (
     structure_grouped_split,
 )
 from .elm import ELMModel, feature_std
+from ._api import tabular_mlip
 
 __all__ = ["LinearModel", "descriptor_blocks"]
 
@@ -98,6 +99,7 @@ def descriptor_blocks(columns: Sequence[str] | None, D: int) -> np.ndarray:
     return idx.astype(np.int64)
 
 
+@tabular_mlip
 class LinearModel:
     """
     Linear potential E/N = w . d + b trained on E, F and S rows together.

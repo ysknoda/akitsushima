@@ -87,15 +87,14 @@ def _rocksalt_mgo(n):
 
 def test_rdf_example():
     lat, pos = _fcc(A_AR, 5)
-    ns = _run(_examples("solvers.rdf", "RadialDistributionFunction"),
-              _ns(lattice=lat, positions=pos, atom_types=["Ar"] * len(pos)))
+    ns = _run(_examples("solvers.rdf", "RadialDistributionFunction"), {})  # self-contained
     # First fcc shell at a / sqrt(2), 12 neighbours.
     r, g = ns["result"]["r"], ns["result"]["g_total"]
     assert r[np.argmax(g)] == pytest.approx(A_AR / np.sqrt(2), abs=0.1)
 
 
 def test_timing_example(capsys):
-    ns = _run(_examples("utils.timing", "TimingCollector"), _ns(n_steps=3))
+    ns = _run(_examples("utils.timing", "TimingCollector"), {})  # self-contained
     assert ns["summary"]
 
 
@@ -134,8 +133,9 @@ def test_buckingham_examples(in_tmp):
     for path in ("mgo_buck.json", "fitted_potential.json"):
         ak.save_potential(result, path, potential_type="buckingham",
                           r_cut=8.0, species=["Mg", "O"])
-    ns = _ns(bp=BUCK_MGO, ch=Q_MGO, lat=lat, pos=pos, types=types)
-    _run(_examples("fitting.force_fn", "make_force_fn")[:3], ns)
+    ns = _ns(lat=lat, pos=pos, types=types)   # bp, ch: now in the docstring
+    _run([e for e in _examples("fitting.force_fn", "make_force_fn")
+          if "load_mlip_model" not in e], ns)
     _run(_examples("fitting.io_utils", "load_potential")[3:], ns)
     _run(_examples("fitting.io_utils", "load_fit_results"), ns)
     assert ns["res"]["charges"] == Q_MGO
@@ -155,7 +155,8 @@ def si_mlip(in_tmp):
 
 
 def test_make_force_fn_mlip_example(si_mlip):
-    ns = _run(_examples("fitting.force_fn", "make_force_fn")[3:], _ns())
+    ns = _run([e for e in _examples("fitting.force_fn", "make_force_fn")
+               if "load_mlip_model" in e], _ns())
     assert callable(ns["fn"])
 
 

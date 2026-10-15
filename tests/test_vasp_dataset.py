@@ -10,7 +10,8 @@ import yaml
 from test_cli_smoke import _ns
 from vasp_synth import make_frames, write_outcar, write_run, write_vasprun
 
-from akitsushima.cli.cmd_dataset import _split_runs, cmd_dataset
+from akitsushima.cli.cmd_dataset import cmd_dataset
+from akitsushima.io.dataset import _split_runs
 from akitsushima.cli.cmd_fit import _structures_from_csv
 from akitsushima.constants import VASP_KB_TO_EV_ANG3
 from akitsushima.fitting.models.csv_io import load_mlip_csv

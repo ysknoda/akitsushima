@@ -9,10 +9,12 @@ from typing import Optional
 import numpy as np
 
 from .elm import ELMModel
+from ._api import tabular_mlip
 
 __all__ = ["QuantizedELMModel"]
 
 
+@tabular_mlip
 class QuantizedELMModel(ELMModel):
     """
     Power-of-2 weight quantization ELM.

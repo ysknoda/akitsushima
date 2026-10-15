@@ -140,7 +140,8 @@ relax:
   hessian_delta: 0.01                # A   RFO finite-difference Hessian step.
                                      # That Hessian costs 2*(3N+9) force
                                      # evaluations before step 0.
-  # fix_cell:    [1, 1, 1, 0, 0, 0]  # Voigt mask, 1 = frozen
+  # fix_cell:    [[0, 0, 0], [0, 0, 0], [1, 1, 1]]  # (3, 3) per lattice-vector
+  #                                  # component, 1 = frozen (here: c fixed)
   flush_every_step: true             # flush relax.log/XDATCAR each step
   fsync_every_step: false            # fsync too (slow; for crash safety)
   timing:        true
@@ -264,7 +265,7 @@ md:
   # present.
   n_steps:      10000
   equil_steps:  1000               # steps with velocity rescaling active
-  tau_nhc:      20.0               # fs  NHC thermostat time constant
+  tau_nhc:      100.0              # fs  NHC thermostat time constant (50-200 typical)
   velocity_rescale_steps: 1000     # = equil_steps: VS active during equilibration
   traj_every:   10                 # write trajectory every N steps
   thermo_every: 50                 # write thermo log every N steps
@@ -349,7 +350,7 @@ md:
                                    # drift-vs-dt table
   n_steps:     20000
   equil_steps: 2000
-  tau_nhc:     20.0                # fs
+  tau_nhc:     100.0               # fs
   tau_baro:    200.0               # fs
   velocity_rescale_steps: 2000
   traj_every:  10

@@ -141,7 +141,7 @@ def _structures_and_descriptor(desc_cfg, csv_path, poscar_dir, species, verbose)
     """Structures (fit layout) and the ACSF built from ``desc_cfg`` (or
     ``desc_cfg`` itself when it is already an ACSF, for test data)."""
     from ..fitting.descriptors import ACSF
-    from .cmd_fit import _structures_from_csv
+    from ..io.training_set import _structures_from_csv
 
     t, lab, _, Xs = load_mlip_csv(csv_path, verbose=False)
     structs = _structures_from_csv(t, lab, Xs, poscar_dir, verbose=verbose)
@@ -430,14 +430,15 @@ def cmd_mlip(args) -> int:
         raw_structs = structs
         if base is not None:
             _report_baseline(base, structs)
-            structs = base.subtract(structs)
+        # the model subtracts its own baseline in fit / score_structures
+        # (ADR-0024 Q23), so the structures go in raw
         t1 = _time.perf_counter()
         try:
             model.fit(structs, desc, weight_csv=ml_cfg.get("weight_csv"), **fit_kw)
             if any("fit_to" in t for t in _terms(ml_cfg.get("baseline"))):
                 base = _fit_short_range(
                     model, desc, ml_cfg, base, raw_structs,
-                    lambda b: model.fit(b.subtract(raw_structs), desc,
+                    lambda b: model.fit(raw_structs, desc,
                                         weight_csv=ml_cfg.get("weight_csv"),
                                         **fit_kw),
                     extra_summary)
@@ -455,8 +456,6 @@ def cmd_mlip(args) -> int:
             test_structs, _ = _structures_and_descriptor(
                 desc, test_csv, tdir, desc.species, False
             )
-            if base is not None:
-                test_structs = base.subtract(test_structs)
     elif desc_cfg:
         poscar_dir = struct_cfg.get(
             "poscar_dir", os.path.dirname(os.path.abspath(training_csv))

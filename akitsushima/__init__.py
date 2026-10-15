@@ -154,6 +154,7 @@ from .solvers import (
     elastic_moduli,
     fit_equation_of_state,
 )
+from .solvers.config_bridge import force_fn_from_config
 
 __version__ = "0.2.0a14"
 
@@ -185,7 +186,7 @@ __all__ = [
     "PhononCalculator", "ThermalConductivityCalculator",
     "RadialDistributionFunction",
     "ElasticConstantsCalculator", "elastic_moduli", "fit_equation_of_state",
-    "DiffusionAnalyzer",
+    "DiffusionAnalyzer", "force_fn_from_config",
     # io
     "parse_poscar", "write_poscar",
 ]

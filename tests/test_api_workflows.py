@@ -165,3 +165,165 @@ def test_relax_without_output_dir_keeps_the_working_directory_clean(tmp_path, mo
     lat, pos, types = _si64(5)
     ak.GeometryOptimiser(lat, pos, types, force_fn=_sw_fn(), max_steps=2, verbose=False).run()
     assert sorted(p.name for p in tmp_path.iterdir()) == ["relax_output"]
+
+
+def test_nvt_tau_nhc_default_is_the_same_in_cli_and_api():
+    """ADR-0024 Q22: the CLI md fell back to 20 fs, below the 50-200 fs
+    NVTSimulation documents as typical; both are now its 100 fs."""
+    import inspect
+    from akitsushima.cli.templates import _DUMP_MAP
+
+    assert inspect.signature(ak.NVTSimulation).parameters["tau_nhc"].default == 100.0
+    src = inspect.getsource(__import__("akitsushima.cli.cmd_md", fromlist=["x"]))
+    assert 'md_cfg.get("tau_nhc",    20.0)' not in src
+    for key in ("nvt", "npt"):
+        assert yaml.safe_load(_DUMP_MAP[key])["md"]["tau_nhc"] == 100.0
+
+
+# ADR-0024 Q23: the MLIP API without hand-steps.  The baseline reaches
+# into the Si data (nearest neighbours ~2.35 A < r_outer 2.6 A), so
+# subtracting it twice or not at all would change every number.
+ZBL = {"type": "zbl", "r_inner": 1.5, "r_outer": 2.6}
+
+
+def _cli_mlip(tmp_path, form, extra):
+    structs = _sw_si_structures(16, 1)
+    _write_layout_b(tmp_path / "train", structs)
+    ml = {"output_dir": "out", "model": "elm", "form": form, "descriptor": DESC,
+          "n_hidden": 24, "seed": 5, **extra}
+    (tmp_path / "mlip.yaml").write_text(yaml.safe_dump(
+        {"structure": {"training_csv": "train/structures.csv"},
+         "potential": {"species": ["Si"]}, "mlip": ml}))
+    assert _DISPATCH["mlip"](_ns(tmp_path / "mlip.yaml")) == 0
+    return load_mlip_model(json.loads(
+        (tmp_path / "out" / "mlip_summary.json").read_text())["model"])
+
+
+@pytest.mark.parametrize("form", ["tabular", "atom_centred"])
+def test_mlip_with_baseline_api_matches_cli(form, tmp_path, monkeypatch):
+    from akitsushima.fitting.physics import PairBaseline
+    from akitsushima.io import load_training_set
+
+    monkeypatch.chdir(tmp_path)
+    cli_model = _cli_mlip(tmp_path, form, {"baseline": ZBL})
+    data = load_training_set("train/structures.csv")
+    desc = ACSF.from_grid(["Si"], DESC["r_cut"], DESC["g2"], DESC["g4"])
+    kw = dict(n_hidden=24, seed=5, verbose=False, baseline=PairBaseline(["Si"], [ZBL]))
+    if form == "atom_centred":
+        api = AtomicELMModel(**kw).fit(data, desc)          # raw structures
+    else:
+        api = ELMModel(**kw).fit_structures(data, desc)
+    lat, pos, types = _si64(9)
+    for a, b in zip(ak.make_force_fn(api)(lat, pos, types),
+                    ak.make_force_fn(cli_model)(lat, pos, types)):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_fit_with_descriptor_makes_a_force_field(tmp_path, monkeypatch):
+    """G3: the tabular model needed descriptor_config set by hand."""
+    monkeypatch.chdir(tmp_path)
+    structs = _sw_si_structures(8, 2)
+    desc = ACSF.from_grid(["Si"], DESC["r_cut"], DESC["g2"], DESC["g4"])
+    y, lab, w, X = build_table(structs, desc)
+    m = ELMModel(n_hidden=16, verbose=False).fit(y, lab, X, weights=w, descriptor=desc)
+    assert m.descriptor_config == desc.to_json()
+    e, f, s = ak.make_force_fn(m)(*_si64(1))
+    assert np.isfinite(e)
+
+
+def test_physics_arguments_write_the_cli_physics_config():
+    from akitsushima.fitting.physics import PairBaseline
+    base = PairBaseline(["Si"], [ZBL])
+    for cls in (ELMModel, AtomicELMModel, ak.LinearModel):
+        m = cls(baseline=base, isolated_atom_energy={"Si": -0.5}, verbose=False)
+        assert json.loads(m.physics_config) == {
+            "baseline": base.config(), "isolated_atom_energy": {"Si": -0.5}}
+        assert m.baseline.config() == base.config()
+
+
+@pytest.mark.parametrize("form", ["tabular", "atom_centred"])
+def test_baseline_is_subtracted_exactly_once(form):
+    """Independent of the CLI: trained on raw labels with baseline=, the
+    model must equal a baseline-free model trained on labels minus the
+    baseline, plus the baseline itself (once, not twice, not never)."""
+    from akitsushima.fitting.physics import PairBaseline
+
+    structs = _sw_si_structures(16, 1)
+    desc = ACSF.from_grid(["Si"], DESC["r_cut"], DESC["g2"], DESC["g4"])
+    base = PairBaseline(["Si"], [ZBL])
+    kw = dict(n_hidden=24, seed=5, verbose=False)
+    if form == "atom_centred":
+        with_b = AtomicELMModel(baseline=base, **kw).fit(structs, desc)
+        plain = AtomicELMModel(**kw).fit(base.subtract(structs), desc)
+    else:
+        with_b = ELMModel(baseline=base, **kw).fit_structures(structs, desc)
+        plain = ELMModel(**kw).fit_structures(base.subtract(structs), desc)
+    lat, pos, types = _si64(9)
+    Eb, Fb, Sb = base.compute(lat, pos, types)
+    a = ak.make_force_fn(with_b)(lat, pos, types)
+    b = ak.make_force_fn(plain)(lat, pos, types)
+    assert abs(Eb) > 1e-3                      # the baseline matters here
+    np.testing.assert_allclose(a[0], b[0] + Eb, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(a[1], b[1] + Fb, rtol=0, atol=1e-9)
+
+
+def test_build_training_set_api_matches_cli_dataset(tmp_path):
+    """ADR-0024 Q24 (G1): the dataset command's work is a library call."""
+    import filecmp
+
+    from test_vasp_dataset import _run_dataset, _runs
+
+    from akitsushima.io import build_training_set, load_training_set
+
+    _runs(tmp_path / "runs", n_runs=5, interleave=True)
+    e_atom = {"Ge": -0.5, "Sn": -0.7}
+    split = {"test_fraction": 0.4, "stratify": "composition", "seed": 3}
+    assert _run_dataset(tmp_path, isolated_atom_energy=e_atom, split=split) == 0
+    res = build_training_set(str(tmp_path / "runs"), output_dir=str(tmp_path / "api"),
+                             isolated_atom_energy=e_atom, test_fraction=0.4, seed=3)
+    assert res["n_test"] > 0
+    for rel in ("train/structures.csv", "test/structures.csv", "manifest.csv",
+                "train/0/POSCAR", "test/0/POSCAR"):
+        assert filecmp.cmp(tmp_path / "out" / rel, tmp_path / "api" / rel, shallow=False), rel
+    assert len(load_training_set(str(tmp_path / "api" / "train" / "structures.csv"))) == res["n_train"]
+
+
+def test_force_fn_from_config_reproduces_cli_relax(tmp_path, monkeypatch):
+    """ADR-0024 Q24 (G5): the YAML potential bridge is public."""
+    monkeypatch.chdir(tmp_path)
+    lat, pos, types = _si64(6)
+    ak.write_poscar("POSCAR", lat, pos, types)
+    pot = {"type": "SW", "species": ["Si"], "params": SW_SI}
+    rel = {"output_dir": "cli_out", "max_steps": 20, "relax_cell": True}
+    (tmp_path / "relax.yaml").write_text(yaml.safe_dump(
+        {"structure": {"poscar": "POSCAR"}, "potential": pot, "relax": rel}))
+    assert _DISPATCH["relax"](_ns(tmp_path / "relax.yaml")) == 0
+    fn = ak.force_fn_from_config(pot)
+    p = ak.parse_poscar("POSCAR")      # the CLI's input, at POSCAR precision
+    ak.GeometryOptimiser(p["lattice"], p["positions"], p["atom_types"], force_fn=fn,
+                         relax_cell=True, max_steps=20,
+                         output_dir="api_out", verbose=False).run()
+    assert (tmp_path / "api_out" / "POSCAR_relaxed").read_text() == \
+        (tmp_path / "cli_out" / "POSCAR_relaxed").read_text()
+
+
+def test_score_table_prints_energy_in_ev_per_atom(capsys):
+    """ADR-0024 O8: the E rows are eV/atom; the table said eV."""
+    desc = ACSF.from_grid(["Si"], DESC["r_cut"], DESC["g2"], DESC["g4"])
+    ELMModel(n_hidden=8, verbose=True).fit_structures(_sw_si_structures(6, 3), desc)
+    rows = [l for l in capsys.readouterr().out.splitlines() if l.strip().startswith("E ")]
+    assert rows and all(l.rstrip().endswith("eV/atom") for l in rows)
+
+
+def test_relax_template_fix_cell_example_is_accepted():
+    """ADR-0024 O9: the template showed a 6-element 'Voigt mask', which
+    GeometryOptimiser rejects (it takes a (3, 3) mask)."""
+    import re as _re
+    from akitsushima.cli.templates import _DUMP_MAP
+
+    line = next(l for l in _DUMP_MAP["relax"].splitlines() if "fix_cell:" in l)
+    mask = yaml.safe_load(_re.sub(r"^\s*#\s*fix_cell:\s*", "", line).split("#")[0])
+    lat, pos, types = _si64(1)
+    go = ak.GeometryOptimiser(lat, pos, types, force_fn=_sw_fn(), relax_cell=True,
+                              fix_cell=mask, max_steps=1, verbose=False)  # constructed only
+    assert go._fix_cell_mask.reshape(3, 3)[2].all()

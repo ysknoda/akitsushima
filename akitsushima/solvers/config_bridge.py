@@ -10,7 +10,8 @@ from ..fitting import registry
 from ..fitting.io_utils import _load_potential_json
 from ..utils.optional_yaml import _HAS_YAML, _yaml
 
-__all__ = ["_load_yaml", "_load_cfg", "_write_cfg", "_build_force_fn_from_yaml"]
+__all__ = ["force_fn_from_config", "_load_yaml", "_load_cfg", "_write_cfg",
+           "_build_force_fn_from_yaml"]
 
 
 def _load_yaml(path: str) -> dict:
@@ -142,3 +143,25 @@ def _write_cfg(path: str, default: dict) -> None:
     with open(path, "w") as fh:
         json.dump(default, fh, indent=2)
     print(f"Template config written to {path}")
+
+
+def force_fn_from_config(potential: dict):
+    """A force function from a ``potential:`` section, as the CLI builds it
+    (ADR-0024, Q24): the same dict a relax / md / phonon YAML holds, e.g.
+    ``{"type": "SW", "species": ["Si"], "params": {...}}``,
+    ``{"type": "MLIP", "model": "out/atomic_elm_model.npz"}`` or
+    ``{"type": "Buckingham", "potential_json": "fit.json", "r_cut": 8.0,
+    "coulomb_method": "pppm"}``.
+
+    The function is called as ``fn(lattice, positions, atom_types)`` ->
+    (energy [eV], forces (N, 3) [eV/A], stress (3, 3) [eV/A^3,
+    compressive-positive]); ``fn.r_cut`` is the cutoff the CLI hands the
+    solvers, so passing ``fn`` to any solver reproduces the CLI.
+    """
+    fn, r_cut, _, _ = _build_force_fn_from_yaml(dict(potential))
+    try:
+        fn.r_cut = float(r_cut)
+    except AttributeError:          # an object without a settable r_cut
+        pass
+    return fn
+

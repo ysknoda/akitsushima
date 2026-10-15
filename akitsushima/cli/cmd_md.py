@@ -69,7 +69,7 @@ def cmd_md(args) -> int:
             # The defaults differ per ensemble and must match what the
             # constructors below actually receive: printing 20.0 for an
             # NPT run that then ran at 100.0 was simply a false report.
-            _tau_default = 20.0 if ens == "nvt" else 100.0
+            _tau_default = 100.0
             print(f"  Tau NHC      : {md_cfg.get('tau_nhc', _tau_default)} fs")
         if ens == "npt":
             print(f"  Tau baro     : {md_cfg.get('tau_baro', 1000.0)} fs")
@@ -123,7 +123,7 @@ def cmd_md(args) -> int:
     else:
         sim = NVTSimulation(**common,
                             temperature=md_cfg.get("temperature",300.0),
-                            tau_nhc    =md_cfg.get("tau_nhc",    20.0),
+                            tau_nhc    =md_cfg.get("tau_nhc",    100.0),
                             velocity_rescale_steps=md_cfg.get(
                                 "velocity_rescale_steps", 0))
 

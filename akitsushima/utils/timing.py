@@ -16,9 +16,10 @@ class TimingCollector:
 
     Usage
     -----
+    >>> from akitsushima.utils.timing import TimingCollector
     >>> tc = TimingCollector(enabled=True)
     >>> tc.start("total")
-    >>> for step in range(n_steps):
+    >>> for step in range(3):
     ...     tc.start("step")
     ...     ...                         # one MD / optimiser step
     ...     tc.stop("step")

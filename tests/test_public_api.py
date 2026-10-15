@@ -314,3 +314,45 @@ def test_missing_torch_message_names_the_extra(monkeypatch, module, build):
     msg = str(exc.value)
     assert 'pip install "akitsushima[torch]"' in msg
     assert "break-system-packages" not in msg
+
+
+@pytest.mark.skipif(not os.path.isfile(_README),
+                    reason="README.md not shipped (installed package)")
+def test_readme_mlip_example_runs(tmp_path, monkeypatch):
+    """ADR-0024 Q25: the README's machine-learning-potential example, run as
+    written.  Its relaxed energy must sit near the minimum of the
+    Stillinger-Weber silicon it was trained on."""
+    with open(_README) as fh:
+        text = fh.read()
+    match = re.search(r"### Python API: a machine-learning potential\n.*?```python\n(.*?)```",
+                      text, re.S)
+    assert match, "README.md has no MLIP example block"
+    monkeypatch.chdir(tmp_path)
+    ns = {}
+    exec(compile(match.group(1), "<README.md MLIP example>", "exec"), ns)
+    import akitsushima as ak
+    a = 5.431   # SW Si equilibrium lattice constant [A] (Stillinger & Weber 1985)
+    diamond = ns["frac"] @ (np.eye(3) * 2 * a)
+    e_min = ns["sw"](np.eye(3) * 2 * a, diamond, ["Si"] * 64)[0] / 64
+    assert abs(ns["result"]["energy"] / 64 - e_min) < 0.02
+    assert (tmp_path / "si_model.npz").is_file()
+    assert isinstance(ns["model"], ak.AtomicELMModel)
+
+
+def test_import_without_matplotlib_does_not_warn(tmp_path):
+    """ADR-0024 O1: without matplotlib every `import akitsushima` warned,
+    plot or no plot; now only a requested plot does."""
+    script = (
+        "import sys, warnings\n"
+        "sys.modules['matplotlib'] = None\n"      # import fails like an absent package
+        "warnings.simplefilter('error')\n"
+        "import akitsushima\n"
+        "from akitsushima.utils.optional_matplotlib import have_matplotlib\n"
+        "warnings.simplefilter('always')\n"
+        "with warnings.catch_warnings(record=True) as w:\n"
+        "    assert have_matplotlib() is False and have_matplotlib() is False\n"
+        "assert len(w) == 1, w\n"
+        "print('OK')\n")
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       timeout=120, cwd=str(tmp_path))
+    assert r.returncode == 0 and "OK" in r.stdout, r.stderr

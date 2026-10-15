@@ -98,6 +98,14 @@ def read_vasprun(path: str) -> list[dict]:
     A file cut off mid-run (job killed) is read up to the last complete
     ``<calculation>``, with a warning; a file without any complete step
     raises ``ValueError``.
+
+    Returns one dict per ionic step, in run order, with keys
+    ``lattice`` (3, 3) [A], ``positions`` (N, 3) Cartesian [A],
+    ``atom_types``, ``natoms``, ``energy_free`` / ``energy_wo_entropy`` /
+    ``energy_sigma0`` [eV, total], ``forces`` (N, 3) [eV/A] and ``stress``
+    (3, 3) [eV/A^3, compressive-positive: VASP's kB values scaled by
+    ``VASP_KB_TO_EV_ANG3``, no sign flip] or None.  :func:`read_vasprun`
+    and :func:`read_outcar` return the same layout.
     """
     atom_types = None
     frames: list[dict] = []
@@ -152,6 +160,14 @@ def read_outcar(path: str) -> list[dict]:
     the ``POSITION  TOTAL-FORCE`` table, and the ``FREE ENERGIE`` block.
     A step is kept once its energy block has been read, so an OUTCAR cut
     off mid-step yields the complete steps only.
+
+    Returns one dict per ionic step, in run order, with keys
+    ``lattice`` (3, 3) [A], ``positions`` (N, 3) Cartesian [A],
+    ``atom_types``, ``natoms``, ``energy_free`` / ``energy_wo_entropy`` /
+    ``energy_sigma0`` [eV, total], ``forces`` (N, 3) [eV/A] and ``stress``
+    (3, 3) [eV/A^3, compressive-positive: VASP's kB values scaled by
+    ``VASP_KB_TO_EV_ANG3``, no sign flip] or None.  :func:`read_vasprun`
+    and :func:`read_outcar` return the same layout.
     """
     with open(path, "r", errors="replace") as fh:
         lines = fh.readlines()

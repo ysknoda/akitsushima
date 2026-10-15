@@ -1,5 +1,7 @@
 from .efs import read_efs_file, write_efs_file
 from .poscar import parse_poscar, write_poscar
+from .dataset import build_training_set
+from .training_set import load_training_set
 from .vasp import read_outcar, read_vasprun
 from .xdatcar import (
     _write_xdatcar_frame,
@@ -14,4 +16,6 @@ __all__ = [
     "read_efs_file",
     "read_vasprun",
     "read_outcar",
+    "load_training_set",
+    "build_training_set",
 ]

@@ -14,10 +14,12 @@ from .csv_io import (
     structure_grouped_split,
 )
 from .elm import ELMModel, feature_std, pca_whitening
+from ._api import tabular_mlip
 
 __all__ = ["NNModel"]
 
 
+@tabular_mlip
 class NNModel:
     """
     Feedforward neural-network machine-learning potential trained from

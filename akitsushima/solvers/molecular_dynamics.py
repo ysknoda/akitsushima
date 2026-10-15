@@ -20,7 +20,7 @@ from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
 from ..utils.mpi import _mpi_rank
-from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.optional_matplotlib import have_matplotlib, plt
 from ..utils.timing import TimingCollector
 
 __all__ = ["NVTSimulation", "NVESimulation", "NPTSimulation"]
@@ -806,7 +806,7 @@ class NVTSimulation(_BaseMDSimulation):
             print(f"  Final POSCAR: {out_poscar}")
 
         # ---- Optional plots --------------------------------------------
-        if (self.save_plots and HAS_MATPLOTLIB and len(self._thermo_log) > 1
+        if (self.save_plots and have_matplotlib() and len(self._thermo_log) > 1
                 and _mpi_rank == 0):
             self._save_md_plots()
 
@@ -1801,7 +1801,7 @@ class NPTSimulation(_BaseMDSimulation):
             print(f"  Trajectory  : {traj_path}")
             print(f"  Final POSCAR: {out_poscar}")
 
-        if (self.save_plots and HAS_MATPLOTLIB and len(T_list) > 1
+        if (self.save_plots and have_matplotlib() and len(T_list) > 1
                 and _mpi_rank == 0):
             self._save_plots(T_list, P_list, V_list)
 

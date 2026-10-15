@@ -967,3 +967,24 @@ def test_esm_command_refuses_a_relax_section(tmp_path, capsys):
     _write_yaml(yaml_path, cfg)
     assert cmd_esm(_ns(yaml_path)) == 1
     assert "coulomb_method: esm" in capsys.readouterr().out
+
+
+def test_cmd_fit_takes_the_potential_from_its_config(tmp_path, small_cell_ok):
+    """ADR-0024 O4: `fit --config cfg` without --potential used
+    --potential's default (buckingham) and failed with "Cannot build
+    BUCKINGHAM ParameterSet"; the config's own `potential:` now applies."""
+    import json
+
+    from akitsushima.cli.parser import build_parser
+
+    csv_path = _write_lj_training_set(tmp_path)
+    cfg = {"potential": "lj", "training_csv": str(csv_path),
+           "output_dir": str(tmp_path / "out"), "r_cut": 6.0, "shift": True,
+           "initial_lj": {"Al-Al": {"epsilon": 0.3, "sigma": 2.6}}}
+    cfg_path = tmp_path / "fit.json"
+    cfg_path.write_text(json.dumps(cfg))
+    args = build_parser().parse_args(["fit", "--config", str(cfg_path), "--quiet"])
+    assert args.potential is None
+    assert cmd_fit(args) == 0
+    fitted = json.load(open(tmp_path / "out" / "fitted_potential.json"))
+    assert fitted["potential_type"] == "lj"

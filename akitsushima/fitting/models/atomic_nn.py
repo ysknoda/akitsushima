@@ -25,10 +25,12 @@ from ...utils.optional_torch import HAS_TORCH, _torch_nn, torch
 from .atomic import _VOIGT, _prepare
 from .elm import ELMModel
 from .nn import NNModel
+from ._api import atomic_mlip
 
 __all__ = ["AtomicNNModel"]
 
 
+@atomic_mlip
 class AtomicNNModel:
     """
     Parameters as NNModel (hidden_layers, activation, direct_link,

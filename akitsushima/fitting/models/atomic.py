@@ -31,6 +31,7 @@ import numpy as np
 from .csv_io import load_weights_csv, structure_grouped_split
 from .elm import ELMModel, feature_std, pca_whitening, solve_constrained
 from .quantized_elm import QuantizedELMModel
+from ._api import atomic_mlip
 
 __all__ = ["AtomicData", "AtomicELMModel", "AtomicQELMModel"]
 
@@ -172,6 +173,7 @@ def _scores(model, data, y, lab, ptr, structs, name):
     return ELMModel._score(y[rows], pred, lab[rows], name)
 
 
+@atomic_mlip
 class AtomicELMModel:
     """
     Atom-centred ELM: eps_s(G) = beta_s . g(W_s x + b_s) (+ gamma_s . x)
@@ -359,7 +361,13 @@ class AtomicELMModel:
     ) -> "AtomicELMModel":
         """
         Fit on a list of structure dicts (or an :class:`AtomicData`) with
-        an ACSF ``descriptor``.  Rows, weights and the structure-grouped
+        an ACSF ``descriptor``.  The dicts are those of
+        :func:`akitsushima.io.load_training_set` (``lattice``, ``positions``,
+        ``atom_types``, ``ref_energy`` [eV/atom], ``ref_forces`` [eV/A],
+        ``ref_stress`` (3, 3) [eV/A^3, compressive-positive]); a model built
+        with ``baseline=`` subtracts it from them here.  ``seed`` (constructor)
+        fixes the random hidden layer, ``val_seed`` the structure-grouped
+        validation split.  Rows, weights and the structure-grouped
         validation split are those of the tabular models on the same
         structures (ADR-0005, decisions 3 and 4).
         """
@@ -656,6 +664,7 @@ class AtomicELMModel:
         return obj
 
 
+@atomic_mlip
 class AtomicQELMModel(AtomicELMModel):
     """Atom-centred ELM whose species units are QuantizedELMModel
     (quantised hidden weights); max_exponent, p_zero, use_sparse_w and the

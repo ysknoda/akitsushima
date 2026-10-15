@@ -14,7 +14,7 @@ from ..fitting.mlip_engine import check_mlip_for_solver
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame
 from ..utils.mpi import _mpi_rank
-from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.optional_matplotlib import have_matplotlib, plt
 from ..utils.timing import TimingCollector
 from .molecular_dynamics import _BaseMDSimulation
 
@@ -941,7 +941,7 @@ class GCMCMDSimulation(_BaseMDSimulation):
             print(f"  Acc_disp = {acc_m:.4f}" if np.isfinite(acc_m) else "  Acc_disp = n/a")
             print(f"  Files    : {traj_path}, {thermo_path}, {n_path}")
 
-        if HAS_MATPLOTLIB and _mpi_rank == 0:
+        if have_matplotlib() and _mpi_rank == 0:
             self._save_plots()
 
         self._tc.stop("total")  # timing

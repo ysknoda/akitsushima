@@ -16,7 +16,7 @@ from ..utils.mpi import (
     _mpi_size,
     local_only,
 )
-from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.optional_matplotlib import have_matplotlib, plt
 from ..utils.timing import TimingCollector
 
 __all__ = ["PhononCalculator"]
@@ -1239,7 +1239,7 @@ class PhononCalculator:
                 print(f"  DOS          -> {dos_path}")
 
         # Plots
-        if HAS_MATPLOTLIB:
+        if have_matplotlib():
             if self._band_result is not None:
                 self._plot_dispersion(output_dir)
             if self._dos_result is not None:

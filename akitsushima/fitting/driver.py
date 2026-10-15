@@ -28,7 +28,7 @@ from scipy.optimize import differential_evolution, least_squares, minimize
 
 from ..constants import EV_ANG3_TO_GPA
 from ..engine import compute_all_general
-from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.optional_matplotlib import have_matplotlib, plt
 from ..utils.mpi import _mpi_allreduce_sum_scalar, _mpi_rank
 from ..utils.timing import TimingCollector
 from .io_utils import _pair_to_str, save_potential
@@ -386,7 +386,7 @@ def parity_plot_all(train_sc  : ScoreCard,
       - Perfect-prediction diagonal (dashed)
       - Per-set RMSE in the legend
     """
-    if not HAS_MATPLOTLIB:
+    if not have_matplotlib():
         return
     if not _is_root():
         return
@@ -633,8 +633,10 @@ def fit_potential(param_set      : FittableParameterSet,
     ----------
     param_set      : FittableParameterSet instance.
     structures     : list of structure dicts (``lattice``, ``positions``,
-                     ``atom_types``, ``natoms``, ``ref_energy``; optional
-                     ``ref_forces``, ``ref_stress``, ``scale``).
+                     ``atom_types``, ``natoms``, ``ref_energy`` [eV/atom];
+                     optional ``ref_forces`` (N, 3) [eV/A], ``ref_stress``
+                     (3, 3) [eV/A^3, compressive-positive], ``scale``), as
+                     :func:`akitsushima.io.load_training_set` returns them.
     r_cut          : short-range cutoff [A].
     ewald_alpha    : Ewald alpha [A^-1]; auto if None.
     weights        : dict controlling the loss function.

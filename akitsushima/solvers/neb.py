@@ -15,7 +15,7 @@ import numpy as np
 from ..engine.neighborlist import NeighbourList, neighbour_list_for
 from ..io.poscar import write_poscar
 from ..utils.mpi import _mpi_allreduce_sum, _mpi_domain_split, _mpi_rank, local_only
-from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
+from ..utils.optional_matplotlib import have_matplotlib, plt
 from ..utils.timing import TimingCollector
 
 __all__ = ["NEBChain", "NEBOptimiser"]
@@ -527,7 +527,7 @@ class NEBOptimiser:
             self._save_path(s_arr, e_arr)
             self._save_ts_poscar()
             self._save_all_images()
-            if HAS_MATPLOTLIB:
+            if have_matplotlib():
                 self._plot_path(s_arr, e_arr)
 
         self._tc.stop("total")  # timing

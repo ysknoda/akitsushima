@@ -21,6 +21,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from ._api import tabular_mlip
 from .csv_io import (
     build_structure_index,
     load_mlip_csv,
@@ -96,6 +97,7 @@ def pca_whitening(Xz: np.ndarray, eps: float = 1e-3,
     return U[:, keep] / np.sqrt(lam[keep] + eps)
 
 
+@tabular_mlip
 class ELMModel:
     """
     Physics-Informed Extreme Learning Machine trained from CSV descriptor data.
@@ -1520,7 +1522,8 @@ X_n = X / X_std, each followed by the PCA map with standardize 'pca').
     def _print_scores(train_sc: dict,
                       val_sc  : Optional[dict] = None) -> None:
         """Print a formatted MAE/RMSE/MaxAE comparison table."""
-        _units = {'E': 'eV', 'F': 'eV/A', 'S': 'eV/A^3', 'all': '(mixed)'}
+        # E rows are per-atom energies (ADR-0024 O8: the label said eV)
+        _units = {'E': 'eV/atom', 'F': 'eV/A', 'S': 'eV/A^3', 'all': '(mixed)'}
         sep = "=" * 70
         print("\n" + sep)
         title = "ELM prediction errors"

@@ -153,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     # derived from fitting.registry.names() instead of a hardcoded list,
     # so a newly-registered potential (see registry.py's module
     # docstring) automatically appears here with no parser.py edit.
-    p_fit.add_argument("--potential",    "-p", default="buckingham",
+    p_fit.add_argument("--potential",    "-p", default=None,
                         choices=registry.names())
     p_fit.add_argument("--config",       "-c", metavar="FILE")
     p_fit.add_argument("--write-config",       metavar="FILE")
