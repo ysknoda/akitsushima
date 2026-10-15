@@ -70,6 +70,12 @@
 > than 2 (r_cut + skin) although the ACSF handles them (ADR-0024).  The
 > CLI's `--version` prints the version; the Python API is verified
 > against the CLI (ADR-0023).
+> 0.2.0a15 (ADR-0024): every MLIP model takes `baseline=` and
+> `isolated_atom_energy=`; tabular models have `fit_structures()`;
+> `akitsushima.io.load_training_set()` / `build_training_set()` and
+> `akitsushima.force_fn_from_config()` are public.  API defaults follow
+> the CLI's (tabular ELM `eps0` 0.01, relax `output_dir` ./relax_output,
+> ...); the CLI's NVT `tau_nhc` falls back to 100 fs like the API.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

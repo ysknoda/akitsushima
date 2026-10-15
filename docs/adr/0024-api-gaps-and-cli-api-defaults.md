@@ -1,5 +1,5 @@
 ---
-status: accepted (stage 1 implemented 2026-10-15)
+status: accepted (implemented 2026-10-15, 0.2.0a14 and 0.2.0a15)
 ---
 
 # Closing the Python API gaps and aligning the API defaults with the CLI
