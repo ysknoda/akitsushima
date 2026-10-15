@@ -147,6 +147,81 @@ Python using only the documentation.
     test as its own commit; the version goes to 0.2.0a14 once, with the
     results.  Commits are local; push and tags are asked for each time.
 
-## Results
+## Results (2026-10-15)
 
-Pending.
+Scripts, logs and tables are in example/api/ (not tracked):
+run_cli_baselines.py, gesn_api.py, other_api.py, judge_api.py
+(judge_all.txt), findings.md, defaults_table.md, doc_gap_log.md.
+
+### CLI-API agreement
+
+60 cases, each run twice with the CLI on HEAD (120 runs, all exit 0) and
+once through the API: 79 comparisons, 78 pass, 74 of them bitwise
+(difference 0, and the CLI itself bitwise reproducible).  This covers
+the GeSn chain (dataset rows, SW and Tersoff fits, 11 MLIPs, 30 relaxations,
+md_quench, basin hopping, NVT) and phonon, elastic, gruneisen, qha,
+dielectric, piezo, neb, tsa, gcmc, osmc, esm, kappa and nemd.
+
+- dataset: 1.0e-12, the CLI CSV's printed precision.
+- tab_nn 2.4e-7 = the CLI-CLI noise; ac_nn 4.0e-5 against a CLI noise of
+  4.1e-5.  Under heavy concurrent CPU load ac_nn moved by 1.4e-3 (thread
+  order of the reductions, amplified by training; `deterministic=False`).
+  Run alone it is bitwise reproducible, and global numpy / torch / random
+  state has no effect (checked).
+- piezo eps_S (the one failure, 9.3e-14): the CLI re-reads the elastic
+  reference structure from POSCAR_reference (printed precision), the API
+  keeps it in memory.  Fed that POSCAR, the API is bitwise equal.  Not an
+  API defect.
+
+So every CLI workflow can be reproduced from Python, and where it is, the
+API gives the CLI's numbers.  `tests/test_api_workflows.py` keeps the
+seconds-long counterparts (relax, NVT, tabular and atom-centred ELM).
+
+### Defects fixed
+
+- `akitsushima --version` printed "(development version)".
+- Without torch, NNModel advised `pip install torch
+  --break-system-packages` (wrong in a venv); all torch errors now name
+  `pip install "akitsushima[torch]"`.
+- The README Python API example (decision 5); every public docstring
+  example now runs in `tests/test_docstring_examples.py`.
+
+### API gaps (for the follow-up grilling, decision 4)
+
+- G1 `dataset` (run split, isolated-atom subtraction, writer): about 90
+  lines of user code, so blocked; the public readers were checked
+  against the CLI's rows (1e-12).
+- G2 loading the fit layout into structure dicts: 37 lines.
+- G3 a tabular MLIP is a force field only if `descriptor_config` is set
+  by hand before and after `fit`; nothing documents it.
+- G4 MLIP physics options need a hand-built `physics_config` JSON and
+  hand-subtracted baselines.
+- G5 YAML `potential:` section to force function is private.
+- G6 q-path interpolation (gruneisen), 7 lines.
+- G7 the elastic pre-relaxation exists only in the CLI.
+- G8 scoring a tabular model uses the private `ELMModel._score`.
+- G9 kappa's CSV outputs are written by the CLI, not the class.
+
+### Default mismatches (decision 8)
+
+NVT `tau_nhc` 20 fs (CLI) vs 100 fs (API); tabular ELM / QELM `eps0`
+0.01 vs 1.0; GeometryOptimiser `output_dir` ./relax_output vs '.' and
+`timing` True vs False; `fit` `de_maxiter` / `de_popsize` 300 / 10 vs
+500 / 15.
+
+### Documentation gaps and other findings
+
+- None of the 16 docstring examples runs as written (undefined names and
+  files); `read_vasprun` / `read_outcar` and `AtomicELMModel.fit` do not
+  say what keys, units and stress sign their dicts carry; the ESM slab
+  placement (centred on z = 0) is not in `help(ESMCalculator)`.
+- `import akitsushima` without matplotlib warns on every import.
+- `pip show` reported 0.1.0b2 (stale egg-info); refreshed with
+  `pip install -e . --no-deps`.  A wheel built from HEAD reports the
+  right version, imports without torch / numba / yaml, and the README
+  example runs on the pure-Python path.
+- CLI: `fit --config` silently replaces the config's own `potential:`
+  with `--potential`'s default (buckingham).
+
+Not yet done: the clean-room calibration of the documentation-gap log
+(decision 9) and the grilling on the gaps.
