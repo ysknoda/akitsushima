@@ -288,3 +288,29 @@ def test_readme_python_api_example_matches_docstring():
                                rtol=1e-12, atol=1e-15)
     assert readme["energy"] < 0.0
 
+
+def test_cli_version_prints_the_package_version(monkeypatch, capsys):
+    """ADR-0023: `akitsushima --version` printed "(development version)"."""
+    import akitsushima
+    from akitsushima.cli import main
+    monkeypatch.setattr(sys, "argv", ["akitsushima", "--version"])
+    assert main() == 0
+    assert capsys.readouterr().out.strip() == f"akitsushima {akitsushima.__version__}"
+
+
+@pytest.mark.parametrize("module, build", [
+    ("akitsushima.fitting.models.nn", lambda m: m.NNModel()),
+    ("akitsushima.fitting.models.nn", lambda m: m.NNModel.load("x.pt")),
+    ("akitsushima.fitting.models.atomic_nn", lambda m: m.AtomicNNModel()),
+])
+def test_missing_torch_message_names_the_extra(monkeypatch, module, build):
+    """ADR-0023: without torch the error advised
+    `pip install torch --break-system-packages`, wrong inside a venv."""
+    import importlib
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(mod, "HAS_TORCH", False)
+    with pytest.raises(ImportError) as exc:
+        build(mod)
+    msg = str(exc.value)
+    assert 'pip install "akitsushima[torch]"' in msg
+    assert "break-system-packages" not in msg

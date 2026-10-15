@@ -181,7 +181,8 @@ def main() -> int:
     args   = parser.parse_args()
 
     if getattr(args, "version", False):
-        print("akitsushima  (development version)")
+        from .. import __version__
+        print(f"akitsushima {__version__}")
         return 0
 
     if getattr(args, "dump_default", None):

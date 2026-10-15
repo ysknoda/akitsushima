@@ -149,7 +149,7 @@ class NNModel:
         if not HAS_TORCH:
             raise ImportError(
                 "NNModel requires PyTorch, which is not installed. "
-                "Install it with: pip install torch --break-system-packages")
+                'Install it with: pip install "akitsushima[torch]" (or pip install torch).')
 
         self.hidden_layers  = list(hidden_layers) if hidden_layers else [128, 64]
         self.activation     = str(activation).lower()
@@ -683,7 +683,8 @@ class NNModel:
     def load(cls, path: str, verbose: bool = False) -> 'NNModel':
         """Load a saved NNModel from a .pt file."""
         if not HAS_TORCH:
-            raise ImportError("NNModel.load requires PyTorch, which is not installed.")
+            raise ImportError("NNModel.load requires PyTorch, which is not installed. "
+                              'Install it with: pip install "akitsushima[torch]" (or pip install torch).')
         p = path if path.endswith('.pt') else path + '.pt'
         ckpt = torch.load(p, map_location='cpu', weights_only=False)
         obj = cls(

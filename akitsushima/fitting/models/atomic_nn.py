@@ -67,7 +67,8 @@ class AtomicNNModel:
         min_feature_std: float = 1e-12,
     ):
         if not HAS_TORCH:
-            raise ImportError("AtomicNNModel requires PyTorch.")
+            raise ImportError("AtomicNNModel requires PyTorch, which is not installed. "
+                              'Install it with: pip install "akitsushima[torch]" (or pip install torch).')
         standardize = str(standardize).lower()
         if standardize not in ("zscore", "pca"):
             raise ValueError(
