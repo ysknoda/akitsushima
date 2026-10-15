@@ -9,7 +9,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from ..constants import ATOMIC_MASS, EV_ANG_TO_AMU_ANG_FS2, K_B
-from ..engine.neighborlist import NeighbourList
+from ..engine.neighborlist import NeighbourList, neighbour_list_for
 from ..fitting.mlip_engine import check_mlip_for_solver
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame
@@ -241,7 +241,7 @@ class GCMCMDSimulation(_BaseMDSimulation):
             self.N, fix_atoms, self.__class__.__name__)
         self._tc = TimingCollector(enabled=timing)
         r_cut = float(getattr(force_fn, 'r_cut', 10.0))
-        self._nl = NeighbourList(r_cut=r_cut, skin_width=skin_width)
+        self._nl = neighbour_list_for(force_fn, r_cut, skin_width)
 
         # Thermal de Broglie wavelength lambda [A]
         # lambda = h / sqrt(2pi m k_B T)

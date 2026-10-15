@@ -78,6 +78,8 @@ class MLIPForceField:
     trained on in-package descriptors.
     """
 
+    uses_neighbour_list = False  # own ACSF neighbour search (ADR-0024)
+
     kind = "mlip"
 
     def __init__(self, model):

@@ -12,7 +12,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from ..engine.neighborlist import NeighbourList
+from ..engine.neighborlist import NeighbourList, neighbour_list_for
 from ..io.poscar import write_poscar
 from ..utils.mpi import _mpi_allreduce_sum, _mpi_domain_split, _mpi_rank, local_only
 from ..utils.optional_matplotlib import HAS_MATPLOTLIB, plt
@@ -74,7 +74,7 @@ class NEBChain:
         rc = float(r_cut if r_cut is not None
                    else getattr(force_fn, 'r_cut', 10.0))
         self.r_cut = rc
-        self._nls = [NeighbourList(r_cut=rc, skin_width=skin_width)
+        self._nls = [neighbour_list_for(force_fn, rc, skin_width)
                      for _ in range(self.n_images)]
 
         self.energies    : List[float] = [0.0] * (self.n_images + 2)

@@ -36,7 +36,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 
 from ..constants import EV_ANG3_TO_GPA
-from ..engine.neighborlist import _check_min_image
+from ..engine.neighborlist import _check_min_image, uses_neighbour_list
 from .geometry_optimiser import GeometryOptimiser
 
 __all__ = ["ElasticConstantsCalculator", "elastic_moduli",
@@ -187,7 +187,7 @@ class ElasticConstantsCalculator:
 
     def _check_cells(self) -> None:
         r_cut = getattr(self.force_fn, "r_cut", None)
-        if r_cut is None:
+        if r_cut is None or not uses_neighbour_list(self.force_fn):
             return
         r_list = float(r_cut) + (self.skin_width if self.relax_ions else 0.0)
         for j, s in self._points():

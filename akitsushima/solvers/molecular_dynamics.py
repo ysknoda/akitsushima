@@ -15,7 +15,7 @@ import warnings
 import numpy as np
 
 from ..constants import ATOMIC_MASS, EV_ANG3_TO_GPA, EV_ANG_TO_AMU_ANG_FS2, K_B
-from ..engine.neighborlist import NeighbourList, wrap_positions_into_cell
+from ..engine.neighborlist import NeighbourList, neighbour_list_for, wrap_positions_into_cell
 from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
@@ -542,7 +542,7 @@ class NVTSimulation(_BaseMDSimulation):
 
         self._tc = TimingCollector(enabled=timing)
         self.velocity_rescale_steps = int(velocity_rescale_steps)
-        self._nl            = NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
+        self._nl            = neighbour_list_for(self._force_fn, self.r_cut, skin_width)
         self._thermo_log: List[dict] = []
 
     def _init_velocities(self) -> np.ndarray:
@@ -992,7 +992,7 @@ class NVESimulation(_BaseMDSimulation):
 
         self.velocities = velocities.copy() if velocities is not None \
                           else self._init_velocities(temperature)
-        self._nl = NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
+        self._nl = neighbour_list_for(self._force_fn, self.r_cut, skin_width)
         # -- fix_atoms constraint mask -------------------------
         # fix_atoms : (N, 3) bool array.  True = frozen (never displaced).
         # Equivalent to VASP Selective Dynamics 'F T T' etc.
@@ -1434,7 +1434,7 @@ class NPTSimulation(_BaseMDSimulation):
         self.vxi1_b = 0.0;  self.vxi2_b = 0.0
 
         self._tc = TimingCollector(enabled=timing)
-        self._nl        = NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
+        self._nl        = neighbour_list_for(self._force_fn, self.r_cut, skin_width)
 
     # ------------------------------------------------------------------
     #  Initialisation

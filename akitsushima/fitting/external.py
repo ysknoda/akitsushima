@@ -53,6 +53,7 @@ class ExternalFileEngine:
     # E, F and S only -- no per-atom energies.
     kind = "external"
     per_atom_energy = False
+    uses_neighbour_list = False  # an external code (ADR-0024)
 
     """
     Generic file-based external force engine.
@@ -499,6 +500,8 @@ class ScaledForceEngine:
     ...          max_displacement=0.05, relax_cell=True)
     >>> result = go.run()
     """
+
+    uses_neighbour_list = False  # calls its engine without a list (ADR-0024)
 
     def __init__(self,
                  base_fn,

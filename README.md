@@ -64,6 +64,12 @@
 > to E, F or S).  The default 1e-12 masks nothing; 1e-4 replaces the
 > external column reduction needed for near-constant columns of external
 > descriptor tables (ADR-0010, open finding A4).
+> 0.2.0a14: a machine-learning potential (and an external code) is no
+> longer held to the solvers' neighbour-list minimum-image check, which
+> it never used: relax, md, neb, gcmc and elastic refused cells thinner
+> than 2 (r_cut + skin) although the ACSF handles them (ADR-0024).  The
+> CLI's `--version` prints the version; the Python API is verified
+> against the CLI (ADR-0023).
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

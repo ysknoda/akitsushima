@@ -145,6 +145,7 @@ def enthalpy_force_fn(force_fn: Callable, pressure_gpa: float) -> Callable:
         def h_fn(lattice, positions, atom_types):
             return _shift(lattice, force_fn(lattice, positions, atom_types))
 
+    h_fn.uses_neighbour_list = getattr(force_fn, "uses_neighbour_list", True)
     return h_fn
 
 

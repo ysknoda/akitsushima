@@ -19,7 +19,7 @@ import numpy as np
 
 from ..constants import EV_ANG3_TO_GPA
 from ..engine.cell_gradient import cell_force_from_stress
-from ..engine.neighborlist import NeighbourList, wrap_positions_into_cell
+from ..engine.neighborlist import NeighbourList, neighbour_list_for, wrap_positions_into_cell
 from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
@@ -444,7 +444,7 @@ class GeometryOptimiser:
         # it does its own spatial bookkeeping, and imposing this list's
         # precondition on it would reject cells it handles correctly.
         self._nl = (
-            NeighbourList(r_cut=self.r_cut, skin_width=skin_width)
+            neighbour_list_for(self._force_fn, self.r_cut, skin_width)
             if _accepts_neigh_list(self._force_fn)
             else None
         )

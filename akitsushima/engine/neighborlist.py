@@ -964,3 +964,55 @@ class NeighbourList:
         self._pair_rij = out_rij
         self._pair_r = out_r
         self._n_pairs = n_pairs
+
+
+def uses_neighbour_list(force_fn) -> bool:
+    """False when ``force_fn`` declares ``uses_neighbour_list = False``:
+    it finds its own neighbours (MLIPForceField: the ACSF's own search;
+    ExternalFileEngine, ScaledForceEngine: an external code), so a solver's
+    list -- and its minimum-image precondition -- does not apply to it
+    (ADR-0024).  Everything else is assumed to use the list."""
+    return bool(getattr(force_fn, "uses_neighbour_list", True))
+
+
+class NullNeighbourList:
+    """Stand-in for :class:`NeighbourList` for a force function that does
+    not use one: same interface, holds no pairs, never refuses a cell.
+
+    Without it, every solver applied ``r_cut + skin < half the smallest
+    perpendicular cell width`` to MLIPs too, although the MLIP ignores the
+    list: ~11 A GeSn cells (half width 5.51 A against r_cut 5 + skin 0.5)
+    were refused, some mid-relaxation after a little shear (ADR-0023 O7).
+    """
+
+    def __init__(self, r_cut: float, skin_width: float = 0.5):
+        self.r_cut = r_cut
+        self.skin_width = skin_width
+        self.r_list = r_cut + skin_width
+        self._n_builds = 0
+        self._n_steps = 0
+
+    def build(self, lattice, positions) -> None:
+        self._n_builds += 1
+
+    def mark_dirty(self) -> None:
+        pass
+
+    def check_and_rebuild(self, lattice, positions) -> bool:
+        self._n_steps += 1
+        return False
+
+    @property
+    def rebuild_count(self) -> int:
+        return self._n_builds
+
+    @property
+    def step_count(self) -> int:
+        return self._n_steps
+
+
+def neighbour_list_for(force_fn, r_cut: float, skin_width: float = 0.5):
+    """The neighbour list a solver should drive ``force_fn`` with."""
+    if uses_neighbour_list(force_fn):
+        return NeighbourList(r_cut=r_cut, skin_width=skin_width)
+    return NullNeighbourList(r_cut=r_cut, skin_width=skin_width)
