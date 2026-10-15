@@ -137,3 +137,31 @@ def test_mlip_elm_api_matches_cli(form, tmp_path, monkeypatch):
     for a, b in zip(ak.make_force_fn(api)(lat, pos, types),
                     ak.make_force_fn(cli_model)(lat, pos, types)):
         np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("target, param, cli_default", [
+    ("akitsushima.ELMModel", "eps0", 0.01),
+    ("akitsushima.QuantizedELMModel", "eps0", 0.01),
+    ("akitsushima.fitting.descriptors.build_table", "eps0", 0.01),
+    ("akitsushima.fit_potential", "de_maxiter", 300),
+    ("akitsushima.fit_potential", "de_popsize", 10),
+    ("akitsushima.GeometryOptimiser", "timing", True),
+    ("akitsushima.GeometryOptimiser", "output_dir", "./relax_output"),
+])
+def test_api_defaults_are_the_cli_defaults(target, param, cli_default):
+    """ADR-0024 Q22: an API call without the keyword computes what the CLI
+    computes without the YAML key (the values cmd_*.py fall back to)."""
+    import importlib
+    import inspect
+    mod, name = target.rsplit(".", 1)
+    obj = getattr(importlib.import_module(mod), name)
+    assert inspect.signature(obj).parameters[param].default == cli_default
+
+
+def test_relax_without_output_dir_keeps_the_working_directory_clean(tmp_path, monkeypatch):
+    """ADR-0023 O3: output_dir defaulted to '.', so an API relax wrote
+    relax.log, XDATCAR_relax and POSCAR_relaxed into the working directory."""
+    monkeypatch.chdir(tmp_path)
+    lat, pos, types = _si64(5)
+    ak.GeometryOptimiser(lat, pos, types, force_fn=_sw_fn(), max_steps=2, verbose=False).run()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["relax_output"]

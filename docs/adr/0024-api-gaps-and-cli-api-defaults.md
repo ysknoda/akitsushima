@@ -76,3 +76,20 @@ data-coverage problem, stands.
 
 During the full test run 23 MPI tests failed to start `mpirun` while
 other MPI-free jobs ran; rerun alone they pass (environment, not code).
+
+## Stage 2 (Q22, defaults) -- partly done
+
+Changed to the CLI's values: tabular `ELMModel` / `QuantizedELMModel`
+`eps0` 0.01 (recorded with the model only; training weights come from
+the table), `build_table` / `ACSF.table_rows` `eps0` 0.01 (the S-row
+weight eps0*V), `fit_potential` `de_maxiter` / `de_popsize` 300 / 10,
+`GeometryOptimiser` `timing` True and `output_dir` ./relax_output.  The
+timing summary now prints only when `verbose` is on, so the internal
+relaxations of elastic, qha, dielectric and tsa stay quiet.
+`tests/test_api_workflows.py` pins each default to the CLI's.
+
+Held back: NVT `tau_nhc`.  The CLI's 20 fs is below the 50-200 fs that
+NVTSimulation's own docstring calls typical (UNCERTAIN which is right;
+a reference for Nose-Hoover chain coupling times in solids would settle
+it), and kappa, the diffusion analyser and anneal rely on the 100 fs
+default.  Put back to the user.

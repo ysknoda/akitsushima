@@ -67,7 +67,7 @@ class QuantizedELMModel(ELMModel):
                  w_forces        : float = 0.1,
                  w_stress        : float = 10.0,
                  r0              : float = 1.0,
-                 eps0            : float = 1.0,
+                 eps0            : float = 0.01,
                  reg             : float = 1e-6,
                  lsqr_maxiter    : int   = 2000,
                  lsqr_atol       : float = 1e-8,

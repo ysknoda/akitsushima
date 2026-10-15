@@ -606,7 +606,7 @@ class ACSF:
         forces=None,
         stress=None,
         r0=1.0,
-        eps0=1.0,
+        eps0=0.01,
     ):
         """
         Rows of one structure in the load_mlip_csv layout.
@@ -643,7 +643,7 @@ def build_table(
     structures,
     descriptor: "ACSF",
     r0: float = 1.0,
-    eps0: float = 1.0,
+    eps0: float = 0.01,
     verbose: bool = False,
 ):
     """

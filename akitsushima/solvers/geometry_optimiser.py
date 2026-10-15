@@ -133,7 +133,8 @@ class GeometryOptimiser:
             force_fn  = fn,
         )
 
-    Output files (written to *output_dir*)
+    Output files (written to *output_dir*, default ./relax_output -- the
+    CLI's; it used to be the working directory, ADR-0024)
     ----------------------------------------
     relax.log        -- step / energy / Fmax / Pmax / algorithm-specific metric
     XDATCAR_relax    -- every step's structure, VASP XDATCAR format
@@ -201,7 +202,7 @@ class GeometryOptimiser:
         hessian_delta: float = 0.01,
         trust_radius: float = 0.3,
         # -- output --------------------------------------------
-        output_dir: str = ".",
+        output_dir: str = "./relax_output",
         skin_width: float = 0.5,
         verbose: bool = True,
         # -- constraints ---------------------------------------
@@ -209,7 +210,7 @@ class GeometryOptimiser:
         fix_cell: np.ndarray | None = None,
         fix_volume: bool = False,
         # -- timing --------------------------------------------
-        timing: bool = False,
+        timing: bool = True,
     ):
 
         self.lattice = lattice.copy()
@@ -832,7 +833,7 @@ class GeometryOptimiser:
         result = dispatch[self.method]()
         self._tc.stop("total")
         timing_summary = self._tc.summary()
-        if timing_summary.get("enabled") and _mpi_rank == 0:
+        if timing_summary.get("enabled") and self.verbose and _mpi_rank == 0:
             self._tc.print_summary(label=f"GeometryOptimiser ({self.method.upper()})")
         result["timing"] = timing_summary
         return result
