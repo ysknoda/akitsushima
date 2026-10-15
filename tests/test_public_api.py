@@ -4,6 +4,8 @@ docstring, must work -- and NNModel must stay lazy (F15/E15-adjacent:
 importing akitsushima alone, or using any of its non-NN classes, must
 never pull in torch).
 """
+import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -247,3 +249,42 @@ def test_cli_main_and_build_parser_importable():
     ns = parser.parse_args(["--version"])
     assert ns.version is True
     assert callable(main)
+
+
+# --------------------------------------------------------------------------
+# README Python API example (ADR-0023, decision 5).  Like the docstring
+# example above, it is executed from the file itself, so the README cannot
+# drift again: before 2026-10-15 it used r_cut = 5.0 A (1.47 sigma) and two
+# atoms 2.5 A apart, and built a neighbour list it never passed.
+# --------------------------------------------------------------------------
+
+_README = os.path.join(os.path.dirname(__file__), os.pardir, "README.md")
+
+
+def _readme_python_api_block():
+    with open(_README) as fh:
+        text = fh.read()
+    match = re.search(r"### Python API\n\n```python\n(.*?)```", text, re.S)
+    assert match, "README.md has no '### Python API' python code block"
+    return match.group(1)
+
+
+@pytest.mark.skipif(not os.path.isfile(_README),
+                    reason="README.md not shipped (installed package)")
+def test_readme_python_api_example_matches_docstring():
+    import akitsushima
+
+    readme = {}
+    exec(compile(_readme_python_api_block(), "<README.md Python API>", "exec"),
+         readme)
+    doc = _run_quick_start_api_example(akitsushima.__doc__)
+
+    # Same physics as the docstring example, which carries the guards on
+    # r_cut and separation; agreement here carries them over.
+    assert readme["energy"] == pytest.approx(doc["energy"], rel=1e-12)
+    np.testing.assert_allclose(readme["forces"], doc["forces"],
+                               rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(readme["stress"], doc["stress"],
+                               rtol=1e-12, atol=1e-15)
+    assert readme["energy"] < 0.0
+

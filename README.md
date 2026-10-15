@@ -209,18 +209,24 @@ from akitsushima import (
     make_force_fn,
 )
 
-lattice = np.eye(3) * 15.0
-positions = np.array([[5.0, 5.0, 5.0], [7.5, 5.0, 5.0]])
-atom_types = ["Ar", "Ar"]
+# Lennard-Jones argon: sigma = 3.405 A, epsilon = 0.0103 eV
+# (Verlet, Phys. Rev. 159, 98 (1967)); r_cut = 10 A = 2.94 sigma.
 lj_params = {frozenset({"Ar"}): {"epsilon": 0.0103, "sigma": 3.405}}
 
-engine = PotentialEngine().add(LennardJonesPotential(lj_params, r_cut=5.0))
+# The cell edge must exceed 2 * (r_cut + skin) = 2 * (10.0 + 0.5) = 21 A.
+lattice = np.eye(3) * 24.0
+# Two atoms 4.0 A apart, just beyond the minimum at 2^(1/6) sigma = 3.82 A.
+positions = np.array([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+atom_types = ["Ar", "Ar"]
+
+engine = PotentialEngine().add(LennardJonesPotential(lj_params, r_cut=10.0))
 fn = make_force_fn(engine)
 
-nl = NeighbourList(r_cut=5.0)
+nl = NeighbourList(r_cut=10.0)
 nl.build(lattice, positions)
 
-energy, forces, stress = fn(lattice, positions, atom_types)
+energy, forces, stress = fn(lattice, positions, atom_types, nl)
+# energy = -9.4170e-03 eV (force-shifted LJ, the default shift=True)
 ```
 
 ## CLI reference
