@@ -223,5 +223,29 @@ NVT `tau_nhc` 20 fs (CLI) vs 100 fs (API); tabular ELM / QELM `eps0`
 - CLI: `fit --config` silently replaces the config's own `potential:`
   with `--potential`'s default (buckingham).
 
-Not yet done: the clean-room calibration of the documentation-gap log
-(decision 9) and the grilling on the gaps.
+### Clean-room calibration (decision 9)
+
+A subagent that could read only the README, `help()`, the CLI templates
+and the data did the tabular ELM and atom-centred ELM (ZBL, E_iso)
+training, scoring, 10 relaxations each and the save / load round trip
+(exact) from the documentation alone.  It hit 10 stuck points; my
+documentation-gap log had 5 of them.  The ones I missed:
+
+- the README has no Python example for MLIPs and does not say where
+  `ACSF` lives;
+- the solvers apply their neighbour-list minimum-image check
+  (r_cut + skin < half the cell width) to an MLIP, which ignores the list
+  (verified: identical energies, forces and stress with and without it).
+  Thin GeSn cells (half width 5.51 A against 5.5 A) are refused, some
+  mid-relaxation after shear.  This affects the CLI too: some ADR-0021
+  relaxations that "collapsed until the minimum-image guard stopped the
+  run" may be this refusal (open, relevant to A1);
+- whether `seed` also fixes the validation split (`val_seed`);
+- the verbose fit table prints E RMSE in "eV" for values in eV/atom;
+- `fix_cell` is a (3, 3) mask in `help(GeometryOptimiser)` but a
+  6-element one in the relax template (untested).
+
+Knowing the internals hid about half of the stuck points, so the gap
+list for the grilling is the union of both.
+
+Not yet done: the grilling on the gaps.
