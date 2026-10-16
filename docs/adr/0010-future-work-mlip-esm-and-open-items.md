@@ -405,6 +405,31 @@ A1 before any relabelling is considered.
   outside both baselines (r_outer 2.0 A).
 - The reference re-relaxations of 00006 / 00009 / 00010 (about 90 h
   locally) also go to the user's cluster (Q24).
+- Round 0 results (2026-10-16/17).
+  - Data: 120 single points (VASP 6.4.3 on the cluster; 6.4.2 was used
+    for the original data).  Reference re-relaxations converged with
+    |P| <= 0.13 kB.
+  - Rebuilt reference volumes moved by -0.05 % (00006), -4.9 % (00009)
+    and -6.8 % (00010).  The old references of 00009 and 00010 were
+    wrong.
+  - The old model on the round-0 cells: the pre-collapse MD frames are
+    off by -181 meV/atom and 2.05 eV/A.  Rattled cells are off by
+    5 meV/atom and 0.78 eV/A.
+  - Retrained model (443 structures): test E 0.96 meV/atom, F 0.072 eV/A.
+  - Q11 relax: 10/10 (the old model 9/10 on the new references).
+  - Q11 anneal: 10/10 (old model, + ZBL, + BM: 0/10).
+  - Q11 DFT check: FAILED.  At three anneal minima the model is 23-35
+    meV/atom too deep, and DFT forces of up to 1.8 eV/A remain there.
+    In DFT the same cells are still 23-29 meV/atom below the original
+    final frames.  At the DFT-relaxed references the model is off by
+    -4 to -10 meV/atom.  The original data lack near-equilibrium cells,
+    because their VASP relaxations stopped early.
+  - Q25 / Q26 (user): no relaxing of the criterion.  Round 1 asks for 80
+    more single points from the 40 training runs:
+    - the relax-only minimum (anneal cycle 0) of the round-0 model;
+    - its lowest anneal minimum.
+    Test-derived cells are never trained on.  Q11 is then judged again
+    with new anneal minima.
 
 **B1. atomic_descriptor test** -- the test
 `test_test_suite_numba_cache_is_isolated_from_project_pycache` fails
