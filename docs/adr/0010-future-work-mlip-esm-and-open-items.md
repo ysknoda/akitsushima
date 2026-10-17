@@ -430,6 +430,24 @@ A1 before any relabelling is considered.
     - its lowest anneal minimum.
     Test-derived cells are never trained on.  Q11 is then judged again
     with new anneal minima.
+- Round 1 results (2026-10-17).
+  - 80 single points: VASP 6.4.3, all complete.
+  - The round-0 model on these cells: anneal minima off by -27
+    meV/atom, relaxed cells off by -14 meV/atom.
+  - Retrained model (523 structures): test E 0.82 meV/atom, F 0.079
+    eV/A.
+  - Q11 relax: 10/10.  Q11 anneal: 10/10.  The deepest quench below
+    the relax-only minimum fell from 34 to 19 meV/atom.
+  - Q11 DFT check: 2/3.
+    - The three minima are off by -11.4, -6.9 and -8.1 meV/atom.
+    - DFT max forces there are 0.42-0.48 eV/A.
+    - In DFT the minima lie 34-39 meV/atom below the original final
+      frames.
+  - At the DFT-relaxed references the model is now off by +0.7 to
+    +4.6 meV/atom.
+  - Q27 (user): no relaxing of the criterion.  Round 2 asks for 40
+    single points: the lowest anneal minimum of the round-1 model per
+    training run.  Q11 is then judged again.
 
 **B1. atomic_descriptor test** -- the test
 `test_test_suite_numba_cache_is_isolated_from_project_pycache` fails
