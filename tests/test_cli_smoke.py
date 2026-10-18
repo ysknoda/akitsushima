@@ -988,3 +988,40 @@ def test_cmd_fit_takes_the_potential_from_its_config(tmp_path, small_cell_ok):
     assert cmd_fit(args) == 0
     fitted = json.load(open(tmp_path / "out" / "fitted_potential.json"))
     assert fitted["potential_type"] == "lj"
+
+
+def test_cmd_mlip_settings_print_the_atom_centred_defaults(tmp_path, capsys):
+    """The [Settings] block printed n_hidden 512 (the tabular default) for
+    an atom-centred ELM, which builds 400 hidden units."""
+    # arbitrary labels: only the printed settings are checked; a 3x3x3
+    # supercell keeps r_cut 4 A within half the cell width
+    rng = np.random.default_rng(0)
+    al = fcc_al_dict()
+    lat = al["lattice"] * 3
+    shifts = np.array([[i, j, k] for i in range(3) for j in range(3) for k in range(3)])
+    pos = (al["positions"][None] + (shifts @ al["lattice"])[:, None]).reshape(-1, 3)
+    types = al["atom_types"] * 27
+    rows = ["target,label,weight,struct_idx"]
+    for sid in range(8):
+        sdir = tmp_path / "ts" / str(sid)
+        os.makedirs(sdir, exist_ok=True)
+        write_poscar(str(sdir / "POSCAR"), lat, pos + 0.05 * rng.normal(size=pos.shape), types)
+        rows.append(f"{-3.0 + 0.01 * rng.normal()},E,1.0,{sid}")
+        rows += [f"{f},F,1.0,{sid}" for f in 0.1 * rng.normal(size=3 * len(types))]
+        rows += [f"{v},S,1.0,{sid}" for v in 1e-3 * rng.normal(size=6)]
+    (tmp_path / "ts" / "structures.csv").write_text("\n".join(rows))
+    cfg = {
+        "structure": {"training_csv": str(tmp_path / "ts" / "structures.csv")},
+        "potential": {"species": ["Al"]},
+        "mlip": {"output_dir": str(tmp_path / "out"), "form": "atom_centred",
+                 "model": "elm", "val_fraction": 0.25,
+                 "descriptor": {"type": "acsf", "r_cut": 4.0,
+                                "g2": {"eta": [4.0], "rs": [2.5, 3.0]}}},
+    }
+    yaml_path = tmp_path / "mlip.yaml"
+    _write_yaml(yaml_path, cfg)
+    assert cmd_mlip(_ns(yaml_path)) == 0
+    out = capsys.readouterr().out
+    assert "n_hidden   : 400" in out
+    z = np.load(tmp_path / "out" / "atomic_elm_model.npz")
+    assert '"n_hidden": 400' in str(z["hyper"])

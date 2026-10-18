@@ -358,16 +358,17 @@ def cmd_mlip(args) -> int:
             f"{'row-independent' if ml_cfg.get('row_independent') else 'chain rule'}"
         )
     if model_type in ("elm", "qelm"):
-        print(f"  n_hidden   : {ml_cfg.get('n_hidden', 512)}")
+        # the defaults of _build_atomic_model / _build_model
+        print(f"  n_hidden   : {ml_cfg.get('n_hidden', 400 if atomic else 512)}")
         print(f"  activation : {ml_cfg.get('activation', 'tanh')}")
         print(f"  reg        : {ml_cfg.get('reg', 1e-6)}")
     elif model_type == "nn":
         for k, d in (
-            ("hidden_layers", [128, 64]),
+            ("hidden_layers", [64, 64] if atomic else [128, 64]),
             ("activation", "softplus"),
             ("learning_rate", 1.0e-3),
             ("epochs", 1500),
-            ("batch_size", 256),
+            ("batch_structures", 30) if atomic else ("batch_size", 256),
             ("weight_decay", 1.0e-6),
             ("device", "auto"),
         ):
