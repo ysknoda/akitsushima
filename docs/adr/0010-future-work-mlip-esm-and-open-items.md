@@ -448,6 +448,26 @@ A1 before any relabelling is considered.
   - Q27 (user): no relaxing of the criterion.  Round 2 asks for 40
     single points: the lowest anneal minimum of the round-1 model per
     training run.  Q11 is then judged again.
+- Round 2 results (2026-10-18/19): **A1 SOLVED.**
+  - Data: 40 single points (VASP 6.4.3).
+  - The round-1 model on these cells: off by -3.5 meV/atom on average
+    (worst -11.4).
+  - Model ac_elm_iso_r2 (563 structures; atom-centred ELM, isolated
+    atom energy, the settings of runs/mlip/ac_elm_iso_r2): test E 1.01
+    meV/atom, F 0.078 eV/A.
+  - Q11 relax: 10/10 (volume ratio 0.964-1.010).
+  - Q11 anneal: 10/10.
+  - Q11 DFT check: 3/3.  The model is off by -2.2, +1.0 and -3.0
+    meV/atom at the minima of 00022 / 00038 / 00046.  DFT max forces
+    there are 0.27-0.39 eV/A, and in DFT the minima lie 32-38 meV/atom
+    below the original final frames.
+  - The round-1 check cells are now off by -0.4 to -2.6 meV/atom, and
+    the DFT-relaxed references by +1.4 to +3.6.
+  - Use ac_elm_iso_r2 for GeSn vacancy cells.  Its domain is the 63-atom
+    vacancy cells near equilibrium, up to the 800 K anneal of this
+    test.
+  - Still open: the A6 stress question (Q23).  It can now be tested
+    against the 240 round-0..2 single points.
 
 **B1. atomic_descriptor test** -- the test
 `test_test_suite_numba_cache_is_isolated_from_project_pycache` fails
