@@ -138,3 +138,45 @@ One force call, warm, one process, measured on the 63-atom test cell
 
 Scripts and outputs go to `example/GeSn/large/` (gitignored); results
 are recorded here.
+
+## Results
+
+### ACSF neighbour list (decision 3, 2026-10-29)
+
+`_neighbours` is now a numba cell list (`_cell_scan`, two passes: count,
+then fill).  It scans every periodic image for any cell: bins are at
+least r_cut wide, and a cell thinner than r_cut is covered by scanning
+several image copies of its bins.  Each atom's entries are sorted into
+the former order (neighbour index, then image in the old `meshgrid`
+order), and the displacement is computed in the old order of operations
+without fastmath.  The ACSF kernel's loop over atoms is now `prange`:
+atom i writes only `G[i]` and its own neighbour entries, so there is no
+race.
+
+Checks:
+
+- CSR (ptr, nbj, vec) bitwise equal to the dense search on 666 cells at
+  r_cut 3.1, 5.0 and 7.3 A: the 564 training and 83 test structures,
+  the 2-atom primitive diamond cell, and 20 random thin and sheared
+  triclinic cells with atoms outside the cell.
+- `ac_elm_iso_r2` on the 83 test cells and one 504-atom replica: E and G
+  bitwise equal; F and S within a relative 3.4e-14 (the parallel kernel
+  is compiled differently).  Q10 asked for 1e-12.
+- Full suite: 798 passed (31 min at 2 threads under load).
+- `tests/test_acsf_neighbours.py`: the dense search kept as the reference,
+  replicas giving the same G, and a 3456-atom cell.
+
+Profile (32256 atoms, before `prange`): the ACSF kernel took 86 % of the
+call and the cell list 0.23 s, so the `prange` condition of decision 3
+was met.
+
+Force call of `ac_elm_iso_r2` with the cell list, before `prange`, 2
+numba threads while another job loaded the machine (indicative only; the
+ladder re-measures):
+
+| N | before | after |
+|---|---|---|
+| 504 | 0.57 s | 0.24 s |
+| 1701 | 8.3 s, 2.5 GB | 0.78 s |
+| 4032 | ~47 s, ~14 GB (estimate) | 2.0 s, 0.41 GB |
+| 32256 | out of memory | 16 s, 1.65 GB |

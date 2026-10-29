@@ -51,7 +51,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from ...constants import ATOMIC_MASS
-from ...utils.jit import _numba_njit
+from ...utils.jit import _HAS_NUMBA, _numba, _numba_njit, _numba_par
 
 __all__ = ["ACSF", "ATOMIC_NUMBER", "AtomicJacobian", "sort_species"]
 
@@ -79,40 +79,125 @@ def sort_species(species: Sequence[str]) -> list:
 # ---------------------------------------------------------------------------
 
 
+# No fastmath here: the displacement (r_j + shift) - r_i and its square
+# are evaluated in exactly the order the former dense search used, so the
+# neighbour vectors -- and every descriptor built on them -- are bitwise
+# unchanged (ADR-0025).
+if _HAS_NUMBA:
+    _njit_exact_par = _numba.njit(cache=True, parallel=True)
+    _prange = _numba.prange
+else:
+    _njit_exact_par = _numba_njit
+    _prange = range
+
+
+@_njit_exact_par
+def _cell_scan(pos_w, b, start, order, shift_cart, n_img, nc, m, r_cut,
+               ptr, nbj, key, vec, fill):
+    """One pass of the cell-list search.  ``fill`` False: count the
+    entries of each atom into ptr[i + 1].  True: write them at ptr[i]...
+    Each atom touches only its own slots, so atoms run in parallel."""
+    N = pos_w.shape[0]
+    rc2 = r_cut * r_cut
+    S = shift_cart.shape[0]
+    w1 = 2 * n_img[1] + 1
+    w2 = 2 * n_img[2] + 1
+    for i in _prange(N):
+        e = ptr[i] if fill else 0
+        for d0 in range(-m[0], m[0] + 1):
+            u0 = b[i, 0] + d0
+            s0 = u0 // nc[0]
+            c0 = u0 - s0 * nc[0]
+            for d1 in range(-m[1], m[1] + 1):
+                u1 = b[i, 1] + d1
+                s1 = u1 // nc[1]
+                c1 = u1 - s1 * nc[1]
+                for d2 in range(-m[2], m[2] + 1):
+                    u2 = b[i, 2] + d2
+                    s2 = u2 // nc[2]
+                    c2 = u2 - s2 * nc[2]
+                    sidx = ((s0 + n_img[0]) * w1 + (s1 + n_img[1])) * w2 \
+                        + (s2 + n_img[2])
+                    q = (c0 * nc[1] + c1) * nc[2] + c2
+                    for t in range(start[q], start[q + 1]):
+                        j = order[t]
+                        dx = (pos_w[j, 0] + shift_cart[sidx, 0]) - pos_w[i, 0]
+                        dy = (pos_w[j, 1] + shift_cart[sidx, 1]) - pos_w[i, 1]
+                        dz = (pos_w[j, 2] + shift_cart[sidx, 2]) - pos_w[i, 2]
+                        r2 = dx * dx + dy * dy + dz * dz
+                        if r2 < rc2 and r2 > 1e-20:
+                            if fill:
+                                nbj[e] = j
+                                key[e] = j * S + sidx
+                                vec[e, 0] = dx
+                                vec[e, 1] = dy
+                                vec[e, 2] = dz
+                            e += 1
+        if fill:
+            # the dense search's order: neighbour index, then image
+            a = ptr[i]
+            if e - a > 1:
+                o = np.argsort(key[a:e]) + a
+                nbj[a:e] = nbj[o].copy()
+                vec[a:e] = vec[o].copy()
+        else:
+            ptr[i + 1] = e
+
+
 def _neighbours(lattice, positions, r_cut):
     """CSR neighbour list: for atom i, entries ptr[i]:ptr[i+1] give the
-    neighbour atom index and the vector r_j + shift - r_i (|.| < r_cut)."""
+    neighbour atom index and the vector r_j + shift - r_i (|.| < r_cut).
+
+    A cell list over every periodic image, O(N) in time and memory
+    (ADR-0025; it replaced a dense (N, N, images, 3) search that made
+    cells above ~2000 atoms impractical).  Cells thinner than r_cut are
+    handled by scanning more than one image of the bins.  Per atom the
+    entries come sorted by neighbour index, then by image in the order
+    of ``shifts`` below."""
     lattice = np.asarray(lattice, dtype=np.float64)
     pos = np.asarray(positions, dtype=np.float64)
     N = len(pos)
     vol = abs(np.linalg.det(lattice))
-    n_img = []
+    n_img, nc, m = [], [], []
     for k in range(3):
         cross = np.cross(lattice[(k + 1) % 3], lattice[(k + 2) % 3])
         width = vol / np.linalg.norm(cross)  # perpendicular width
-        n_img.append(int(math.ceil(r_cut / width)))
+        n_img.append(math.ceil(r_cut / width))
+        nc.append(max(1, int(width / r_cut)))  # bins at least r_cut wide
+        # A vector shorter than r_cut changes fractional coordinate k by
+        # less than r_cut / width, i.e. by at most m bins.
+        m.append(math.ceil(r_cut * nc[-1] / width))
     rng = [np.arange(-n, n + 1) for n in n_img]
     shifts = np.array(np.meshgrid(*rng, indexing="ij")).reshape(3, -1).T
-    shift_cart = shifts @ lattice  # (S, 3)
+    shift_cart = np.ascontiguousarray(shifts @ lattice)  # (S, 3)
     # Wrap into the cell so that the image range above is sufficient.
-    frac = pos @ np.linalg.inv(lattice)
-    pos_w = (frac - np.floor(frac)) @ lattice
-    delta = pos_w - pos  # wrapping offset
-    dv = (
-        pos_w[None, :, None, :] + shift_cart[None, None, :, :] - pos_w[:, None, None, :]
-    )  # (i, j, S, 3)
-    r2 = np.einsum("ijsk,ijsk->ijs", dv, dv)
-    mask = (r2 < r_cut * r_cut) & (r2 > 1e-20)
-    ii, jj, ss = np.nonzero(mask)
-    vec = dv[ii, jj, ss]
     # The vectors are between wrapped positions; the displacement of an
     # atom moves its wrapped copy identically, so derivatives w.r.t. r_j
-    # are unaffected by the wrap (delta is constant).
-    del delta
+    # are unaffected by the wrap.
+    frac = pos @ np.linalg.inv(lattice)
+    frac_w = frac - np.floor(frac)
+    pos_w = np.ascontiguousarray(frac_w @ lattice)
+    nc_a = np.array(nc, dtype=np.int64)
+    # frac_w can round to exactly 1.0; clip keeps such an atom in the last bin
+    b = np.clip((frac_w * nc_a).astype(np.int64), 0, nc_a - 1)
+    flat = (b[:, 0] * nc[1] + b[:, 1]) * nc[2] + b[:, 2]
+    order = np.argsort(flat, kind="stable").astype(np.int64)
+    start = np.zeros(nc[0] * nc[1] * nc[2] + 1, dtype=np.int64)
+    np.add.at(start, flat + 1, 1)
+    start = np.cumsum(start)
+    args = (pos_w, np.ascontiguousarray(b), start, order, shift_cart,
+            np.array(n_img, dtype=np.int64), nc_a,
+            np.array(m, dtype=np.int64), float(r_cut))
     ptr = np.zeros(N + 1, dtype=np.int64)
-    np.add.at(ptr, ii + 1, 1)
+    dummy_i = np.zeros(0, dtype=np.int64)
+    _cell_scan(*args, ptr, dummy_i, dummy_i, np.zeros((0, 3)), False)
     ptr = np.cumsum(ptr)
-    return ptr, jj.astype(np.int64), vec
+    M = int(ptr[-1])
+    nbj = np.empty(M, dtype=np.int64)
+    key = np.empty(M, dtype=np.int64)
+    vec = np.empty((M, 3), dtype=np.float64)
+    _cell_scan(*args, ptr, nbj, key, vec, True)
+    return ptr, nbj, vec
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +224,7 @@ def _fcut(r, pi_rc, r_off, r_on):
     return fc * sw, dfc * sw + fc * dsw
 
 
-@_numba_njit
+@_numba_par
 def _acsf_kernel(
     ptr,
     nbj,
@@ -174,7 +259,8 @@ def _acsf_kernel(
     dGdv = np.zeros((M, 3, Dc))
     pi_rc = math.pi / r_cut
     off4 = n_sp * n2
-    for i in range(N):
+    # atoms are independent: atom i writes only G[i] and its own entries
+    for i in _prange(N):
         s0 = ptr[i]
         s1 = ptr[i + 1]
         # ---- G2 ----
