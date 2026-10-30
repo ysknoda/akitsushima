@@ -98,24 +98,7 @@ def write_vasprun(path, frames, truncate=False):
         fh.write(text)
 
 
-# VASP's resolved parameter listing (6.4 layout), as read_outcar_settings
-# parses it (ADR-0026)
-TRAINING_SETTINGS = {"ISPIN": 1, "ENCUT": 500.0, "PREC": "normal", "LASPH": True,
-                     "ISMEAR": 0, "SIGMA": 0.01, "GGA": "PS"}
-
-
-def settings_lines(st, gga_label="GGA type"):
-    return [
-        f"   PREC   = {st['PREC']}    normal or accurate (medium, high low for compatibility)",
-        f"   ISPIN  =      {st['ISPIN']}    spin polarized calculation?",
-        f"   LASPH  =      {'T' if st['LASPH'] else 'F'}    aspherical Exc in radial PAW",
-        f"   ENCUT  =  {st['ENCUT']:.1f} eV  36.75 Ry    6.06 a.u.",
-        f"   ISMEAR =     {st['ISMEAR']};   SIGMA  =   {st['SIGMA']:.2f}  broadening in eV",
-        f"   GGA     =    {st['GGA']}    {gga_label}",
-    ]
-
-
-def write_outcar(path, frames, settings=None, titel_date="05Jan2001"):
+def write_outcar(path, frames):
     types = frames[0]["atom_types"]
     # VASP's species blocks are runs of equal labels (POSCAR order)
     blocks = []
@@ -126,10 +109,8 @@ def write_outcar(path, frames, settings=None, titel_date="05Jan2001"):
             blocks.append([t, 1])
     out = []
     for sp, _ in blocks:
-        out += [f"   VRHFIN ={sp}: s2p2", f"   TITEL  = PAW_PBE {sp} {titel_date}"]
+        out += [f"   VRHFIN ={sp}: s2p2", f"   TITEL  = PAW_PBE {sp} 05Jan2001"]
     out.append("   ions per type =  " + "".join(f"{n:5d}" for _, n in blocks))
-    if settings is not None:
-        out += settings_lines(settings)
     for f in frames:
         s = f["stress_kB"]
         out += [
@@ -182,7 +163,7 @@ def write_outcar(path, frames, settings=None, titel_date="05Jan2001"):
         fh.write("\n".join(out) + "\n")
 
 
-def write_run(run_dir, frames, settings=None, titel_date="05Jan2001"):
+def write_run(run_dir, frames):
     run_dir.mkdir(parents=True, exist_ok=True)
     write_vasprun(run_dir / "vasprun.xml", frames)
-    write_outcar(run_dir / "OUTCAR", frames, settings, titel_date)
+    write_outcar(run_dir / "OUTCAR", frames)

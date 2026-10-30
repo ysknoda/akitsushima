@@ -32,7 +32,7 @@ import numpy as np
 
 from ..constants import VASP_KB_TO_EV_ANG3
 
-__all__ = ["read_outcar", "read_outcar_settings", "read_vasprun"]
+__all__ = ["read_outcar", "read_vasprun"]
 
 
 # ============================================================================
@@ -192,18 +192,12 @@ def read_outcar(path: str) -> list[dict]:
             while "direct lattice vectors" not in lines[j]:
                 j += 1
             cur["lattice"] = np.array(
-                [
-                    [float(x) for x in re.findall(_FLOAT, lines[j + k])[:3]]
-                    for k in (1, 2, 3)
-                ]
+                [[float(x) for x in re.findall(_FLOAT, lines[j + k])[:3]] for k in (1, 2, 3)]
             )
             i = j + 3
         elif line.lstrip().startswith("POSITION") and "TOTAL-FORCE" in line:
             rows = np.array(
-                [
-                    [float(x) for x in re.findall(_FLOAT, lines[i + 2 + k])[:6]]
-                    for k in range(n)
-                ]
+                [[float(x) for x in re.findall(_FLOAT, lines[i + 2 + k])[:6]] for k in range(n)]
             )
             cur["positions"] = rows[:, :3]
             cur["forces"] = rows[:, 3:]
@@ -240,57 +234,3 @@ def read_outcar(path: str) -> list[dict]:
     if not frames:
         raise ValueError(f"{path}: no complete ionic step found.")
     return frames
-
-
-# ============================================================================
-#  OUTCAR settings (ADR-0026)
-# ============================================================================
-
-# The values VASP resolved and printed in its parameter listing (not the
-# INCAR echo at the top), so defaults count too.  Group 1 is the value.
-# GGA reads "GGA type" up to VASP 6.4 and "functional components" in 6.6.
-_SETTING_PATTERNS = {
-    "ISPIN": (r"^\s*ISPIN\s*=\s*(\d+)\s+spin polarized", int),
-    "ENCUT": (r"^\s*ENCUT\s*=\s*([\d.]+)\s*eV", float),
-    "PREC": (r"^\s*PREC\s*=\s*(\w+)\s+normal or accurate", str.lower),
-    "LASPH": (r"^\s*LASPH\s*=\s*([TF])\s", lambda v: v == "T"),
-    "ISMEAR": (r"^\s*ISMEAR\s*=\s*(-?\d+)\s*;", int),
-    "SIGMA": (r";\s*SIGMA\s*=\s*([-\d.Ee+]+)\s+broadening", float),
-    "GGA": (r"^\s*GGA\s*=\s*(\S+)\s+(?:GGA type|functional components)", str.upper),
-    "METAGGA": (r"^\s*METAGGA\s*=\s*(\S+)", str.upper),
-}
-SETTING_KEYS = tuple(_SETTING_PATTERNS) + ("TITEL",)
-
-
-def read_outcar_settings(path: str) -> dict:
-    """
-    The electronic settings of a VASP run, from its ``OUTCAR``.
-
-    Returns ``ISPIN`` (int), ``ENCUT`` [eV], ``PREC`` (lower case),
-    ``LASPH`` (bool), ``ISMEAR`` (int), ``SIGMA`` [eV], ``GGA`` /
-    ``METAGGA`` (upper case) and ``TITEL`` ({species: POTCAR title}).  A
-    setting VASP did not print (``METAGGA`` when unset, or an excerpt of an
-    OUTCAR) is None.  Used to check that isolated-atom references were
-    computed like the training data (ADR-0026).
-    """
-    with open(path, "r", errors="replace") as fh:
-        lines = fh.readlines()
-    out: dict = {k: None for k in _SETTING_PATTERNS}
-    for key, (pat, conv) in _SETTING_PATTERNS.items():
-        rx = re.compile(pat)
-        for line in lines:
-            m = rx.search(line)
-            if m:
-                out[key] = conv(m.group(1))
-                break
-    species, titel = [], []
-    for line in lines:
-        st = line.strip()
-        if st.startswith("VRHFIN"):
-            species.append(st.split("=", 1)[1].split(":")[0].strip())
-        elif st.startswith("TITEL"):
-            titel.append(st.split("=", 1)[1].strip())
-        elif "ions per type" in line:
-            break
-    out["TITEL"] = dict(zip(species, titel)) if len(species) == len(titel) else {}
-    return out

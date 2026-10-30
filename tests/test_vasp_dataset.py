@@ -8,14 +8,7 @@ import numpy as np
 import pytest
 import yaml
 from test_cli_smoke import _ns
-from vasp_synth import (
-    TRAINING_SETTINGS,
-    make_frames,
-    settings_lines,
-    write_outcar,
-    write_run,
-    write_vasprun,
-)
+from vasp_synth import make_frames, write_outcar, write_run, write_vasprun
 
 from akitsushima.cli.cmd_dataset import cmd_dataset
 from akitsushima.io.dataset import _split_runs
@@ -26,7 +19,6 @@ from akitsushima.io import (
     build_training_set,
     parse_poscar,
     read_outcar,
-    read_outcar_settings,
     read_vasprun,
 )
 
@@ -207,86 +199,44 @@ def test_dataset_requires_every_isolated_atom_energy(tmp_path):
 # ------------------------------------------------- isolated atoms (ADR-0026)
 
 
-def _settings_runs(root, settings=TRAINING_SETTINGS):
-    for r in range(3):
-        fr = make_frames([("Ge", 6 - r), ("Sn", 2 + r)], n_steps=2, seed=r)
-        write_run(root / f"{r + 1:05d}", fr, settings)
-
-
-def _atom_run(d, sp, settings, energy=-0.75, titel_date="05Jan2001"):
+def _atom_run(d, sp, energy=-0.75):
     fr = make_frames([(sp, 1)], n_steps=2, seed=7)
     fr[-1] = dict(fr[-1], energy_free=energy - 0.02, energy_wo_entropy=energy,
                   energy_sigma0=energy - 0.01)
-    write_run(d, fr, settings, titel_date)
-    return fr
+    write_run(d, fr)
 
 
-@pytest.mark.parametrize("label", ["GGA type", "functional components"])
-def test_outcar_settings_read_both_gga_layouts(tmp_path, label):
-    p = tmp_path / "OUTCAR"
-    write_outcar(p, make_frames([("Ge", 1), ("Sn", 1)], n_steps=1))
-    with open(p, "a") as fh:
-        fh.write("\n".join(settings_lines(TRAINING_SETTINGS, label)) + "\n")
-    st = read_outcar_settings(str(p))
-    assert {k: st[k] for k in TRAINING_SETTINGS} == TRAINING_SETTINGS
-    assert st["METAGGA"] is None
-    assert st["TITEL"] == {"Ge": "PAW_PBE Ge 05Jan2001", "Sn": "PAW_PBE Sn 05Jan2001"}
-
-
-def test_outcar_settings_of_the_real_gesn_excerpt_are_unknown_not_wrong():
-    st = read_outcar_settings(os.path.join(REAL, "OUTCAR"))
-    assert st["ISPIN"] is None and st["ENCUT"] is None
-    assert st["TITEL"] == {"Ge": "PAW_PBE Ge 05Jan2001", "Sn": "PAW_PBE Sn 08Apr2002"}
-
-
-def test_isolated_atom_path_matching_settings_gives_its_energy_and_no_warning(tmp_path):
-    _settings_runs(tmp_path / "runs")
-    _atom_run(tmp_path / "atoms" / "Ge", "Ge", TRAINING_SETTINGS, energy=-0.75)
+def test_isolated_atom_path_gives_the_last_step_energy_with_the_dataset_key(tmp_path):
+    _runs(tmp_path / "runs", n_runs=3, interleave=True)
+    _atom_run(tmp_path / "atoms" / "Ge", "Ge", energy=-0.75)
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        warnings.simplefilter("error")      # no warning about the reference
         res = build_training_set(
             str(tmp_path / "runs"), output_dir=str(tmp_path / "out"),
             isolated_atom_energy={"Ge": str(tmp_path / "atoms" / "Ge"), "Sn": -0.6})
     assert res["isolated_atom_energy"] == {"Ge": -0.75, "Sn": -0.6}
-    assert res["isolated_atom_check"] == {"rows": [], "unchecked": ["Sn"]}
-    # the energy key of the dataset is used for the atom too
     res = build_training_set(
         str(tmp_path / "runs"), output_dir=str(tmp_path / "out2"), energy="sigma0",
         isolated_atom_energy={"Ge": str(tmp_path / "atoms" / "Ge" / "OUTCAR"), "Sn": -0.6})
     assert res["isolated_atom_energy"]["Ge"] == pytest.approx(-0.76)
 
 
-def test_isolated_atom_with_other_spin_smearing_and_potcar_warns(tmp_path):
-    _settings_runs(tmp_path / "runs")
-    st = dict(TRAINING_SETTINGS, ISPIN=2, ISMEAR=-2, SIGMA=0.0)
-    _atom_run(tmp_path / "atoms" / "Ge", "Ge", st, titel_date="08Apr2002")
-    _atom_run(tmp_path / "atoms" / "Sn", "Sn", TRAINING_SETTINGS)
-    with pytest.warns(UserWarning, match="isolated-atom runs differ") as rec:
-        res = build_training_set(
-            str(tmp_path / "runs"), output_dir=str(tmp_path / "out"),
-            isolated_atom_energy={sp: str(tmp_path / "atoms" / sp) for sp in ("Ge", "Sn")})
-    rows = {(r["species"], r["setting"]): r for r in res["isolated_atom_check"]["rows"]}
-    assert set(rows) == {("Ge", "ISPIN"), ("Ge", "ISMEAR"), ("Ge", "SIGMA"), ("Ge", "TITEL")}
-    assert rows[("Ge", "ISPIN")]["atom"] == 2 and rows[("Ge", "ISPIN")]["data"] == [1]
-    assert rows[("Ge", "ISPIN")]["n_runs"] == rows[("Ge", "ISPIN")]["n_checked"] == 3
-    assert "PAW_PBE Ge 08Apr2002" in str(rec[0].message)
-
-
-def test_dataset_cli_prints_the_isolated_atom_table_and_still_builds(tmp_path, capsys):
-    _settings_runs(tmp_path / "runs")
-    _atom_run(tmp_path / "atoms" / "Ge", "Ge", dict(TRAINING_SETTINGS, ISPIN=2))
-    assert _run_dataset(tmp_path, isolated_atom_energy={
+def test_dataset_cli_subtracts_an_isolated_atom_given_by_path(tmp_path, capsys):
+    frames = _runs(tmp_path / "runs", n_runs=2)
+    _atom_run(tmp_path / "atoms" / "Ge", "Ge", energy=-0.75)
+    assert _run_dataset(tmp_path, split={"test_fraction": 0.0}, isolated_atom_energy={
         "Ge": str(tmp_path / "atoms" / "Ge"), "Sn": -0.6}) == 0
-    out = capsys.readouterr().out
-    assert "WARNING: isolated-atom runs differ" in out
-    assert "ISPIN" in out and "(3 of 3 runs differ)" in out
-    assert "['Sn'] given as numbers" in out
-    assert (tmp_path / "out" / "train" / "structures.csv").is_file()
+    assert "Isolated atoms : Ge -0.75000000 eV, Sn -0.60000000 eV" in capsys.readouterr().out
+    row = _manifest(tmp_path)[0]
+    f = frames[os.path.basename(row["run"])][int(row["step"]) - 1]
+    shift = sum(-0.75 if t == "Ge" else -0.6 for t in f["atom_types"])
+    assert float(row["target_eV_per_atom"]) == pytest.approx(
+        (f["energy_wo_entropy"] - shift) / len(f["atom_types"]))
 
 
 def test_isolated_atom_path_must_hold_one_atom_of_that_species(tmp_path):
-    _settings_runs(tmp_path / "runs")
-    _atom_run(tmp_path / "atoms" / "Sn", "Sn", TRAINING_SETTINGS)
+    _runs(tmp_path / "runs", n_runs=2)
+    _atom_run(tmp_path / "atoms" / "Sn", "Sn")
     with pytest.raises(ValueError, match="not one Ge atom"):
         build_training_set(str(tmp_path / "runs"), output_dir=str(tmp_path / "out"),
                            isolated_atom_energy={"Ge": str(tmp_path / "atoms" / "Sn"),
@@ -294,4 +244,3 @@ def test_isolated_atom_path_must_hold_one_atom_of_that_species(tmp_path):
     with pytest.raises(FileNotFoundError, match="no OUTCAR"):
         build_training_set(str(tmp_path / "runs"), output_dir=str(tmp_path / "out"),
                            isolated_atom_energy={"Ge": str(tmp_path / "nowhere"), "Sn": -0.6})
-
