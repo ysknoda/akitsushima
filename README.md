@@ -76,6 +76,12 @@
 > `akitsushima.force_fn_from_config()` are public.  API defaults follow
 > the CLI's (tabular ELM `eps0` 0.01, relax `output_dir` ./relax_output,
 > ...); the CLI's NVT `tau_nhc` falls back to 100 fs like the API.
+> 0.2.0a16 (ADR-0026): `dataset.isolated_atom_energy` also takes the
+> path of the atom's VASP run; its settings (ISPIN, ENCUT, GGA, LASPH,
+> PREC, ISMEAR, SIGMA, POTCAR) are compared with every training run and
+> differences are printed as a warning.  Compute the isolated atom like
+> the training data (ISPIN = 1 data -> an ISPIN = 1 atom), since the
+> MLIP's isolated-atom limit is pinned to it.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

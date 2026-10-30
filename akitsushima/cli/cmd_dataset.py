@@ -6,8 +6,15 @@ the YAML and prints.
 
 import os
 import time as _time
+import warnings
 
-from ..io.dataset import _ENERGY_KEYS, _READERS, _find_runs, build_training_set
+from ..io.dataset import (
+    _ENERGY_KEYS,
+    _READERS,
+    _find_runs,
+    build_training_set,
+    format_isolated_atom_check,
+)
 from .common import _check_yaml, _print_header, _print_results_header
 
 __all__ = ["cmd_dataset"]
@@ -40,8 +47,10 @@ def cmd_dataset(args) -> int:
         return 1
     sources = [sources] if isinstance(sources, str) else list(sources)
     cross = bool(sec.get("cross_check", True))
-    e_atom: dict[str, float] = {
-        str(k): float(v) for k, v in (sec.get("isolated_atom_energy") or {}).items()
+    # a number (eV) or the path of the isolated-atom run (ADR-0026)
+    e_atom = {
+        str(k): (v if isinstance(v, str) else float(v))
+        for k, v in (sec.get("isolated_atom_energy") or {}).items()
     }
     split = sec.get("split", {}) or {}
     out_dir = sec.get("output_dir", "./training_set")
@@ -66,15 +75,30 @@ def cmd_dataset(args) -> int:
     print(f"  Frames      : {sec.get('frames', 'all')}")
 
     try:
-        res = build_training_set(
-            sources, output_dir=out_dir, reader=reader, energy=energy,
-            frames=sec.get("frames", "all"), isolated_atom_energy=e_atom,
-            test_fraction=float(split.get("test_fraction", 0.0)),
-            stratify=str(split.get("stratify", "composition")).lower(),
-            seed=int(split.get("seed", 0)), cross_check=cross)
+        with warnings.catch_warnings():
+            # printed below as a table, from the summary
+            warnings.filterwarnings("ignore", message="isolated-atom runs differ")
+            res = build_training_set(
+                sources, output_dir=out_dir, reader=reader, energy=energy,
+                frames=sec.get("frames", "all"), isolated_atom_energy=e_atom,
+                test_fraction=float(split.get("test_fraction", 0.0)),
+                stratify=str(split.get("stratify", "composition")).lower(),
+                seed=int(split.get("seed", 0)), cross_check=cross)
     except (ValueError, FileNotFoundError) as exc:
         print(f"ERROR: {exc}")
         return 1
+    if e_atom:
+        print("  Isolated atoms : "
+              + ", ".join(f"{sp} {e:.8f} eV" + (f" ({e_atom[sp]})" if isinstance(e_atom[sp], str)
+                                                else "")
+                          for sp, e in res["isolated_atom_energy"].items()))
+        chk = res["isolated_atom_check"]
+        for line in format_isolated_atom_check(chk):
+            print(f"  WARNING: {line}" if line.startswith("isolated") else f"  {line}")
+        if chk["unchecked"]:
+            print(f"  NOTE: isolated_atom_energy of {chk['unchecked']} given as numbers -- "
+                  f"their VASP settings cannot be checked against the training runs "
+                  f"(give the run directory instead, ADR-0026).")
 
     _print_results_header("dataset")
     is_test = res["is_test"]

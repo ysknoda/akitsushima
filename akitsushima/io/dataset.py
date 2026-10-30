@@ -7,16 +7,22 @@ as a whole -- the steps of one relaxation are strongly correlated, so
 splitting by frame would leak a trajectory into both sides -- optionally
 stratified by composition.  Energies can be shifted to the isolated-atom
 reference: target E/N = (E - sum_s n_s E_atom,s) / N.
+
+An isolated-atom energy is a number or the path of the VASP run of that
+atom.  For a path, the run's settings are compared with every training
+run (ADR-0026): a reference computed differently (ISPIN = 2 against
+ISPIN = 1 data, say) is reported with a warning, not refused.
 """
 
 import csv
 import os
+import warnings
 
 import numpy as np
 
 from ..constants import VASP_KB_TO_EV_ANG3
 from .poscar import write_poscar
-from .vasp import read_outcar, read_vasprun
+from .vasp import SETTING_KEYS, read_outcar, read_outcar_settings, read_vasprun
 
 __all__ = ["build_training_set"]
 
@@ -35,6 +41,77 @@ _CROSS_TOL = {
     "forces": 2e-6,
     "stress_kB": 2e-5,
 }
+
+
+def _resolve_isolated_atoms(isolated_atom_energy, energy: str):
+    """{species: number | path} -> ({species: eV}, {species: OUTCAR path}).
+
+    A path is a run directory holding OUTCAR, or the OUTCAR itself; its
+    energy is the last ionic step's, with the dataset's own energy key.
+    """
+    e_atom, paths = {}, {}
+    for sp, v in (isolated_atom_energy or {}).items():
+        sp = str(sp)
+        if isinstance(v, (str, os.PathLike)):
+            p = os.path.join(v, "OUTCAR") if os.path.isdir(v) else str(v)
+            if not os.path.isfile(p):
+                raise FileNotFoundError(f"isolated_atom_energy.{sp}: no OUTCAR at '{v}'.")
+            fr = read_outcar(p)[-1]
+            if fr["atom_types"] != [sp]:
+                raise ValueError(
+                    f"isolated_atom_energy.{sp}: {p} holds {fr['atom_types']}, "
+                    f"not one {sp} atom.")
+            e_atom[sp], paths[sp] = fr[_ENERGY_KEYS[energy]], p
+        else:
+            e_atom[sp] = float(v)
+    return e_atom, paths
+
+
+def _check_isolated_atoms(atom_paths: dict, runs: list, species_numbers: list) -> dict:
+    """Compare each isolated-atom run's settings with the training runs.
+
+    Returns {"rows": [...], "unchecked": [species given as numbers]}.  A
+    row is one (species, setting) that differs: the atom's value, the
+    distinct training values and how many training runs differ.  A setting
+    missing on either side is not compared.
+    """
+    data = []
+    for run in runs:
+        p = os.path.join(run, "OUTCAR")
+        data.append(read_outcar_settings(p) if os.path.isfile(p) else None)
+    rows = []
+    for sp, path in atom_paths.items():
+        atom = read_outcar_settings(path)
+        for key in SETTING_KEYS:
+            a = atom[key].get(sp) if key == "TITEL" else atom[key]
+            vals = []
+            for d in data:
+                if d is None:
+                    continue
+                v = d[key].get(sp) if key == "TITEL" else d[key]
+                if v is not None and (key != "TITEL" or sp in d[key]):
+                    vals.append(v)
+            if a is None or not vals:
+                continue
+            n_diff = sum(v != a for v in vals)
+            if n_diff:
+                rows.append({"species": sp, "setting": key, "atom": a,
+                             "data": sorted(set(vals), key=str), "n_runs": n_diff,
+                             "n_checked": len(vals)})
+    return {"rows": rows, "unchecked": sorted(species_numbers)}
+
+
+def format_isolated_atom_check(check: dict) -> list[str]:
+    """Lines of the comparison table (empty when nothing differs)."""
+    lines = []
+    if check["rows"]:
+        lines.append("isolated-atom runs differ from the training runs (ADR-0026):")
+        lines.append(f"  {'species':<8}{'setting':<9}{'atom':<26}training runs")
+        for r in check["rows"]:
+            data = ", ".join(str(v) for v in r["data"])
+            lines.append(f"  {r['species']:<8}{r['setting']:<9}{r['atom']!s:<26}"
+                         f"{data}  ({r['n_runs']} of {r['n_checked']} runs differ)")
+    return lines
 
 
 def _find_runs(sources: list[str], filename: str) -> list[str]:
@@ -197,7 +274,11 @@ def build_training_set(sources, output_dir="./training_set", reader="vasprun",
         ``cross_check``, within OUTCAR's printed precision).
     energy : "wo_entropy" | "free" | "sigma0".
     frames : "all" | "last" | "first_last" | a positive stride.
-    isolated_atom_energy : {species: eV}; subtracted per atom when given.
+    isolated_atom_energy : {species: eV or path}; subtracted per atom when
+        given.  A path (a run directory or its OUTCAR) gives the energy of
+        that run's last step, read with ``energy``, and its settings are
+        compared with the training runs (ADR-0026); differences raise a
+        UserWarning.
     test_fraction, stratify ("composition" | "none"), seed : run-level split.
 
     Writes ``output_dir/{train,test}/structures.csv``, ``<k>/POSCAR`` and
@@ -205,7 +286,9 @@ def build_training_set(sources, output_dir="./training_set", reader="vasprun",
     :func:`akitsushima.io.load_training_set`.  Raises ValueError or
     FileNotFoundError on bad input.  The summary has ``runs``, ``is_test``,
     ``species``, ``n_train`` / ``n_test`` (structures), ``target_min`` /
-    ``target_max`` (eV/atom) and ``min_half_width`` (A).
+    ``target_max`` (eV/atom) and ``min_half_width`` (A), ``isolated_atom_energy`` ({species: eV}) and
+    ``isolated_atom_check`` (``rows`` that differ, ``unchecked`` species
+    given as numbers).
     """
     from ..fitting.descriptors import sort_species
 
@@ -218,9 +301,13 @@ def build_training_set(sources, output_dir="./training_set", reader="vasprun",
     if not sources:
         raise ValueError("dataset.sources is required (VASP run directories).")
     sources = [sources] if isinstance(sources, str) else list(sources)
-    e_atom = {str(k): float(v) for k, v in (isolated_atom_energy or {}).items()}
+    e_atom, atom_paths = _resolve_isolated_atoms(isolated_atom_energy, energy)
     fname, read = _READERS[reader]
     runs = _find_runs(sources, fname)
+    check = _check_isolated_atoms(atom_paths, runs,
+                                  [sp for sp in e_atom if sp not in atom_paths])
+    if check["rows"]:
+        warnings.warn("\n".join(format_isolated_atom_check(check)), UserWarning, stacklevel=2)
 
     comps, run_items = [], []
     for run in runs:
@@ -270,4 +357,5 @@ def build_training_set(sources, output_dir="./training_set", reader="vasprun",
     return {"runs": runs, "is_test": is_test, "species": species,
             "n_train": len(train), "n_test": len(test),
             "target_min": float(tgt.min()), "target_max": float(tgt.max()),
-            "min_half_width": float(min(hw))}
+            "min_half_width": float(min(hw)),
+            "isolated_atom_energy": e_atom, "isolated_atom_check": check}

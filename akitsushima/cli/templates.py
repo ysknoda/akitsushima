@@ -1215,6 +1215,9 @@ dataset:
   energy:      wo_entropy   # wo_entropy | free | sigma0
   frames:      all          # all | last | first_last | <stride>
   # isolated_atom_energy: {Si: -0.8}   # eV; target = (E - sum n_s E_s) / N
+  # isolated_atom_energy: {Si: ./vasp_atoms/Si}   # or the atom's VASP run: its
+  #                           # settings (ISPIN, ENCUT, POTCAR, ...) are checked
+  #                           # against the training runs (ADR-0026)
   split:
     test_fraction: 0.2      # fraction of RUNS held out (0 = train only)
     stratify:      composition   # composition | none
