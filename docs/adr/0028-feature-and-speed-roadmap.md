@@ -191,3 +191,52 @@ Steps 1 to 4 are recorded as addenda to this ADR.  From step 5 on, each
 item gets its own ADR and a short grilling before it starts.  Each
 finished item raises the alpha version by one; 0.2.0b1 follows when all
 of tier A is done.  Commits are local; every push and tag is asked for.
+
+## Addendum 1: benchmark and baseline (tier A step 1, 2026-11-12)
+
+`benchmarks/bench_force.py` times one warm force call per potential
+family at about 500 and 4000 atoms and appends one JSON line per case to
+a ledger: the time of one `NeighbourList.build`, of the call with that
+list, and of the call without a list, each the best of three.
+`--compare` prints old / new against another ledger for the same case,
+size, thread count and tag.  `example/` is not tracked, so the script
+builds everything itself from parameters in the package or cited in its
+docstring: SW Si (Stillinger and Weber 1985), Tersoff Si (1988), Zhou
+EAM Ni (2004), Buckingham MgO (Lewis and Catlow 1985) with PPPM and
+Ewald, and an atom-centred ELM (400 hidden units) trained on SW silicon
+with the ACSF grid of `ac_elm_iso_r2` (27 features per atom for one
+species).  `--mlip-model` adds a model file.  It also prints the energy
+per atom, the summed force, and the difference between the call with a
+list and the all-pairs call.  `tests/test_benchmarks.py` runs it on
+small cells (marked slow).
+
+`benchmarks/baseline.jsonl`, tag `loaded`: one numba thread, 0.2.0a16
+at 392b2aa, while other jobs held about seven of the ten cores (load
+average 14).  It is **provisional**: the baseline on an idle machine,
+with 1 and 4 threads, is still to be measured and will be appended with
+an empty tag.
+
+| Case | N | build [s] | call with list [s] | call without list [s] |
+|---|---|---|---|---|
+| SW Si | 512 | 0.032 | 0.0033 | 0.019 |
+| SW Si | 4096 | 0.250 | 0.028 | 1.58 |
+| Tersoff Si | 512 | 0.0093 | 0.0018 | 0.025 |
+| Tersoff Si | 4096 | 0.072 | 0.015 | 1.64 |
+| Zhou EAM Ni | 500 | 0.182 | 0.043 | 0.059 |
+| Zhou EAM Ni | 4000 | 1.44 | 0.325 | 1.95 |
+| Buckingham + PPPM MgO | 512 | 0.264 | 0.087 | 0.144 |
+| Buckingham + PPPM MgO | 4096 | 2.07 | 0.684 | 3.33 |
+| Buckingham + Ewald MgO | 512 | 0.206 | 0.724 | 0.698 |
+| ACSF(27) + ELM(400) Si | 512 | - | - | 0.141 |
+| ACSF(27) + ELM(400) Si | 4096 | - | - | 1.03 |
+| `ac_elm_iso_r2` (Ge, Sn at random on the Si geometry) | 512 | - | - | 0.135 |
+| `ac_elm_iso_r2` | 4096 | - | - | 1.23 |
+
+The three findings above hold on these self-contained cases too: the
+all-pairs call is 57 times (SW) and 112 times (Tersoff) the call with a
+list at 4096 atoms, and one neighbour-list build costs 3 to 9 force
+calls.  The call with a list and the all-pairs call agree to 4.9e-11
+eV/A (SW) and below 1e-13 eV/A (the others).
+
+Full suite with the new test: 802 passed (22.7 min, 2 numba threads,
+loaded machine).  The version is not raised until the idle baseline is in.
