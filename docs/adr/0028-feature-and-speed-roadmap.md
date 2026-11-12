@@ -117,16 +117,21 @@ Three findings:
    This is also the CPU form of ADR-0016 decision 6.
 6. **Restart of `md` and `relax` (Q14).**  The limit recorded in
    ADR-0025: a run longer than 12 h is not possible today.
-7. **Ensemble ELM with an uncertainty output (Q15; ADR-0010 item 7).**
+7. **Langevin thermostat in `md` (Q14; moved from tier B by the user on
+   2026-11-12).**  NVT for the whole system; `nemd` already integrates
+   Langevin baths (ADR-0020), but only as its two heat-bath regions.  It
+   follows step 6 so that the random-number state is designed into the
+   checkpoint from the start.
+8. **Ensemble ELM with an uncertainty output (Q15; ADR-0010 item 7).**
    ADR-0027 rounds 3-5 found that the spurious anneal minima differ from
    one ELM seed to the next, which more data does not remove.
-8. **Structure and trajectory I/O, ASE adapter (Q14, Q17).**  Reading
+9. **Structure and trajectory I/O, ASE adapter (Q14, Q17).**  Reading
    and writing extxyz, LAMMPS data and CIF; extxyz and LAMMPS dump as
    trajectory output; an ASE Calculator that wraps an akitsushima force
    function.  `ase` is an optional extra.
-9. **Structure builders (Q16).**  Supercell, random alloy, vacancy,
+10. **Structure builders (Q16).**  Supercell, random alloy, vacancy,
    slab.  SQS generation is not part of it (tier C, Q19).
-10. **Anisotropic NPT (Q14).**  Full cell or per axis.  The in-plane
+11. **Anisotropic NPT (Q14).**  Full cell or per axis.  The in-plane
     barostat of ADR-0010 item 2 is part of this step (Q24).  It is last
     because its verification (conserved quantity, each pressure
     component) is the heaviest.
@@ -137,7 +142,7 @@ Three findings:
   neighbours (Q10); models have to be retrained.
 - EAM kernel in numba; PPPM: no `_mesh_stress` on steps that do not need
   the stress, real FFT, charge assignment in numba (Q12).
-- Langevin and CSVR thermostats (Q14).
+- CSVR thermostat (Q14).
 - Active-learning command driven by the ensemble uncertainty (Q15).
 - Lattice thermal conductivity from third-order force constants in the
   relaxation-time approximation; point-defect formation energy and
