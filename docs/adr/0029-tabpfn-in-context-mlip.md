@@ -337,3 +337,35 @@ member.  Memory is the problem: with autograd, 1500 context rows x 90
 columns peak at 15-16 GiB with ONE member and 16 test rows, and the
 8-member run was killed by the system.  Larger contexts need either
 finite differences in the descriptor (no graph) or a GPU.
+
+## Appendix C: AlN, real DFT (2026-11-15)
+
+Done before the SW two-species sets at the user's choice: on SW data the
+linear model is at the noise floor (appendix B), so only real data can
+show whether TabPFN adds to it.  `tabpfn_spike.py real`: the AlN tutorial
+set (440 training structures of 63-64 atoms, 69 held-out test structures),
+the tutorial's ACSF (144 table columns), `akitsushima mlip` default
+weights; TabPFN v2, CPU, context = the 440 E rows.  Absolute test RMSE:
+
+| model | E (meV/atom) | F (eV/A) | S (eV/A^3) |
+|---|---|---|---|
+| atom-centred ELM (tutorial log, 04_mlip_elm) | 1.12 | 0.140 | 0.00198 |
+| tabular linear | 1.46 | 0.161 | 0.00227 |
+| tabular ELM (n_hidden 512) | 1.46 | 0.161 | 0.00227 |
+| linear + TabPFN residual | 1.15 | 0.191 | 0.0388 |
+| TabPFN alone | 1.47 | 0.253 | 0.132 |
+
+- TabPFN on the residual improves the energy to the atom-centred ELM's
+  level and makes forces 19 % and stress 17 times worse than the linear
+  model it is added to.  Alone it is worse still.
+- Reading (not verified): the E rows fix t(d) only on the set of
+  structure descriptors; its gradient in the directions the F and S rows
+  point along is unconstrained, and the stress rows point furthest out of
+  that set.  The force and stress labels are needed, and the one way
+  tried to give them to TabPFN (Taylor rows) made things worse on Si.
+- Cost: 3.7 s per structure for the residual model, 13.8 s alone, with
+  about 17 GiB resident and swapping (peak footprint 61 GiB).
+
+**State of the gate:** no variant passes on real data; the correctness
+part passes (appendix B).  Not adoptable as designed.  Open: why the
+Taylor rows hurt.
