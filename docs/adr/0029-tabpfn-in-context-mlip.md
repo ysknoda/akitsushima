@@ -216,3 +216,53 @@ are appended as an appendix.
 - If adopted, the default path's 1e-10 reproducibility standard
   (ADR-0028) cannot hold for this model (float32 transformer); it stays
   opt-in.
+
+## Appendix A: environment and gradient check (2026-11-15)
+
+Scripts: `example/mlip/adr0029/check_coexistence.py`,
+`check_gradient.py`, `check_smoothness.py` (example/ is not tracked).
+Test function y = sin(2 x0) + x1 x2 + 0.5 x3^2 on 300 uniform points in
+[-1, 1]^5, CPU, float32 unless stated; y std 0.86.
+
+- **Installation.**  `tabpfn==10.0.0` in base, the packages of
+  decision 8 and nothing else.
+- **Coexistence.**  `import tabpfn` and a fit / predict do not load
+  lightgbm; numba parallel kernels (omp layer) work before and after
+  torch and tabpfn.  Stop rule 1 does not apply.
+- **Gradient route.**  `differentiable_input=True`,
+  `fit_with_differentiable_input`, then the private
+  `_iter_forward_executor` with a test tensor that requires grad; the
+  prediction is the mean over the ensemble of the bar-distribution means.
+  A test row's prediction does not depend on the other test rows.
+- **TabPFN-3.5 is not a continuous function of its input.**
+  - With the default `FINGERPRINT_FEATURE` (a hash of the row) the
+    prediction jumps by about 1e-2 between points 1e-6 apart.  It can be
+    switched off (`inference_config`).
+  - Without it jumps of 1e-3 to 3e-3 remain, about one per 1e-3 of path.
+    Cause: the architecture feeds every cell's midrank against the train
+    rows (ECDF, `_ecdf_midrank_counts` in `tabpfn_v3_5.py`) to the
+    model, a step function that moves by 1 / n_train whenever a test
+    value crosses a train value.  Between two crossings the function is
+    smooth and autograd is exact (float64, step 1e-6: slope -0.18282
+    against autograd -0.18282), but the autograd gradient misses the
+    jumps: against central differences its rms error is 0.08-0.09 at
+    h = 1e-2 and 1e-3, for a gradient of rms 0.72.
+  - `ecdf_num_buckets` reduced to 64 or 16 leaves fewer jumps of the
+    same size and doubles the prediction error (0.014 -> 0.025).
+  - This is part of the pretrained model and cannot be configured away:
+    as it stands, TabPFN-3.5 gives an energy surface with small steps,
+    not a conservative force field.
+- **TabPFN v2 is smooth.**  The v2 architecture has no rank feature.
+  With identity preprocessing and no fingerprint: second differences
+  along the 1e-4 scan 6.6e-7 (float32 rounding), autograd against
+  central differences 2.3e-4 rms at h = 1e-3, prediction rmse 0.0115
+  (3.5: 0.0139), 200 test rows in 1.1 s (3.5: 5.3 s).  Its documented
+  limits are 10,000 rows and 500 features (Hollmann et al., Nature 637,
+  319 (2025)), and its weights are under the Prior Labs License.
+- **Not tested:** v2.5, v2.6 and v3 (no ECDF code in their architecture
+  files); each needs its own licence acceptance by the user.
+- **Cost, first sight.**  CPU, 300 context rows, 6 test rows, forward +
+  backward: 10 s for 3.5.  The same on MPS ran out of memory (11.2 GiB);
+  not investigated.
+
+Consequence for decision 5 (weights): open, to be decided with the user.
