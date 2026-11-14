@@ -259,10 +259,81 @@ Test function y = sin(2 x0) + x1 x2 + 0.5 x3^2 on 300 uniform points in
   (3.5: 0.0139), 200 test rows in 1.1 s (3.5: 5.3 s).  Its documented
   limits are 10,000 rows and 500 features (Hollmann et al., Nature 637,
   319 (2025)), and its weights are under the Prior Labs License.
-- **Not tested:** v2.5, v2.6 and v3 (no ECDF code in their architecture
-  files); each needs its own licence acceptance by the user.
+- **v2.5, v2.6 and v3 are smooth too** (tested after the user accepted
+  their licences).  Same test; limits read from each version's
+  `inference_config_`:
+
+  | version | max abs 2nd difference, 1e-4 scan | autograd - FD rms, h = 1e-3 | rmse | 200 rows (s) | rows | features |
+  |---|---|---|---|---|---|---|
+  | v2 | 6.6e-7 | 2.3e-4 | 0.0115 | 1.1 | 10,000 | 500 |
+  | v2.5 | 9.8e-7 | 2.6e-4 | 0.0121 | 1.2 | 50,000 | 2,000 |
+  | v2.6 | 7.5e-7 | 9.6e-5 | 0.0331 | 1.7 | 100,000 | 2,000 |
+  | v3 | 6.6e-7 | 9.1e-4 | 0.0123 | 2.2 | 1,000,000 | 2,000 |
+  | v3.5 | 2.7e-3 | 9.3e-2 | 0.0139 | 5.3 | 1,000,000 | 20,000 |
+
+  Only 3.5 is discontinuous.
 - **Cost, first sight.**  CPU, 300 context rows, 6 test rows, forward +
   backward: 10 s for 3.5.  The same on MPS ran out of memory (11.2 GiB);
   not investigated.
 
 Consequence for decision 5 (weights): open, to be decided with the user.
+
+## Appendix B: Si screen, first results (2026-11-15)
+
+`example/mlip/adr0029/tabpfn_spike.py` (commands `taylor`, `run`,
+`fdcheck`, `report`; ledger.jsonl).  SW Si, 300 training structures of 64
+atoms, 90 ACSF columns, TabPFN v2 on the CPU, identity preprocessing, no
+fingerprint feature.  Test RMSE / sigma on `si_test`.
+
+**Taylor targets against exact SW energies** (20 structures, exact
+labels; meV/atom):
+
+| rows | error mean | error rms | first-order signal rms |
+|---|---|---|---|
+| displacement, delta 0.01 A | -0.87 | 0.88 | 1.03 |
+| displacement, delta 0.03 A | -7.85 | 7.88 | 3.09 |
+| strain, eta 0.002 | -0.04 | 0.05 | 0.58 |
+| strain, eta 0.005 | -0.27 | 0.28 | 1.46 |
+| strain, eta 0.01 | -1.09 | 1.13 | 2.92 |
+
+The error is the second-order term (every atom moved: about
+0.5 k delta^2 per atom) and is the same for +u and -u.  delta = 0.03 A is
+unusable; decision 10's set becomes {0.003, 0.01} A.
+
+**Accuracy** (E / F / S):
+
+| model | context rows | ensemble | test structures | E / F / S |
+|---|---|---|---|---|
+| linear alone | - | - | 50 | 1.08 / 1.01 / 0.99 |
+| linear + TabPFN, E rows | 300 | 8 | 50 | 1.09 / 1.01 / 0.99 |
+| TabPFN alone, E rows | 300 | 8 | 50 | 1.19 / 1.89 / 1.60 |
+| TabPFN alone, E rows | 300 | 1 | 16 | 1.30 / 1.55 / 1.47 |
+| TabPFN alone, E + 4 displacement rows, delta 0.01 | 1500 | 1 | 16 | 1.48 / 3.98 / 3.90 |
+| TabPFN alone, E + 4 displacement rows, delta 0.003 | 1500 | 1 | 16 | 1.85 / 5.12 / 2.94 |
+| TabPFN alone, E + 4 strain rows, eta 0.005 | 1500 | 1 | 16 | 1.75 / 5.30 / 2.14 |
+
+- The linear model alone is at the noise floor, and the residual left
+  for TabPFN (std 1.96 meV/atom) is the 2 meV/atom label noise: on SW
+  data the main variant of decision 2 cannot differ from the linear
+  model, so these sets cannot show whether TabPFN adds anything to it.
+- TabPFN alone from 300 energies gives forces at 1.5-1.9 sigma, inside
+  the 2 sigma gate, without any force label.
+- The Taylor rows make every variant tried WORSE (F 1.55 -> 4.0-5.3
+  sigma at equal settings).  Not explained yet; the suspicion is that
+  clusters of nearly identical rows mislead the in-context estimate of
+  noise and smoothness.  Decision 4 does not work as designed.
+
+**Correctness** (one test structure, E-row context): sum of forces
+1e-12 eV/A.  Chain-rule forces against central differences of the model
+energy: with the linear part 1.1e-4 / 9.7e-6 / 5.1e-6 eV/A at h = 0.01 /
+0.003 / 0.001 A, stress 2.4e-6 eV/A^3 at h = 0.001; TabPFN alone 9.0e-4
+eV/A at h = 0.01 A, growing to 8.3e-3 at h = 0.001 A -- float32 rounding
+of an energy that now carries the full 60 meV/atom spread, which is what
+the linear part was meant to remove.  Stop rule 2 does not apply.
+
+**Cost** (CPU, 24 GiB machine): 0.85-0.89 s per 64-atom structure with
+300 context rows and 8 ensemble members (gate: 1 s), 0.16 s with one
+member.  Memory is the problem: with autograd, 1500 context rows x 90
+columns peak at 15-16 GiB with ONE member and 16 test rows, and the
+8-member run was killed by the system.  Larger contexts need either
+finite differences in the descriptor (no graph) or a GPU.
