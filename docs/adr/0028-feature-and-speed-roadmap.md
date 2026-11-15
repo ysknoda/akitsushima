@@ -172,6 +172,9 @@ Three findings:
   integration (Q16).
 - New potential families: MEAM, core-shell, D3 dispersion, variable
   charge (Q17); chosen when a system needs one.
+- DFT-free calculation of any system (added 2026-11-15, ADR-0029
+  follow-up): an existing universal MLIP as an external engine, or a
+  package-native multi-element atom-centred model.  Notes in ADR-0029.
 - ADR-0010 items 1 (MLIP + ESM), 3 (multi-species CFCMC), 4
   (constant-potential ESM), 5 (atom-centred linear and quadratic
   models), 10 (further linear methods), 11 (second-derivative data)

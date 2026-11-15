@@ -435,3 +435,153 @@ What stays:
 - Option (b) of decision 1 and its prerequisites stay recorded as a
   future option.  It would additionally need a tabular model that can use
   force labels, which this ADR did not find.
+
+## Follow-up (2026-11-15, second grilling, Q7-Q21)
+
+After the rejection the user asked what option (b) of decision 1 would
+take, and chose to pursue two things and to park a third.
+
+**Parked as future work (Q7): DFT-free calculation of any system by other
+means.**  Either an existing universal MLIP called as an external engine
+(ADR-0011, and the ASE adapter of ADR-0028 tier A) -- which is simply
+using that potential, with akitsushima supplying the solvers -- or a
+package-native multi-element atom-centred model (linear / ELM) fitted in
+advance and shipped.  Neither uses TabPFN.  Listed in ADR-0028 tier C.
+Undecided notes for the native model: start from a few binary systems in
+one model; a descriptor whose column count does not grow with the number
+of species; public PBE data for breadth and own PBEsol data for the
+target systems, with the functional mismatch to be tested first; a coarse
+shipped model that a user sharpens with a few DFT structures (closed-form
+refit).
+
+**Pursued 1: TabPFN for energies only (Q8-Q12).**  No gradient is needed,
+so the three obstacles of the force field (the discontinuity of 3.5, the
+autograd memory, descriptor derivatives) do not arise, and any descriptor
+table can be the input.
+- Uses: an energy correction for structures relaxed or searched with an
+  MLIP, and an out-of-data warning from the predictive distribution.
+- Target: the difference between DFT and the MLIP actually used (the
+  atom-centred ELM); the difference to the tabular linear model as a
+  comparison.  TabPFN alone is dropped (appendix C).
+- Features: structure-averaged in-package ACSF as the baseline; compared
+  with added global quantities (volume, composition) and with the user's
+  `atomic_descriptor` RDF / ADF / ODF tables.
+- Weights: v2 and 3.5 are both measured; v2 is the default if they are
+  comparable (open licence, no login).
+- Gate (thresholds are proposals, UNCERTAIN): test energy RMSE at least
+  20 % lower after the correction; the 80 % predictive interval covers
+  70-90 % of the test energies; on the DFT-checked anneal minima of GeSn
+  (the spurious minima of ADR-0027) more cases within 10 meV/atom than
+  before the correction.  The uncertainty is compared with the ensemble
+  ELM of ADR-0028 tier A once that exists.
+
+**Pursued 2: the force field stays on hold, with one diagnostic (Q13).**
+The row-independent variant of decision 10, never run, is measured once:
+it shows whether TabPFN can learn forces from force rows at all.
+Conditions for reopening, recorded only: fine-tuning TabPFN on force
+labels (needs the H100; no longer training-free), or an own
+prior-fitted network pre-trained with derivative observations.
+
+**Multi-element feasibility (Q14-Q21).**  At the user's direction the
+test is centred on substances made of period 1-3 elements without the
+noble gases: H, Li, Be, B, C, N, O, F, Na, Mg, Al, Si, P, S, Cl (15
+elements, 105 binary pairs).
+- What is tested (Q16): the energy-only TabPFN with a many-compound
+  context predicting compounds whose chemical system is absent from the
+  context -- the energy version of option (b).
+- Data (Q17): first a subset of a public data set (candidate: MPtrj;
+  count, licence and size to be checked, and the download asked for,
+  before use; PBE, so not mixable with the PBEsol data here); own PBEsol
+  calculations only if the approach looks promising (appendix E).
+- Bonding (Q18): covalent, ionic, metallic and molecular substances are
+  all included and the error is reported per class.  A 5 A descriptor
+  cannot carry long-range Coulomb or dispersion; for a statistical energy
+  model this is a measured weakness, for a force field a hard limit.
+- Descriptor (Q19): the per-pair ACSF would need about 1,700 columns per
+  atom for 15 elements, so element-weighted ACSF (weights such as 1, Z,
+  electronegativity; a linear combination of the existing per-species
+  blocks, no kernel change), the same plus composition features, and
+  composition features alone as the baseline that shows whether the
+  structure descriptor matters.  Formulas and weights are fixed from the
+  literature when the work starts (UNCERTAIN until then).
+- "Promising" (Q21, thresholds UNCERTAIN): with whole chemical systems
+  held out, an energy error at least 20 % below the composition-only
+  baseline and below the linear model on the same features.
+- **Period 4 and beyond: future work**, considered only if the above
+  holds (transition metals bring magnetism and DFT+U choices, a far
+  larger set of pairs, and semicore POTCAR choices).
+- Order: this record -> the row-independent diagnostic -> energy-only
+  TabPFN on AlN, GeSn and the anneal minima -> the public-data test.  If
+  the single-system test fails its gate, the public-data test is not run.
+
+## Appendix E: plan for own multi-element DFT data (not run)
+
+A plan only; calculations start on the user's word, on the user's
+cluster as before.  No budget cap was given, so stages 1 and 2 carry
+counts and the rest is policy.
+
+**Settings**, as the existing GeSn / AlN data: PBEsol (GGA = PS), ENCUT
+500 eV, PREC Normal, LASPH, ISMEAR 0, SIGMA 0.01, single points (NSW 0),
+EDIFF 1E-4 (the round-0 rule), k mesh from the existing density rule
+k_i = ceil(K / L_i).  POTCARs read from the local potpaw_PBE.64 library
+on 2026-11-15 (ENMAX, eV):
+
+| element | candidates (ENMAX) | note |
+|---|---|---|
+| H | H (250) | |
+| Li | Li (140), Li_sv (499) | choice open; Li_sv sits at the 500 eV cutoff |
+| Be | Be (248), Be_sv (309) | choice open |
+| B, C, N, O, F | 319, 400, 400, 400, 400 | N as in the AlN data |
+| Na | Na (102), Na_pv (260) | choice open |
+| Mg | Mg (200), Mg_pv (404) | choice open |
+| Al, Si, P, S, Cl | 240, 245, 255, 259, 262 | Al as in the AlN data |
+
+Every ENMAX is below 500 eV.  Open points to settle before any run
+(UNCERTAIN): the semicore variants for Li, Be, Na, Mg; whether 500 eV
+converges the stress with Li_sv; metals with ISMEAR 0 / SIGMA 0.01 need
+a k-mesh check; ISPIN 1 against the triplet O2 molecule (ADR-0026 / 0027
+keep ISPIN 1 data and a spin-polarised isolated atom); no dispersion in
+PBEsol for graphite, black P, h-BN and molecular solids.
+
+**Structure kinds per crystal prototype, round 0** (small cells, 8-32
+atoms; 22 single points):
+- 1 equilibrium cell;
+- 8 strained cells (volume +/-3 %, +/-6 %, and four with 2 % shear);
+- 6 rattled cells (three at sigma 0.05 A, three at 0.1 A);
+- 7 uniformly stretched cells up to the spin onset (the rule of
+  ADR-0027).
+
+MD snapshots come in later rounds from the round-0 model, 10-20 per
+prototype, each round followed by DFT checks of relaxed and annealed
+minima -- and with the lesson of ADR-0027 that minima differing between
+model seeds are noise, not a reason for another round.  Per element: one
+spin-polarised isolated atom (ADR-0026).  Molecules: a 12-point
+bond-length curve in a box.
+
+**Stage 1, elements** (about 307 single points):
+
+| kind | systems | count |
+|---|---|---|
+| crystals, 10 prototypes | Li bcc, Be hcp, alpha-B (12 atoms), C diamond, C graphite, Na bcc, Mg hcp, Al fcc, Si diamond, black P | 220 |
+| molecules, 6 | H2, N2, O2, F2, Cl2, S8 ring | 72 |
+| isolated atoms | 15 | 15 |
+
+**Stage 2, binaries** (about 216 single points; AlN exists):
+
+| system | prototypes | bonding |
+|---|---|---|
+| SiC | zinc blende, wurtzite | covalent |
+| BN | cubic, hexagonal | covalent / layered |
+| MgO | rock salt | ionic |
+| NaCl | rock salt | ionic |
+| SiO2 | alpha-quartz, beta-cristobalite | mixed |
+
+8 prototypes x 22 = 176, plus 40 for defect cells (two per compound: a
+vacancy and an antisite or second vacancy, each with three rattles).
+Cell parameters are taken from relaxed database entries when the inputs
+are made, with their sources recorded then.
+
+**Stage 3, the remaining binaries: policy only.**  Of the 105 pairs, the
+ones with a known stable compound; the same 22 per prototype; chosen by
+where the stage-2 model's uncertainty is largest rather than by a fixed
+list.  Ternaries after that.
