@@ -585,3 +585,77 @@ are made, with their sources recorded then.
 ones with a known stable compound; the same 22 per prototype; chosen by
 where the stage-2 model's uncertainty is largest rather than by a fixed
 list.  Ternaries after that.
+
+## Appendix F: follow-up measurements (2026-11-15)
+
+`tabpfn_spike.py rowind`, `energy`, `minima`.
+
+**Row-independent forces (Q13).**  SW Si, 300 training structures,
+TabPFN v2 with its default preprocessing, 16 test structures (3072 F
+rows); features X_ia, target F_ia; error against noise-free labels (F rms
+0.83 eV/A):
+
+| context rows | features | F error (eV/A) | time (CPU) |
+|---|---|---|---|
+| 1000 | X | 0.0153 | 6 min |
+| 1000 | X and d | 0.0173 | 10 min |
+| 5000 | X | 0.0113 | 37 min |
+| chain rule from E rows (appendix D) | | 0.05-0.10 | |
+| tabular linear model (appendix D) | | 0.0030 | |
+
+TabPFN does learn forces from force rows, five to nine times better than
+through the gradient of its energy, and improving with rows; it stays
+four times behind the linear model, is not conservative, and is slow.
+The 5000-row "X and d" run was stopped after more than an hour.  For the
+reopening conditions: force labels are usable by the network as targets,
+so fine-tuning on forces is not ruled out by this; nothing here suggests
+it would pass the linear model.
+
+**Energy correction, AlN (Q8-Q12).**  Target: DFT minus the tutorial's
+atom-centred ELM (reproduced: test 1.122 meV/atom).  Context: the ELM's
+error on the 440 training structures, cross-fitted in 10 contiguous
+folds (rms 6.5 meV/atom) or in-sample (2.7).  69 test structures.
+
+| weights | features | context | E before -> after (meV/atom) | 10-90 % coverage |
+|---|---|---|---|---|
+| v2 | ACSF | cross-fitted | 1.122 -> 0.913 | 0.78 |
+| v2 | ACSF | in-sample | 1.122 -> 0.938 | 0.72 |
+| v2 | ACSF + volume, composition | cross-fitted | 1.122 -> 0.948 | 0.74 |
+| v3 | ACSF | cross-fitted | 1.122 -> 0.888 | 0.74 |
+| 3.5 | ACSF | cross-fitted | 1.122 -> 0.912 | 0.77 |
+
+A 19-21 % reduction, at the edge of the 20 % gate; coverage inside
+70-90 %; v2 and 3.5 equal; the global features do not help.  Each run
+takes 16-20 s.  The user's RDF / ADF / ODF tables were not tried.
+
+**Anneal minima, GeSn (Q8, Q12).**  For each round's atom-centred ELM,
+the three minima of its own anneal that were recomputed with VASP
+(example/GeSn/dft_local); the ELM - DFT differences of ADR-0027 are
+reproduced.  TabPFN v2, in-sample context (443-656 structures), ACSF.
+
+| round | test E before -> after | test coverage | interval width: test median / 95th pct. | minima: ELM - DFT before -> after (width), meV/atom |
+|---|---|---|---|---|
+| r0 | 0.96 -> 0.90 | 0.56 | 1.6 / 2.6 | -23.4 -> -23.8 (6.9); -26.7 -> -27.1 (7.2); -34.9 -> -34.9 (8.5) |
+| r1 | 0.82 -> 0.98 | 0.73 | 1.6 / 3.3 | -6.9 -> -7.1 (5.6); -8.1 -> -6.6 (5.9); -11.4 -> -10.6 (6.2) |
+| r2 | 1.01 -> 1.06 | 0.57 | 1.7 / 4.0 | -2.2 -> -2.8 (3.8); +1.0 -> -0.1 (3.8); -3.0 -> -1.1 (5.0) |
+| r4 | 1.07 -> 0.86 | 0.70 | 1.2 / 2.6 | -8.5 -> -8.2 (3.5); -10.9 -> -10.2 (3.5); -37.4 -> -36.9 (4.3) |
+| r5 | 1.19 -> 1.02 | 0.73 | 1.5 / 3.0 | -11.5 -> -11.2 (2.2); -23.1 -> -23.2 (4.2); -10.7 -> -10.5 (2.5) |
+| r5, seed 1 | 1.18 -> 1.21 | 0.51 | 1.4 / 3.6 | -4.1 -> -3.5 (4.6); -44.1 -> -43.7 (4.0); -7.6 -> -7.2 (4.1) |
+
+- **The correction does nothing where it is needed.**  At the spurious
+  minima the error stays as it was (largest change 1.9 meV/atom); no
+  minimum moves inside 10 meV/atom.  The minima lie outside the training
+  structures, and an in-context fit of the training errors does not
+  extrapolate to them.
+- **The interval is a weak, qualitative flag.**  Its width exceeds the
+  test set's 95th percentile at 14 of the 18 minima (and at only 1 of
+  the 3 of r2, the round whose minima are right), but it is 2-9 meV/atom
+  wide where the error is 10-44 and does not grow with the error.
+- On the held-out test set the correction is mixed (better in 3 rounds,
+  worse in 3) and the in-sample context under-covers (0.51-0.73).  The
+  cross-fitted context was not run for GeSn.
+
+**Outcome against the gate of Q12:** energy reduction 19-21 % on AlN
+(borderline), mixed on GeSn; coverage inside the band only with a
+cross-fitted context; the anneal-minima item fails.  By the agreed order
+(Q21) the public-data test for 15 elements is therefore not run.
