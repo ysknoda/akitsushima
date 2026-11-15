@@ -1,5 +1,5 @@
 ---
-status: proposed (plan, 2026-11-15)
+status: rejected (2026-11-15; spike done, gate not passed -- see Result)
 ---
 
 # TabPFN as an in-context MLIP: feasibility spike and adoption gate
@@ -369,3 +369,69 @@ weights; TabPFN v2, CPU, context = the 440 E rows.  Absolute test RMSE:
 **State of the gate:** no variant passes on real data; the correctness
 part passes (appendix B).  Not adoptable as designed.  Open: why the
 Taylor rows hurt.
+
+## Appendix D: why the Taylor rows do not help (2026-11-15)
+
+Three bounded tests, agreed with the user as the last step before
+closing.  SW Si, 300 training structures, TabPFN alone (no linear part),
+one ensemble member, 16 test structures, CPU (`sweep2.sh`).  From here on
+the scores also include the absolute RMSE against the NOISE-FREE reference
+labels, which the 0.05 eV/A force noise had been hiding.
+
+| weights | training labels | context | rows | F vs exact (eV/A) | E vs exact (meV/atom) | S vs exact (eV/A^3) |
+|---|---|---|---|---|---|---|
+| v2 | exact | E rows | 300 | 0.083 | 0.50 | 0.0021 |
+| v2 | exact | + 4 Taylor rows, delta 0.01 A | 1500 | 0.106 | 0.59 | 0.0035 |
+| v2 | exact | + 4 rows with TRUE energies, delta 0.01 A | 1500 | 0.099 | 0.83 | 0.0031 |
+| v2 | exact | + 4 rows with true energies, delta 0.05 A | 1500 | 0.098 | 0.28 | 0.0021 |
+| v2 | exact | + 4 rows with true energies, delta 0.15 A | 1500 | 0.094 | 0.49 | 0.0011 |
+| v2 | noisy | + 4 rows with true energies, delta 0.05 A | 1500 | 0.077 | 0.61 | 0.0025 |
+| v3 | noisy | E rows | 300 | 0.050 | 0.69 | 0.0015 |
+| v3 | noisy | + 4 Taylor rows, delta 0.01 A | 1500 | 0.383 | 2.22 | 0.0100 |
+| linear + TabPFN v2 residual (= linear) | noisy | E rows | 300 | 0.0030 | 0.16 | 0.00007 |
+
+- **Not the label noise:** with exact training labels the Taylor rows
+  still make the forces worse (0.083 -> 0.106).
+- **Not the Taylor error:** true energies of the displaced structures in
+  place of the Taylor estimate change nothing (0.099).
+- **Not the closeness of the rows:** true energies at 0.05 and 0.15 A,
+  i.e. five times as many exact, well separated energies, leave the force
+  error at 0.094-0.098, above the 300-row value.
+- **v3 is not the answer:** better from E rows alone (0.050), far worse
+  with the Taylor rows (0.383).
+- **The measure that matters:** against noise-free labels TabPFN alone is
+  at 0.05-0.10 eV/A in every variant, the linear model at 0.003 eV/A --
+  17 to 33 times better.  The "1.5-1.9 sigma, inside the gate" of
+  appendix B came from the 0.05 eV/A label noise dominating the ratio.
+
+Reading: the force error of TabPFN is not limited by the data it is given.
+More and better energies do not sharpen the gradient of its in-context
+fit; a model that fits F and S rows directly (linear, ELM) uses the same
+structures an order of magnitude better.
+
+## Result (2026-11-15)
+
+**Not adopted.**  Against the gate of decision 12:
+
+| item | outcome |
+|---|---|
+| correctness | passes: TabPFN v2 / v2.5 / v2.6 / v3 are smooth and autograd forces match finite differences; **TabPFN-3.5, the current default, is discontinuous in its input** and cannot be a force field |
+| accuracy | fails: on real AlN data the residual model improves E (1.46 -> 1.15 meV/atom) but worsens F (0.161 -> 0.191 eV/A) and S (0.0023 -> 0.039 eV/A^3); alone it is 17-33 times worse than the linear model in true force error on SW Si |
+| force labels in the context | fails: Taylor rows, and even true displaced energies, do not improve forces |
+| cost | 0.16-0.9 s per 64-atom structure at 300 context rows on the CPU; 15-17 GiB of memory with autograd from 440-1500 rows |
+
+Not run, as the gate failed before them: SW GeSn, Tersoff SiC, GeSn round
+2, the ternary column test, NVE and lattice constants, the row-independent
+reference (variant 3), MPS / GPU timings.
+
+What stays:
+- The package is unchanged.  `tabpfn` 10.0.0 remains installed in base;
+  the scripts and ledgers are in `example/mlip/adr0029/`.
+- One positive finding: 440 energies alone give TabPFN a residual
+  correction that brings the tabular linear model's energy error to the
+  atom-centred ELM's.  An energy-only use (ranking structures, an energy
+  correction with a predictive distribution) is a possible future item;
+  it is not a force field.
+- Option (b) of decision 1 and its prerequisites stay recorded as a
+  future option.  It would additionally need a tabular model that can use
+  force labels, which this ADR did not find.
