@@ -1,10 +1,16 @@
-"""Neighbour list: Verlet-skin cell-linked list (CLL) or scipy cKDTree back-end."""
+"""Neighbour list: Verlet-skin cell-linked list (CLL) or scipy cKDTree back-end.
+
+The default back-end is the numba-compiled cell-linked list whenever numba
+is in use, and the KD-tree otherwise (ADR-0028, tier A step 2): the
+KD-tree used to be the default and cost 0.4-2.3 s per build at 4096 atoms,
+against ~0.02 s for the compiled cell list, which finds the same pairs.
+"""
 import contextlib
 from typing import Optional, Tuple
 
 import numpy as np
 
-from ..utils.jit import _HAS_NUMBA, _numba_njit
+from ..utils.jit import _HAS_NUMBA, _NUMBA_ENV, _numba, _numba_njit
 
 try:
     from scipy.spatial import cKDTree as _cKDTree
@@ -361,7 +367,18 @@ def _cell_linked_pairs_numpy(N: int, nc0: int, nc1: int, nc2: int,
     return n_found
 
 
-_cell_linked_pairs_jit = _numba_njit(_cell_linked_pairs_numpy)
+# Compiled WITHOUT fastmath (unlike _numba_njit): the pair test r2 < rl2
+# and the stored displacements are then evaluated exactly as the NumPy
+# version evaluates them, so the two paths find the same pairs bit for bit
+# and the default back-end does not move a pair across r_list by a
+# reassociated rounding.
+if _HAS_NUMBA:
+    _cell_linked_pairs_jit = _numba.njit(cache=True)(_cell_linked_pairs_numpy)
+else:
+    _cell_linked_pairs_jit = _numba_njit(_cell_linked_pairs_numpy)
+
+
+_BACKENDS = ("auto", "kdtree", "cll")
 
 
 class NeighbourList:
@@ -370,8 +387,14 @@ class NeighbourList:
 
     Back-end selection ('backend' parameter)
     -----------------------------------------
-    'auto'    -- Use scipy.spatial.cKDTree when available (typically 5--20x
-                faster than CLL for N > 500); fall back to CLL otherwise.
+    'auto'    -- The numba-compiled cell-linked list when the JIT is in use
+                (``use_numba``, on by default); otherwise scipy's cKDTree,
+                and the pure-NumPy cell-linked list without scipy.  Measured
+                at 4096 atoms, r_list 4.96 A, one thread (ADR-0028): 0.022 s
+                compiled CLL against 0.39 s (cubic) and 2.3 s (sheared)
+                KD-tree -- the KD-tree's per-pair Python post-processing,
+                since vectorised, was most of that -- and 8 s for the
+                uncompiled CLL.
     'kdtree'  -- Force cKDTree.  For orthogonal cells the native boxsize PBC
                 is used.  For non-orthogonal cells, atoms are transformed to
                 fractional coordinates where the KD-tree runs in a unit cube,
@@ -386,6 +409,11 @@ class NeighbourList:
     backend     : 'auto' | 'kdtree' | 'cll'
     use_numba   : JIT-compile the cell-linked-list pair search (ignored for
                   the kdtree back-end, which is already scipy-compiled).
+                  None (default): on whenever numba is importable and not
+                  switched off with ``NUMBA_ENABLE=0`` -- the same rule as
+                  the potentials' kernels (utils/jit.py).  It used to
+                  default to False, so the compiled list was never used
+                  unless asked for.
 
     Internal storage
     ----------------
@@ -413,14 +441,18 @@ class NeighbourList:
     _HAS_KDTREE = _HAS_KDTREE
 
     def __init__(self, r_cut: float, skin_width: float = 0.5,
-                 backend: str = 'auto', use_numba: bool = False):
+                 backend: str = 'auto', use_numba: Optional[bool] = None):
         if r_cut <= 0.0:
             raise ValueError(f"NeighbourList: r_cut must be positive, got {r_cut}.")
+        if backend not in _BACKENDS:
+            raise ValueError(f"NeighbourList: backend must be one of "
+                             f"{_BACKENDS}, got {backend!r}.")
         self.r_cut = r_cut
         self.skin_width = skin_width
         self.r_list = r_cut + skin_width
         self.backend = backend
-        self.use_numba = use_numba
+        self.use_numba = (bool(_NUMBA_ENV and _HAS_NUMBA) if use_numba is None
+                          else bool(use_numba))
 
         self._lattice: Optional[np.ndarray] = None
         self._ref_pos: Optional[np.ndarray] = None
@@ -533,12 +565,26 @@ class NeighbourList:
         self._check_min_cell(lattice)
         self._lattice = lattice.copy()
         self._ref_pos = positions.copy()
-        use_kd = (self._HAS_KDTREE and self.backend in ('auto', 'kdtree'))
-        if use_kd:
+        if self._uses_kdtree():
             self._build_kdtree(lattice, positions)
         else:
             self._build_cell_linked(lattice, positions)
         self._n_builds += 1
+
+    def _uses_kdtree(self) -> bool:
+        """The back-end :meth:`build` runs (see the class docstring)."""
+        if not self._HAS_KDTREE or self.backend == 'cll':
+            return False
+        if self.backend == 'kdtree':
+            return True
+        return not (self.use_numba and _HAS_NUMBA)       # 'auto'
+
+    @property
+    def active_backend(self) -> str:
+        """'kdtree', 'cll-numba' or 'cll-numpy': what a build runs."""
+        if self._uses_kdtree():
+            return 'kdtree'
+        return 'cll-numba' if (self.use_numba and _HAS_NUMBA) else 'cll-numpy'
 
     def mark_dirty(self) -> None:
         """
@@ -805,15 +851,11 @@ class NeighbourList:
             pos_w[pos_w >= box] = 0.0
             tree = _cKDTree(pos_w, boxsize=box)
             raw = tree.query_pairs(r_list, output_type='ndarray')  # (P,2)
-
-            result = []
-            for row in raw:
-                i, j = int(row[0]), int(row[1])
-                rij = pos_w[j] - pos_w[i]
-                rij -= box * np.round(rij / box)   # minimum image
-                r = float(np.linalg.norm(rij))
-                if r > 1e-12:
-                    result.append((i, j, rij, r))
+            ii, jj = raw[:, 0], raw[:, 1]
+            rij = pos_w[jj] - pos_w[ii]
+            rij -= box * np.round(rij / box)       # minimum image
+            r = np.sqrt(np.einsum('pk,pk->p', rij, rij))
+            keep = r > 1e-12
         else:
             # Fractional-space KD-tree
             frac = positions @ inv_lat
@@ -856,19 +898,22 @@ class NeighbourList:
             r_frac = min(r_list / sigma_min * (1.0 + 1e-9),
                           _MAX_FRACTIONAL_MIN_IMAGE_DIST)
             raw = tree.query_pairs(r_frac, output_type='ndarray')
+            ii, jj = raw[:, 0], raw[:, 1]
+            s = (positions[jj] - positions[ii]) @ inv_lat
+            s -= np.round(s)
+            rij = s @ lattice
+            r = np.sqrt(np.einsum('pk,pk->p', rij, rij))
+            keep = (r <= r_list) & (r > 1e-12)
 
-            result = []
-            for row in raw:
-                i, j = int(row[0]), int(row[1])
-                rij = positions[j] - positions[i]
-                s = rij @ inv_lat
-                s -= np.round(s)
-                rij = s @ lattice
-                r = float(np.linalg.norm(rij))
-                if r <= r_list and r > 1e-12:
-                    result.append((i, j, rij, r))
-
-        self._store_pairs(result)
+        # The per-pair Python loop that used to build a list of tuples here
+        # (and _store_pairs' second loop) took most of a KD-tree build: 2.3 s
+        # of 2.3 s for a sheared 4096-atom cell at r_list 4.96 A (ADR-0028).
+        # query_pairs returns i < j, as the cell-linked list does.
+        self._pair_i = ii[keep].astype(np.int32)
+        self._pair_j = jj[keep].astype(np.int32)
+        self._pair_rij = np.ascontiguousarray(rij[keep], dtype=np.float64)
+        self._pair_r = np.ascontiguousarray(r[keep], dtype=np.float64)
+        self._n_pairs = int(keep.sum())
 
     # ------------------------------------------------------------------
     # Back-end B: cell-linked list (always available; numba-accelerated)

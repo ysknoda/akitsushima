@@ -82,6 +82,12 @@
 > ISPIN = 1 training data the lowest spin-polarised atom is recommended
 > (ADR-0026 shows why the ISPIN = 1 atom is the worse choice for a
 > finite-cutoff MLIP).
+> 0.2.0a17 (ADR-0028 step 2): `NeighbourList` builds with the
+> numba-compiled cell list by default (`backend='auto'` with
+> `use_numba=None`, i.e. on unless `NUMBA_ENABLE=0`), 6-42x faster than
+> the former KD-tree default at 500-4000 atoms; the same pairs, so results
+> change only by summation order (<= 5e-11 relative).  An unknown
+> `backend` is now refused; `active_backend` says which one a build runs.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

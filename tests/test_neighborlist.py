@@ -616,3 +616,60 @@ def test_rebuild_criterion_survives_a_pbc_wrap_and_a_deforming_cell():
     nl4.build(lattice, pos)
     assert nl4.check_and_rebuild(lattice * 0.75, pos * 0.75), (
         "a compression past sigma_min = 0.762 did not trigger a rebuild")
+
+
+# ===========================================================================
+# Default back-end (ADR-0028, tier A step 2)
+# ===========================================================================
+
+
+def test_default_backend_selection():
+    """'auto' runs the compiled cell list whenever the JIT is in use, the
+    KD-tree when it is switched off, and an unknown name is refused."""
+    expected = "cll-numba" if _HAS_NUMBA else ("kdtree" if _HAS_KDTREE else "cll-numpy")
+    assert NeighbourList(r_cut=3.0).active_backend == expected
+    off = NeighbourList(r_cut=3.0, use_numba=False).active_backend
+    assert off == ("kdtree" if _HAS_KDTREE else "cll-numpy")
+    assert NeighbourList(r_cut=3.0, backend="cll", use_numba=False).active_backend == "cll-numpy"
+    with pytest.raises(ValueError, match="backend"):
+        NeighbourList(r_cut=3.0, backend="verlet")
+
+
+@pytest.mark.parametrize("name,lat_fn,n,r_cut", NONORTHO_CASES,
+                          ids=[c[0] for c in NONORTHO_CASES])
+def test_default_backend_matches_bruteforce_and_numpy_bitwise(name, lat_fn, n, r_cut):
+    """The default list finds the brute-force pairs on skewed cells, and the
+    compiled cell list (no fastmath) gives the NumPy version's pairs, order
+    and displacements bit for bit."""
+    lat = lat_fn()
+    pos = _random_positions_in_cell(lat, n, seed=29)
+    nl = NeighbourList(r_cut=r_cut, skin_width=0.0)
+    nl.build(lat, pos)
+    _assert_pairs_match(_nl_pairs_as_dict(nl), _brute_force_pairs(lat, pos, r_cut))
+    if not _HAS_NUMBA:
+        return
+    ref = NeighbourList(r_cut=r_cut, skin_width=0.3, backend="cll", use_numba=False)
+    jit = NeighbourList(r_cut=r_cut, skin_width=0.3, backend="cll", use_numba=True)
+    ref.build(lat, pos)
+    jit.build(lat, pos)
+    for a, b in zip(ref.get_pairs_arrays(), jit.get_pairs_arrays()):
+        assert np.array_equal(a, b)
+
+
+@pytest.mark.skipif(not _HAS_KDTREE, reason="scipy cKDTree not installed")
+@pytest.mark.parametrize("name,lat_fn,n,r_cut", NONORTHO_CASES,
+                          ids=[c[0] for c in NONORTHO_CASES])
+def test_kdtree_and_cell_list_give_the_same_candidates(name, lat_fn, n, r_cut):
+    """Both back-ends hand the potentials the same candidate pairs (as a
+    set; the order differs), out to r_list including the skin."""
+    lat = lat_fn()
+    pos = _random_positions_in_cell(lat, n, seed=31)
+    skin = 0.2
+    sets = []
+    for backend in ("kdtree", "cll"):
+        nl = NeighbourList(r_cut=r_cut - skin, skin_width=skin, backend=backend)
+        nl.build(lat, pos)
+        i, j = nl.get_candidate_pairs()
+        assert np.all(i < j)
+        sets.append(set(zip(i.tolist(), j.tolist())))
+    assert sets[0] == sets[1]

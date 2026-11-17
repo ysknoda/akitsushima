@@ -248,3 +248,66 @@ eV/A (SW) and below 1e-13 eV/A (the others).
 
 Full suite with the new test: 802 passed (22.7 min, 2 numba threads,
 loaded machine).  The version is not raised until the idle baseline is in.
+
+## Addendum 2: compiled cell list as the default neighbour list (tier A step 2, 2026-11-17)
+
+**Change from the plan.**  Decision step 2 said the ACSF cell list would
+become the back-end of `NeighbourList`.  Measured first (one thread,
+4096 atoms): the cell-linked list already in `neighborlist.py`, compiled
+with numba, builds as fast as the ACSF one (0.022 s against 0.026 s at
+r_list 4.96 A on the sheared GeSn cell; 0.14 s against 0.18 s at 32768
+atoms) and finds the same pairs.  It was never used because `use_numba`
+defaulted to False and `'auto'` picked the KD-tree.  So no code is
+shared with ACSF; the ACSF list stays where it is, and the engine does
+not import from `fitting/`.
+
+What changed (`engine/neighborlist.py`, 0.2.0a17):
+
+- `use_numba=None` (default) means on whenever numba is importable and
+  not switched off with `NUMBA_ENABLE=0`, the rule of the potentials'
+  kernels.  `backend='auto'` then runs the compiled cell list; with the
+  JIT off it runs the KD-tree as before.  `active_backend` reports
+  which one a build runs; an unknown backend name is refused.
+- The compiled cell-list kernel is built without fastmath, so it gives
+  the NumPy version's pairs, order and displacements bit for bit
+  (new test on three skewed cells).
+- The KD-tree's per-pair Python loop is vectorised; it was most of the
+  KD-tree time (2.3 s of 2.3 s for the sheared 4096-atom cell).
+
+Checks:
+
+- Energy, forces and stress with a neighbour list, before against after,
+  for SW, Tersoff, Zhou EAM and Buckingham + PPPM on a cubic and a
+  sheared triclinic cell (512-864 atoms): the same number of candidate
+  pairs everywhere; largest relative difference 4.5e-11 (SW forces, the
+  summation order changes with the pair order; the all-pairs and the
+  listed SW call already differ by 4.9e-11), all others 1.5e-11 or below,
+  inside the 1e-10 of decision 5.
+- New tests in `tests/test_neighborlist.py`: back-end selection;
+  default list against the brute-force pairs on the hexagonal and
+  triclinic cases; compiled against NumPy cell list bitwise; KD-tree and
+  cell list give the same candidate set with a skin.
+
+Benchmark, one thread, before and after measured back to back on the
+same loaded machine (load average 5.6-7.8), ratio old / new:
+
+| Case | N | build | call with list | call without list |
+|---|---|---|---|---|
+| SW Si | 512 | 22.0 | 1.35 | 1.17 |
+| SW Si | 4096 | 13.8 | 1.22 | 0.97 |
+| Tersoff Si | 512 | 7.2 | 0.81 | 0.86 |
+| Tersoff Si | 4096 | 6.3 | 1.26 | 1.07 |
+| Zhou EAM Ni | 500 | 25.9 | 0.87 | 1.09 |
+| Zhou EAM Ni | 4000 | 21.6 | 1.00 | 0.78 |
+| Buckingham + PPPM MgO | 512 | 42.4 | 1.30 | 1.14 |
+| Buckingham + PPPM MgO | 4096 | 27.9 | 1.12 | 1.03 |
+
+The build passes the 1.5x gate on every case; the force calls do not
+change (0.8-1.35 is the noise of the loaded machine).  After the change
+one build at 4096 atoms costs about one force call (SW 0.016 s against
+0.019 s) instead of 3 to 9.  The non-orthogonal GeSn cell of finding 2
+goes from 2.3 s to 0.022 s (about 100x).  Finding 1 (the all-pairs call)
+is unchanged; it is step 3.
+
+Full suite: 809 passed (27.1 min, 2 numba threads, loaded machine),
+including the 7 new tests.
