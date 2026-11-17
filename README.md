@@ -88,6 +88,14 @@
 > the former KD-tree default at 500-4000 atoms; the same pairs, so results
 > change only by summation order (<= 5e-11 relative).  An unknown
 > `backend` is now refused; `active_backend` says which one a build runs.
+> 0.2.0a18 (ADR-0028 step 3): a force function called without a
+> neighbour list (phonon, elastic, tsa, Green-Kubo kappa, one-off
+> evaluations) builds and reuses its own instead of enumerating all
+> N(N-1)/2 pairs: 6-85x faster at 500-4096 atoms for SW, Tersoff, EAM and
+> the PPPM real-space sum.  The pairs are kept in the all-pairs order, so
+> results are bit-identical for the short-range potentials (real-space
+> Coulomb <= 1e-14 relative).  Systems under 100 atoms and cells thinner than
+> 2 (r_cut + 0.3 A) keep the all-pairs path.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

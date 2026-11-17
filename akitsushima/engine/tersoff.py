@@ -42,7 +42,7 @@ from ..utils.mpi import (
     _mpi_domain_split,
 )
 from ._numba_common import _nb_exp
-from .neighborlist import NeighbourList, _check_min_image
+from .neighborlist import NeighbourList, _check_min_image, owned_neighbour_list
 
 
 def _te_fc(r, R, D):
@@ -980,6 +980,10 @@ class TersoffPotential:
         rc = R_t + D_t
 
         # Vectorised MIC rij
+        if neigh_list is None:
+            # ADR-0028 step 3: a list of the function's own, reused across
+            # calls, instead of all N(N-1)/2 pairs; None keeps that path.
+            neigh_list = owned_neighbour_list(lattice, positions, rc)
         if neigh_list is not None:
             # Candidates only: get_pairs_arrays' build-time ``<= r_cut``
             # mask permanently dropped skin-resident pairs that later
@@ -1259,6 +1263,10 @@ class TersoffPotential:
         if rc_global <= 0.0:
             return 0.0, np.zeros((N, 3)), np.zeros((3, 3))
 
+        if neigh_list is None:
+            # ADR-0028 step 3: a list of the function's own, reused across
+            # calls, instead of all N(N-1)/2 pairs; None keeps that path.
+            neigh_list = owned_neighbour_list(lattice, positions, rc_global)
         if neigh_list is not None:
             # Candidates only: get_pairs_arrays' build-time ``<= r_cut``
             # mask permanently dropped skin-resident pairs that later

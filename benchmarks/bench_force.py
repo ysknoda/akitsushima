@@ -310,6 +310,9 @@ def run_case(name, fn, r_cut, structure, env, args):
     t0 = time.perf_counter()
     e0, f0, _ = call()  # warm-up; also decides how often to repeat
     first = time.perf_counter() - t0
+    # The first call without a list includes building the list a force
+    # function keeps for itself (ADR-0028 step 3); later calls reuse it.
+    rec["call_first_s"] = first
     rec["call_s"], (e0, f0, _) = best_time(
         call, 1 if first > args.max_seconds else repeat
     )

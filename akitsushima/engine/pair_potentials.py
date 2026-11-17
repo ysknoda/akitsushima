@@ -6,7 +6,7 @@ import numpy as np
 
 from ..utils.jit import _HAS_NUMBA, _NUMBA_ENV
 from ..utils.mpi import _mpi_allreduce_sum, _mpi_allreduce_sum_scalar, _mpi_domain_split
-from .neighborlist import NeighbourList, _check_min_image
+from .neighborlist import NeighbourList, _check_min_image, owned_neighbour_list
 from ._pair_kernels import _pair_body_jit, _pair_body_numpy
 
 
@@ -122,6 +122,10 @@ class BasePairPotential(ABC):
         # branch always applied, and the same idiom eam.py /
         # stillinger_weber.py / tersoff.py already used.  See
         # NeighbourList.get_pairs_arrays' own bug-fix note.
+        if neigh_list is None:
+            # ADR-0028 step 3: a list of the function's own, reused across
+            # calls, instead of all N(N-1)/2 pairs; None keeps that path.
+            neigh_list = owned_neighbour_list(lattice, positions, self.r_cut)
         if neigh_list is not None:
             ii, jj = neigh_list.get_candidate_pairs()
         else:

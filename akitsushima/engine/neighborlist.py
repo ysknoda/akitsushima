@@ -4,8 +4,14 @@ The default back-end is the numba-compiled cell-linked list whenever numba
 is in use, and the KD-tree otherwise (ADR-0028, tier A step 2): the
 KD-tree used to be the default and cost 0.4-2.3 s per build at 4096 atoms,
 against ~0.02 s for the compiled cell list, which finds the same pairs.
+
+A force function called without a list takes one from
+:func:`owned_neighbour_list` instead of enumerating all N(N-1)/2 pairs
+(ADR-0028, tier A step 3).
 """
 import contextlib
+import threading
+from collections import OrderedDict
 from typing import Optional, Tuple
 
 import numpy as np
@@ -1061,3 +1067,111 @@ def neighbour_list_for(force_fn, r_cut: float, skin_width: float = 0.5):
     if uses_neighbour_list(force_fn):
         return NeighbourList(r_cut=r_cut, skin_width=skin_width)
     return NullNeighbourList(r_cut=r_cut, skin_width=skin_width)
+
+
+# ---------------------------------------------------------------------------
+#  Lists kept for force functions called without one (ADR-0028 step 3)
+# ---------------------------------------------------------------------------
+
+# Skin of an owned list [A].  Smaller than a solver's 0.5 A so that cells
+# down to 2 (r_cut + 0.3) across still get one; the callers that pass no
+# list (phonon, elastic, tsa, Green-Kubo kappa, one-off evaluations) move
+# atoms by finite-difference steps of 0.01-0.03 A and strain cells by
+# about 1 %, which keeps the list valid (check_and_rebuild) and reused.
+_OWNED_SKIN = 0.3
+
+# Below this many atoms the all-pairs enumeration is used, as before.
+# Measured crossover (ADR-0028 step 3, one numba thread, loaded machine):
+# at 64 atoms both take ~1 ms and either can win (SW all-pairs 0.88 ms vs
+# list 1.04 ms, Tersoff 1.36 vs 0.56 ms); from 216 atoms the list wins
+# 1.5-3x, and 10-13x at 1000 atoms.
+_OWNED_MIN_ATOMS = 100
+
+# Lists kept per thread, keyed by (r_cut, N); least recently used dropped.
+_OWNED_CACHE_SIZE = 4
+
+_owned = threading.local()
+
+
+def owned_neighbour_list(lattice: np.ndarray, positions: np.ndarray,
+                         r_cut: float) -> Optional["NeighbourList"]:
+    """A neighbour list for a force function that was given none.
+
+    Returns a :class:`NeighbourList` valid for ``positions`` -- built, or
+    reused when :meth:`NeighbourList.check_and_rebuild` finds the previous
+    one still complete -- or ``None``, in which case the caller keeps its
+    all-pairs enumeration exactly as before.  ``None`` is returned when
+
+    * there are fewer than ``_OWNED_MIN_ATOMS`` atoms, or
+    * the cell cannot host ``r_cut + _OWNED_SKIN`` under the minimum
+      image (half the smallest perpendicular width).  The all-pairs path
+      then applies its own ``r_cut`` check, so small cells keep their
+      error message and :func:`allow_minimum_image_violation` keeps
+      working.
+
+    Correctness does not depend on what was evaluated before: a cached
+    list is reused only when no pair outside its ``r_cut + skin`` at build
+    time can be inside ``r_cut`` now (the criterion in
+    :meth:`NeighbourList.check_and_rebuild`, which accounts for both a
+    cell deformation and atomic displacements), so alternating between
+    unrelated structures only costs rebuilds.  Lists are kept per thread
+    because phonon and elastic evaluate displaced structures in a
+    ``ThreadPoolExecutor``; a list shared between threads could be rebuilt
+    for one structure while another thread reads it.
+
+    After every build the candidates are put in canonical order -- ``i <
+    j``, sorted by ``(i, j)`` -- which is the order of
+    ``np.triu_indices``.  Masked to ``r_cut`` they are then exactly the
+    all-pairs path's pairs in the same order, so the force function
+    returns the same bits as before, and the result does not depend on
+    when the list was last built.  Without that, the pair order -- and so
+    the summation order -- followed the build history: a restarted NEMD
+    run, which rebuilds at a different step, drifted away from the
+    uninterrupted one at the rounding level and then chaotically
+    (tests/test_nemd.py::test_restart_continues_bit_for_bit).
+    """
+    n_atoms = len(positions)
+    if n_atoms < _OWNED_MIN_ATOMS:
+        return None
+    lattice = np.asarray(lattice, dtype=float)
+    positions = np.asarray(positions, dtype=float)
+    perp_widths, _ = _cell_metrics(lattice)
+    if r_cut + _OWNED_SKIN >= float(np.min(perp_widths)) / 2.0:
+        return None
+    cache = getattr(_owned, "lists", None)
+    if cache is None:
+        cache = _owned.lists = OrderedDict()
+    key = (float(r_cut), n_atoms)
+    nl = cache.get(key)
+    if nl is None:
+        nl = NeighbourList(r_cut=float(r_cut), skin_width=_OWNED_SKIN)
+        nl.build(lattice, positions)
+        _canonical_pair_order(nl)
+        cache[key] = nl
+        while len(cache) > _OWNED_CACHE_SIZE:
+            cache.popitem(last=False)
+    else:
+        cache.move_to_end(key)
+        if nl.check_and_rebuild(lattice, positions):
+            _canonical_pair_order(nl)
+    return nl
+
+
+def _canonical_pair_order(nl: "NeighbourList") -> None:
+    """Reorder the stored pairs to ``i < j``, sorted by ``(i, j)``."""
+    n = nl._n_pairs
+    i, j = nl._pair_i[:n], nl._pair_j[:n]
+    swap = i > j
+    lo = np.where(swap, j, i)
+    hi = np.where(swap, i, j)
+    order = np.lexsort((hi, lo))
+    rij = np.where(swap[:, None], -nl._pair_rij[:n], nl._pair_rij[:n])
+    nl._pair_i = np.ascontiguousarray(lo[order], dtype=np.int32)
+    nl._pair_j = np.ascontiguousarray(hi[order], dtype=np.int32)
+    nl._pair_rij = np.ascontiguousarray(rij[order])
+    nl._pair_r = np.ascontiguousarray(nl._pair_r[:n][order])
+
+
+def clear_owned_neighbour_lists() -> None:
+    """Drop this thread's owned lists (tests and benchmarks)."""
+    _owned.lists = OrderedDict()

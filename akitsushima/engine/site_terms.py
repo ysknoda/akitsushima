@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .neighborlist import _check_min_image
+from .neighborlist import _check_min_image, owned_neighbour_list
 
 
 @dataclass
@@ -85,7 +85,8 @@ def _pairs(lattice, positions, rc, caller):
     v_ij = r_j - r_i, r).  Refuses a cell that cannot host rc."""
     _check_min_image(lattice, rc, caller)
     N = len(positions)
-    ii, jj = np.triu_indices(N, k=1)
+    nl = owned_neighbour_list(lattice, positions, rc)  # ADR-0028 step 3
+    ii, jj = nl.get_candidate_pairs() if nl is not None else np.triu_indices(N, k=1)
     dr = positions[jj] - positions[ii]
     s = dr @ np.linalg.inv(lattice)
     s -= np.round(s)

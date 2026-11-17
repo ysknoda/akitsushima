@@ -12,7 +12,7 @@ from ..utils.mpi import (
     _mpi_allreduce_sum_scalar,
     _mpi_domain_split,
 )
-from .neighborlist import NeighbourList, _check_min_image
+from .neighborlist import NeighbourList, _check_min_image, owned_neighbour_list
 
 
 class EAMPotential:
@@ -163,6 +163,10 @@ class EAMPotential:
         sp = list(atom_types)
         sp_arr = np.array(sp)
 
+        if neigh_list is None:
+            # ADR-0028 step 3: a list of the function's own, reused across
+            # calls, instead of all N(N-1)/2 pairs; None keeps that path.
+            neigh_list = owned_neighbour_list(lattice, positions, self.r_cut)
         if neigh_list is not None:
             # Candidates only: get_pairs_arrays' build-time ``<= r_cut``
             # mask permanently dropped skin-resident pairs that later

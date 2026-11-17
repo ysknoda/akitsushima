@@ -56,6 +56,12 @@ def real_space_coulomb(lattice: np.ndarray,
     forces = np.zeros((N, 3))
     stress = np.zeros((3, 3))
 
+    if neigh_list is None:
+        # ADR-0028 step 3: a list of the function's own, reused across
+        # calls, instead of the (N, N, 3) all-pairs arrays below; None
+        # keeps that path.
+        from ..neighborlist import owned_neighbour_list
+        neigh_list = owned_neighbour_list(lattice, positions, r_cut)
     if neigh_list is not None:
         # Bug-fix note (stale-distance / defeated-skin defect): this used
         # to consume the rij/r cached by the last neighbour-list rebuild.

@@ -311,3 +311,131 @@ is unchanged; it is step 3.
 
 Full suite: 809 passed (27.1 min, 2 numba threads, loaded machine),
 including the 7 new tests.
+
+## Addendum 3: no all-pairs enumeration without a neighbour list (tier A step 3, 2026-11-18)
+
+A force function called without a neighbour list now takes one from
+`owned_neighbour_list(lattice, positions, r_cut)` in
+`engine/neighborlist.py` (0.2.0a18) and enumerates its candidate pairs
+instead of all N(N-1)/2.  The call sites are the former all-pairs
+branches: Stillinger-Weber and Tersoff (single- and multi-species paths),
+EAM, `BasePairPotential` (LJ, Buckingham, Morse and the other pair
+forms), `real_space_coulomb` (the real-space part of Ewald and PPPM,
+which built (N, N, 3) arrays) and the site terms of the Green-Kubo heat
+flux (`site_terms._pairs`).
+
+**Changes from the plan.**  Decision step 3 said "the force function
+owns a neighbour list".
+
+- The lists live in a per-thread cache in `neighborlist.py`, keyed by
+  (r_cut, N), at most 4 per thread, not on each potential object.  Three
+  reasons:
+  - `compute_all` (the Buckingham force function) builds a new engine on
+    every call, so a list on the object would never be reused.
+  - `phonon` and `elastic` call one potential object from a
+    `ThreadPoolExecutor`, so a shared list could be rebuilt for one
+    displaced cell while another thread reads it.
+  - Potential objects are pickled for the MPI and process paths.
+- Reuse is decided by `NeighbourList.check_and_rebuild` (cell
+  deformation and minimum-imaged non-affine displacement).  That
+  criterion guarantees a complete list whatever was evaluated before.
+  Alternating unrelated structures of the same N therefore only costs
+  rebuilds, never wrong pairs.
+- After every build the candidates are put in canonical order (`i < j`,
+  sorted by `(i, j)`, the order of `np.triu_indices`).  Masked to
+  r_cut they are then the all-pairs path's pairs in the same order.
+  This was not in the plan.  The first version kept the cell list's
+  order, and the full suite caught the effect:
+  `test_nemd.py::test_restart_continues_bit_for_bit` failed.  The pair
+  order, and so the summation order, depended on when the list was last
+  built.  A restarted run rebuilds at a different step, so it left the
+  uninterrupted one at the rounding level, and the difference then grew
+  chaotically.  With the canonical order a call returns the same bits
+  however and whenever its list was built.
+- The owned list's skin is 0.3 A, not the solvers' 0.5 A.  This lets
+  cells down to 2 (r_cut + 0.3) across use it.  Phonon steps
+  (0.01-0.03 A) and elastic strains (about 1 %) stay well inside it.
+- The all-pairs path stays in two cases.
+  - Below 100 atoms, whether or not numba is in use.  The plan tied
+    this to "without numba", but the measured crossover does not depend
+    on it (see below).
+  - In cells too thin for r_cut + 0.3 (half the smallest perpendicular
+    width).  There the old minimum-image error message and
+    `allow_minimum_image_violation` behave exactly as before.
+- The ESM real-space complement is not changed.  It applies the
+  minimum image in x and y only, and `NeighbourList` is periodic in
+  three directions.
+
+Crossover, one numba thread (all-pairs / owned list with the build /
+owned list reused):
+
+| Potential | N | all-pairs (ms) | owned + build (ms) | owned, reused (ms) |
+|---|---|---|---|---|
+| SW Si | 64 | 0.88 | 0.94 | 1.04 |
+| SW Si | 216 | 5.7 | 1.9 | 2.0 |
+| SW Si | 1000 | 83 | 10.3 | 6.3 |
+| Tersoff Si | 64 | 1.36 | 0.85 | 0.56 |
+| Tersoff Si | 216 | 3.8 | 2.4 | 0.94 |
+| LJ Al | 256 | 13.5 | 11.4 | 8.3 |
+| EAM Al | 500 | 46 | 29 | 18 |
+
+With `NUMBA_ENABLE=0`, the SW and Tersoff NumPy kernels dominate, so
+the list neither gains nor loses (0.9-1.2x at 64-1000 atoms).  LJ and
+EAM gain 1.6-2x at 500 atoms.  So the threshold is a plain 100 atoms.
+
+Checks:
+
+- Energy, forces, stress and site terms from calls without a list,
+  before against after, were compared on a cubic and a sheared cell
+  (216-512 atoms), each called twice so the second call reuses the
+  list.  Potentials: SW (Si and multi-species GeSn), Tersoff (Si,
+  nested, two-species X-Y), EAM, LJ, and Buckingham MgO with PPPM and
+  with Ewald.  SW, EAM, LJ and the site terms are bit-identical.
+  Tersoff differs by at most 6.5e-17 relative and Buckingham by
+  8.2e-15.  The Buckingham difference is in the real-space Coulomb sum,
+  whose list branch computes distances with `np.linalg.norm` instead of
+  the dense branch's `sqrt(einsum)`.  Both are inside the 1e-10 of
+  decision 5.  (Before canonical ordering the largest difference was
+  3.4e-11, in the SW forces; that showed the owned list was in use in
+  every case.)
+- New `tests/test_owned_neighbour_list.py` (26 tests) checks:
+  - every potential, the site terms and the real-space Coulomb sum
+    against the all-pairs path on cubic and sheared cells;
+  - a phonon/strain sequence that must reuse the list (displacement
+    +-0.02 A, 1 % strain) or rebuild it (-10 % strain, 0.3 A noise),
+    exact at each step;
+  - small and thin cells keep the all-pairs path, its error and its
+    escape hatch;
+  - concurrent calls from a 4-thread pool;
+  - the cache bound and its key;
+  - bit-identical results through a reused list, a fresh list and the
+    all-pairs path.
+
+Benchmark, one thread, before and after measured back to back on the
+same loaded machine (load average 7.6-9.7), call without a list, ratio
+old / new; "first" is the first call, which includes the build:
+
+| Case | N | call | first call |
+|---|---|---|---|
+| SW Si | 512 | 5.9 | 4.2 |
+| SW Si | 4096 | 70 | 56 |
+| Tersoff Si | 512 | 5.9 | 4.2 |
+| Tersoff Si | 4096 | 85 | 57 |
+| Zhou EAM Ni | 500 | 2.2 | 1.7 |
+| Zhou EAM Ni | 4000 | 5.9 | 6.2 |
+| Buckingham + PPPM MgO | 512 | 1.7 | 1.0 |
+| Buckingham + PPPM MgO | 4096 | 8.6 | 7.3 |
+| Buckingham + Ewald MgO | 512 | 1.3 | 1.3 |
+
+A call without a list now costs about the same as one with a list (SW
+4096: 0.025 s against 0.024 s), which closes finding 1.  Two cases are
+below the 1.5x gate.
+- Ewald at 512 atoms: the reciprocal sum dominates and is untouched
+  (tier C, "Ewald JIT").
+- The first PPPM call at 512 atoms: the mesh dominates.
+Every all-pairs-dominated case passes the gate.  `bench_force.py`
+now also records `call_first_s`.
+
+Full suite: 835 passed (31.5 min, loaded machine), including the 26 new
+tests.  The first run, before canonical ordering, had the one NEMD
+restart failure described above and 830 passed.
