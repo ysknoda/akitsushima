@@ -119,6 +119,12 @@
 > `ak.LangevinSimulation` in the API).  Its random-number state is part
 > of the checkpoint, so it restarts bit for bit too; `thermo.log` shows
 > E_tot - Q (Q the heat the thermostat added) as the integrator check.
+>
+> 0.2.0a23 (ADR-0033): `mlip` with `ensemble: 5` (atom-centred ELM / QELM)
+> fits seed-varied members on shared descriptors.  Their mean is the force
+> field and their spread the uncertainty: `sigF_max` in md / relax logs,
+> sigma in the anneal ledger, and `mlip.evaluate` writes sigma_E,
+> sigma_F_max and sigma_S of a list of structures to CSV.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

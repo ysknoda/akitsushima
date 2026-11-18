@@ -289,6 +289,27 @@ class _BaseMDSimulation:
         return max(3 * N - n_fixed, 1)
 
     # ------------------------------------------------------------------ #
+    #  Ensemble uncertainty column (ADR-0033)
+    # ------------------------------------------------------------------ #
+    def _unc_fn(self):
+        fn = getattr(self, "_force_fn", None)
+        if getattr(fn, "is_ensemble", False):
+            return fn.uncertainty
+        return None
+
+    def _unc_header(self) -> str:
+        return f"  {'sigF_max(eV/A)':>14}" if self._unc_fn() else ""
+
+    def _unc_cell(self) -> str:
+        """sigma_F,max of the ensemble at the last force call (the step
+        being logged), or nothing for a single model."""
+        fn = self._unc_fn()
+        if fn is None:
+            return ""
+        u = fn()
+        return f"  {u['sigma_F_max']:14.6f}" if u else f"  {'nan':>14}"
+
+    # ------------------------------------------------------------------ #
     #  Checkpoint and restart (ADR-0031)
     # ------------------------------------------------------------------ #
     # Thermostat / barostat scalars a checkpoint carries; set per class.
@@ -767,7 +788,7 @@ class NVTSimulation(_BaseMDSimulation):
                   f"dt={self.dt} fs  "
                   f"steps={total_steps}  "
                   f"(equil={self.equil_steps})")
-            print(header)
+            print(header + self._unc_header())
             print("  " + "-" * len(header))
 
         lists = {"T": [], "e_pot": [], "e_kin": []}
@@ -792,7 +813,7 @@ class NVTSimulation(_BaseMDSimulation):
               open(_thermo_path_use, mode) as thermo_fh):
 
             if ck is None:
-                thermo_fh.write(header + "\n")
+                thermo_fh.write(header + self._unc_header() + "\n")
                 _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
                                      comment=f"akitsushima.py NVT-MD  T={self.temperature}K")
                 self._xdatcar_frame_idx = 1
@@ -872,6 +893,7 @@ class NVTSimulation(_BaseMDSimulation):
                            f"{e_kin:12.6f}  {e_tot:12.6f}  "
                            f"{T_inst:10.2f}  {H_nhc:14.6f}  "
                            f"{self._nl.rebuild_count:10d}")
+                    row += self._unc_cell()
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)
@@ -1110,7 +1132,7 @@ class LangevinSimulation(NVTSimulation):
             print(f"\nLangevin NVT-MD (BAOAB): T={self.temperature} K  "
                   f"damping={self.damping} fs  dt={self.dt} fs  "
                   f"steps={total_steps}  (equil={self.equil_steps})")
-            print(header)
+            print(header + self._unc_header())
             print("  " + "-" * len(header))
 
         lists = {"T": [], "e_pot": [], "e_kin": []}
@@ -1123,7 +1145,7 @@ class LangevinSimulation(NVTSimulation):
         with (open(_traj_path_use,   mode) as traj_fh,
               open(_thermo_path_use, mode) as thermo_fh):
             if ck is None:
-                thermo_fh.write(header + "\n")
+                thermo_fh.write(header + self._unc_header() + "\n")
                 _write_xdatcar_header(
                     traj_fh, self.lattice, self.atom_types,
                     comment=f"akitsushima.py Langevin NVT-MD  T={self.temperature}K")
@@ -1166,6 +1188,7 @@ class LangevinSimulation(NVTSimulation):
                            f"{e_kin:12.6f}  {e_tot:12.6f}  "
                            f"{T_inst:10.2f}  {e_tot - Q:14.6f}  "
                            f"{self._nl.rebuild_count:10d}")
+                    row += self._unc_cell()
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)
@@ -1454,7 +1477,7 @@ class NVESimulation(_BaseMDSimulation):
             print(f"\nNVE-MD: dt={self.dt} fs  steps={total_steps}  "
                   f"(equil={self.equil_steps})")
             print(f"  E_tot(ref) = {e_tot_ref:.6f} eV")
-            print(header)
+            print(header + self._unc_header())
             print("  " + "-" * len(header))
 
         lists = {"T": [], "e_pot": [], "e_kin": []}
@@ -1472,7 +1495,7 @@ class NVESimulation(_BaseMDSimulation):
         with (open(_traj_path_use,   mode) as traj_fh,
               open(_thermo_path_use, mode) as thermo_fh):
             if ck is None:
-                thermo_fh.write(header + "\n")
+                thermo_fh.write(header + self._unc_header() + "\n")
                 _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
                                      comment="akitsushima.py NVE-MD")
                 self._xdatcar_frame_idx = 1
@@ -1541,6 +1564,7 @@ class NVESimulation(_BaseMDSimulation):
                     row = (f"{step:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
                            f"{e_kin:12.6f}  {e_tot:14.6f}  "
                            f"{T_inst:10.2f}  {P_gpa:12.4f}  {drift:14.6f}")
+                    row += self._unc_cell()
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)
@@ -2086,7 +2110,7 @@ class NPTSimulation(_BaseMDSimulation):
                   f"(equil={self.equil_steps})")
             print(f"  V0 = {self._volume():.4f} A^3  "
                   f"H_NPT(ref) = {H_ref:.4f} eV")
-            print(header)
+            print(header + self._unc_header())
             print("  " + "-" * len(header))
 
         lists = {"T": [], "P": [], "V": []}
@@ -2104,7 +2128,7 @@ class NPTSimulation(_BaseMDSimulation):
         with (open(_traj_path_use,   mode) as traj_fh,
               open(_thermo_path_use, mode) as thermo_fh):
             if ck is None:
-                thermo_fh.write(header + "\n")
+                thermo_fh.write(header + self._unc_header() + "\n")
                 self._xdatcar_frame_idx = 1
             else:
                 self._xdatcar_frame_idx = ck["frame"]
@@ -2193,6 +2217,7 @@ class NPTSimulation(_BaseMDSimulation):
                            f"{e_kin:12.6f}  {T_inst:10.2f}  "
                            f"{P_gpa:12.4f}  {V_inst:12.4f}  "
                            f"{H_NPT:14.6f}")
+                    row += self._unc_cell()
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)

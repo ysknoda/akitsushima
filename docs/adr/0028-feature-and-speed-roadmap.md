@@ -133,6 +133,8 @@ Three findings:
 8. **Ensemble ELM with an uncertainty output (Q15; ADR-0010 item 7).**
    ADR-0027 rounds 3-5 found that the spurious anneal minima differ from
    one ELM seed to the next, which more data does not remove.
+   *Done as ADR-0033 (0.2.0a23): ensemble mean as force field, spread
+   as uncertainty; GeSn round-5 evaluation in its Result.*
 9. **Structure and trajectory I/O, ASE adapter (Q14, Q17).**  Reading
    and writing extxyz, LAMMPS data and CIF; extxyz and LAMMPS dump as
    trajectory output; an ASE Calculator that wraps an akitsushima force

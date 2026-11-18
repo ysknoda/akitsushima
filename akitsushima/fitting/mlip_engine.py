@@ -23,6 +23,7 @@ forces and stress contracted from their Jacobians.
 """
 
 import os
+import threading
 
 import numpy as np
 
@@ -54,6 +55,10 @@ def load_mlip_model(path: str):
         from .models import atomic
 
         return getattr(atomic, cls).load(path)
+    if cls == "AtomicELMEnsemble":  # ADR-0033
+        from .models.ensemble import AtomicELMEnsemble
+
+        return AtomicELMEnsemble.load(path)
     if "model_str" in keys:
         raise ValueError(
             f"'{path}' is a LightGBM model file; LightGBM was removed from "
@@ -101,6 +106,10 @@ class MLIPForceField:
                 f"(external descriptors at inference: docs/adr/0010 item 9)."
             )
         self.model = model
+        # ensemble (ADR-0033): the mean is the force field; the members'
+        # spread of the last call is kept per thread for uncertainty()
+        self.is_ensemble = hasattr(model, "member_energies_and_gradients")
+        self._last = threading.local()
         self.descriptor = descriptor_from_config(model.descriptor_config)
         self.r_cut = float(self.descriptor.r_cut)
         self.atom_centred = bool(getattr(model, "atom_centred", False))
@@ -150,10 +159,26 @@ class MLIPForceField:
         return SiteTerms(np.asarray(eps, float), centre, J.nbj.astype(np.int64),
                          np.asarray(J.vec, float), dUdv)
 
+    def uncertainty(self):
+        """Spread of the ensemble members at this thread's last call:
+        {"sigma_E": eV/atom, "sigma_F_max": eV/A, "sigma_S": GPa}, or
+        None for a single model or before the first call (ADR-0033)."""
+        state = getattr(self._last, "state", None)
+        if not self.is_ensemble or state is None:
+            return None
+        return _ensemble_spread(*state)
+
     def __call__(self, lattice, positions, atom_types, neigh_list=None):
         if self.atom_centred:
+            if self.is_ensemble:
+                self._last.state = None  # drop the previous Jacobian first
             J = self.descriptor.atomic_jacobian(lattice, positions, atom_types)
-            eps, g = self.model.atomic_energy_and_gradient(J.G, J.sp)
+            if self.is_ensemble:
+                eps_m, g_m = self.model.member_energies_and_gradients(J.G, J.sp)
+                eps, g = eps_m.mean(axis=0), g_m.mean(axis=0)
+                self._last.state = (J, eps_m, g_m)
+            else:
+                eps, g = self.model.atomic_energy_and_gradient(J.G, J.sp)
             forces, stress = J.forces_and_stress(g)
             energy = float(eps.sum())
             if self.baseline is not None:
@@ -172,6 +197,25 @@ class MLIPForceField:
             Eb, Fb, Sb = self.baseline.compute(lattice, positions, atom_types)
             energy, forces, stress = energy + Eb, forces + Fb, stress + Sb
         return float(energy), forces, stress
+
+
+def _ensemble_spread(J, eps_m, g_m) -> dict:
+    """sigma_E [eV/atom], sigma_F_max [eV/A], sigma_S [GPa] of the members
+    (sample standard deviations, ddof = 1; ADR-0033 decision 5)."""
+    from ..constants import EV_ANG3_TO_GPA
+
+    n_atoms = eps_m.shape[1]
+    e_m = eps_m.sum(axis=1) / n_atoms
+    fs = [J.forces_and_stress(np.ascontiguousarray(g)) for g in g_m]
+    F_m = np.array([f for f, _ in fs])
+    S_m = np.array([s for _, s in fs])
+    dev = F_m - F_m.mean(axis=0)
+    per_atom = np.sqrt(np.sum(dev * dev, axis=(0, 2)) / (len(F_m) - 1))
+    return {
+        "sigma_E": float(np.std(e_m, ddof=1)),
+        "sigma_F_max": float(per_atom.max()),
+        "sigma_S": float(np.std(S_m, axis=0, ddof=1).max() * EV_ANG3_TO_GPA),
+    }
 
 
 def check_mlip_for_solver(force_fn, solver, *, need_site_energies=False,

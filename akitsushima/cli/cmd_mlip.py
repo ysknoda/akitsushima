@@ -21,6 +21,8 @@ import json
 import os
 import time as _time
 
+import numpy as np
+
 from ..fitting.models.csv_io import load_mlip_csv
 from .common import (
     _check_yaml,
@@ -306,7 +308,7 @@ def _build_atomic_model(model_type, ml, verbose):
         from ..fitting.models.atomic import AtomicELMModel, AtomicQELMModel
 
         cls = AtomicQELMModel if model_type == "qelm" else AtomicELMModel
-        return cls(
+        kw = dict(
             n_hidden=ml.get("n_hidden", 400),
             activation=ml.get("activation", "tanh"),
             reg=ml.get("reg", 1e-6),
@@ -314,11 +316,82 @@ def _build_atomic_model(model_type, ml, verbose):
             **common,
             **_elm_options(model_type, ml),
         )
+        # ensemble of seed-varied members (ADR-0033): ensemble: <members>,
+        # ensemble_seeds: [...] to give the seeds
+        n_members = ml.get("ensemble")
+        seeds = ml.get("ensemble_seeds")
+        if n_members or seeds:
+            from ..fitting.models.ensemble import AtomicELMEnsemble
+
+            return AtomicELMEnsemble(
+                n_members=int(n_members or len(seeds)), member_class=cls.__name__,
+                seeds=seeds, **kw)
+        return cls(**kw)
     raise ValueError(
         f"mlip.form 'atom_centred' supports model elm, qelm or nn, got "
         f"'{model_type}' (a linear tabular model already is atom-centred, "
         f"ADR-0004 decision 9)."
     )
+
+
+def _evaluate(ev: dict, verbose: bool) -> int:
+    """mlip.evaluate (ADR-0033): energy per atom and the ensemble spread
+    (sigma_E, sigma_F_max, sigma_S) of every structure, to CSV -- the
+    structures with the largest spread are the candidates for the next
+    DFT batch.
+
+    ``model``: the model file; ``poscars``: a glob pattern or a list of
+    POSCAR paths (unlabelled candidates); and / or ``csv`` (+
+    ``poscar_dir``): a labelled structure list, for which the errors
+    against the reference are added; ``output`` (default
+    ``./mlip_uncertainty.csv``)."""
+    import glob
+
+    from ..fitting.mlip_engine import MLIPForceField
+    from ..io.poscar import parse_poscar
+
+    ff = MLIPForceField.from_file(ev["model"])
+    rows = []
+    pats = ev.get("poscars") or []
+    for pat in [pats] if isinstance(pats, str) else pats:
+        for path in sorted(glob.glob(pat)) or [pat]:
+            d = parse_poscar(path)
+            rows.append(dict(name=path, lattice=d["lattice"],
+                             positions=d["positions"], atom_types=d["atom_types"]))
+    if ev.get("csv"):
+        structs, _ = _structures_and_descriptor(
+            ff.descriptor, ev["csv"],
+            ev.get("poscar_dir", os.path.dirname(os.path.abspath(ev["csv"]))),
+            ff.species, False)
+        rows += structs
+    if not rows:
+        print("ERROR: mlip.evaluate needs poscars and / or csv.")
+        return 1
+    out = ev.get("output", "./mlip_uncertainty.csv")
+    cols = ["name", "n_atoms", "E_per_atom", "sigma_E", "sigma_F_max", "sigma_S",
+            "err_E_per_atom", "err_F_max"]
+    lines = [",".join(cols)]
+    for s in rows:
+        E, F, _ = ff(s["lattice"], s["positions"], s["atom_types"])
+        u = ff.uncertainty() or {}
+        n = len(s["atom_types"])
+        rec = {"name": s.get("name", ""), "n_atoms": n, "E_per_atom": E / n,
+               "sigma_E": u.get("sigma_E", ""), "sigma_F_max": u.get("sigma_F_max", ""),
+               "sigma_S": u.get("sigma_S", ""), "err_E_per_atom": "", "err_F_max": ""}
+        if s.get("ref_energy") is not None:
+            rec["err_E_per_atom"] = E / n - float(s["ref_energy"])
+        if s.get("ref_forces") is not None:
+            rec["err_F_max"] = float(np.max(np.linalg.norm(
+                F - np.asarray(s["ref_forces"]), axis=1)))
+        lines.append(",".join(
+            f"{rec[c]:.8g}" if isinstance(rec[c], float) else str(rec[c]) for c in cols))
+    with open(out, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    if verbose:
+        print(f"\n  {len(rows)} structures evaluated; spread written to {out}")
+        if not ff.is_ensemble:
+            print("  (a single model has no spread: the sigma columns are empty)")
+    return 0
 
 
 def cmd_mlip(args) -> int:
@@ -333,6 +406,8 @@ def cmd_mlip(args) -> int:
     verbose = ml_cfg.get("verbose", True) and not getattr(args, "quiet", False)
 
     _print_header("Machine-Learning Potential (mlip)", cfg, pot_cfg=pot_cfg)
+    if ml_cfg.get("evaluate"):
+        return _evaluate(ml_cfg["evaluate"], verbose)
     model_type = str(ml_cfg.get("model", "elm")).lower()
     desc_cfg = ml_cfg.get("descriptor")
     form = str(ml_cfg.get("form", "tabular")).lower().replace("-", "_")

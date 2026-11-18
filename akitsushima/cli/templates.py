@@ -724,6 +724,19 @@ mlip:
 #   hidden_layers:  [64, 64]  # nn, per species
 #   reg_search:     [1.0e2, 1.0e4, 1.0e6, 1.0e8]   # elm / qelm
 #   descriptor: {type: acsf, r_cut: 3.771, g2: ..., g5: ...}
+#   ensemble:       5         # elm / qelm (ADR-0033): mean of 5 seed-varied
+#                             # members is the force field; their spread is
+#                             # the uncertainty (sigF_max in md / relax logs)
+#   ensemble_seeds: [42, 1, 2, 3, 4]   # optional; default seed + 1000 m
+#
+# Spread of a model on a list of structures (candidates for the next DFT
+# batch), instead of a fit:
+# mlip:
+#   evaluate:
+#     model:   ./mlip_output/atomic_elm_model.npz
+#     poscars: ./candidates/*/POSCAR      # and / or a labelled list:
+#     csv:     null                       # structures.csv (+ poscar_dir)
+#     output:  ./mlip_uncertainty.csv
 
 # ----------------------------------------------------------------------
 # Example: model: linear  (E/N = w . d + b; methods ADR-0004 decision 9)

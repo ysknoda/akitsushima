@@ -23,6 +23,7 @@ from .io_utils import (
 )
 from .loss import generic_loss_function
 from .models import (
+    AtomicELMEnsemble,
     AtomicELMModel,
     AtomicQELMModel,
     ELMModel,
@@ -89,6 +90,7 @@ __all__ = [
     "NNModel",
     "AtomicELMModel",
     "AtomicQELMModel",
+    "AtomicELMEnsemble",
     "AtomicNNModel",
     "load_mlip_csv",
     "load_weights_csv",

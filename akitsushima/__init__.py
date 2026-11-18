@@ -31,6 +31,8 @@ Force fields
     NNModel          -- PyTorch feedforward network (lazy import)
     AtomicELMModel, AtomicQELMModel, AtomicNNModel
                      -- atom-centred (Behler-Parrinello) models (ADR-0005)
+    AtomicELMEnsemble -- mean of seed-varied atom-centred ELMs, with an
+                     uncertainty from their spread (ADR-0033)
 
 Simulation capabilities
 -----------------------
@@ -113,6 +115,7 @@ from .engine import (
     ewald_sum,
 )
 from .fitting import (
+    AtomicELMEnsemble,
     AtomicELMModel,
     AtomicQELMModel,
     BornMayerParameterSet,
@@ -157,7 +160,7 @@ from .solvers import (
 )
 from .solvers.config_bridge import force_fn_from_config
 
-__version__ = "0.2.0a22"
+__version__ = "0.2.0a23"
 
 __all__ = [
     "__version__",
@@ -179,7 +182,7 @@ __all__ = [
     "StillingerWeberParameterSet", "TersoffParameterSet",
     "ExternalFileEngine", "ScaledForceEngine",
     "ELMModel", "QuantizedELMModel", "LinearModel", "NNModel",
-    "AtomicELMModel", "AtomicQELMModel", "AtomicNNModel",
+    "AtomicELMModel", "AtomicQELMModel", "AtomicNNModel", "AtomicELMEnsemble",
     # solvers
     "GeometryOptimiser", "NVTSimulation", "LangevinSimulation", "NVESimulation", "NPTSimulation",
     "GCMCMDSimulation", "CFCMCSimulation",

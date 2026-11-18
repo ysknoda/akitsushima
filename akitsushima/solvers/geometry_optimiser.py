@@ -1038,6 +1038,11 @@ class GeometryOptimiser:
             f"{'Fmax(eV/A)':>12}  {'Pmax(GPa)':>10}  "
             f"{extra_col:>12}"
         )
+        # ensemble MLIP (ADR-0033): sigma_F,max of every logged step
+        fn = getattr(self, "_force_fn", None)
+        self._unc = fn.uncertainty if getattr(fn, "is_ensemble", False) else None
+        if self._unc is not None:
+            header += f"  {'sigF_max(eV/A)':>14}"
         if self.verbose:
             print(f"\n  GeometryOptimiser [{self.method.upper()}]")
             print("\n" + header)
@@ -1106,6 +1111,9 @@ class GeometryOptimiser:
             f"{step:6d}  {float(e):16.6f}  "
             f"{fmax_val:12.4f}  {pmax_val:10.4f}  {extra!s:>12}"
         )
+        if getattr(self, "_unc", None) is not None:
+            u = self._unc()
+            row += f"  {u['sigma_F_max']:14.6f}" if u else f"  {'nan':>14}"
         log_fh.write(row + "\n")
         if self.verbose and step % 10 == 0:
             print("  " + row)

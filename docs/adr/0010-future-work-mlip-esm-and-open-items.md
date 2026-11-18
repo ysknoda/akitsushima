@@ -199,6 +199,10 @@ approximation of the same Gaussian kernel, without the variance.
 
 ## 7. Ensemble ELM (Q36, agreed 2026-09-28)
 
+*Implemented as ADR-0033 (0.2.0a23): mean as the force field, spread as
+the uncertainty; 5 members by default; one npz; sigF_max in md and
+relax logs.*
+
 Several ELMs that differ only in the random seed (W, b), trained on the
 same data; the spread of their predictions estimates the model
 uncertainty.  Cheap (one linear solve per member, no retraining of a

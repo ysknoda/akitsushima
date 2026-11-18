@@ -240,6 +240,9 @@ class GlobalOptimiser:
         self.raw_force_fn = force_fn
         self.pressure = float(pressure)
         self.h_fn = enthalpy_force_fn(force_fn, self.pressure)
+        # ensemble MLIP (ADR-0033): the spread at every minimum goes to
+        # the ledger
+        self._unc_fn = force_fn if getattr(force_fn, "is_ensemble", False) else None
         self.output_dir = output_dir
         self.relax_kw = dict(relax or {})
         self.md_kw = dict(md or {})
@@ -385,7 +388,12 @@ class GlobalOptimiser:
         V = abs(float(np.linalg.det(res["lattice"])))
         E = H - self.pressure / EV_ANG3_TO_GPA * V
         self._check_energy(E)
+        unc = {}
+        if self._unc_fn is not None:
+            self._unc_fn(res["lattice"], res["positions"], self.atom_types)
+            unc = self._unc_fn.uncertainty() or {}
         return dict(
+            unc=unc,
             E=E,
             H=H,
             V=V,
@@ -527,6 +535,7 @@ class GlobalOptimiser:
             E_per_atom=q["E"] / self.N,
             converged=q["converged"],
             relax_steps=q["n_steps"],
+            **q["unc"],
         )
         self._append_ledger(rec)
         self._log(
@@ -595,6 +604,7 @@ class GlobalOptimiser:
                     E_per_atom=q["E"] / self.N,
                     converged=q["converged"],
                     relax_steps=q["n_steps"],
+                    **q["unc"],
                     best_H_per_atom=(
                         self.minima[0]["H"] / self.N if self.minima else None
                     ),
@@ -706,6 +716,7 @@ class GlobalOptimiser:
                     E_per_atom=q["E"] / self.N,
                     converged=q["converged"],
                     relax_steps=q["n_steps"],
+                    **q["unc"],
                     accepted=bool(accepted),
                     current_H_per_atom=cur["H"] / self.N,
                     best_H_per_atom=(

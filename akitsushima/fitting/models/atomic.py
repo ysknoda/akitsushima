@@ -612,8 +612,10 @@ class AtomicELMModel:
         )
 
     @classmethod
-    def load(cls, path: str, verbose: bool = False):
-        p = path if path.endswith(".npz") else path + ".npz"
+    def load(cls, path, verbose: bool = False):
+        # a path, or a file-like object (an ensemble stores its members'
+        # npz files inside its own, ADR-0033)
+        p = path if not isinstance(path, str) or path.endswith(".npz") else path + ".npz"
         z = np.load(p)
         hyper = json.loads(str(z["hyper"]))
         unit_kw = hyper.pop("unit_kw", {})

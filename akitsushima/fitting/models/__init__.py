@@ -16,6 +16,7 @@ classical/ELM path never touch, so importing ``akitsushima.fitting`` (or
 ``.models``) does not drag it in unless a caller asks for them by name.
 """
 from .atomic import AtomicELMModel, AtomicQELMModel
+from .ensemble import AtomicELMEnsemble
 from .csv_io import load_mlip_csv, load_weights_csv
 from .elm import ELMModel
 from .linear import LinearModel
@@ -28,6 +29,7 @@ __all__ = [
     "NNModel",
     "AtomicELMModel",
     "AtomicQELMModel",
+    "AtomicELMEnsemble",
     "AtomicNNModel",
     "load_mlip_csv",
     "load_weights_csv",
