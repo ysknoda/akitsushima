@@ -11,6 +11,7 @@ from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..utils.mpi import _mpi_rank
 from .common import (
     _check_poscar,
+    _checkpoint_setup,
     _check_yaml,
     _print_header,
     _print_output_files,
@@ -127,8 +128,15 @@ def cmd_md(args) -> int:
                             velocity_rescale_steps=md_cfg.get(
                                 "velocity_rescale_steps", 0))
 
+    # Checkpoint and restart (ADR-0031): an existing checkpoint is
+    # continued unless `restart: false`.
+    ck_path, ck_every, ck_meta = _checkpoint_setup(
+        md_cfg.get("checkpoint", os.path.join(output_dir, "md_checkpoint.npz")),
+        md_cfg.get("checkpoint_every", 1000),
+        md_cfg.get("restart", True), pot_cfg, verbose)
     t0 = _time.perf_counter()
-    result = sim.run()
+    result = sim.run(checkpoint=ck_path, checkpoint_every=ck_every,
+                     checkpoint_meta=ck_meta)
     t_md = _time.perf_counter() - t0
 
     if not is_root:

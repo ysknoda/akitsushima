@@ -447,7 +447,8 @@ class NeighbourList:
     _HAS_KDTREE = _HAS_KDTREE
 
     def __init__(self, r_cut: float, skin_width: float = 0.5,
-                 backend: str = 'auto', use_numba: Optional[bool] = None):
+                 backend: str = 'auto', use_numba: Optional[bool] = None,
+                 canonical_order: bool = True):
         if r_cut <= 0.0:
             raise ValueError(f"NeighbourList: r_cut must be positive, got {r_cut}.")
         if backend not in _BACKENDS:
@@ -459,6 +460,10 @@ class NeighbourList:
         self.backend = backend
         self.use_numba = (bool(_NUMBA_ENV and _HAS_NUMBA) if use_numba is None
                           else bool(use_numba))
+        # Candidate pairs in canonical order (i < j, sorted by (i, j)) after
+        # every build, so that forces do not depend on when the list was
+        # built -- a restarted MD run continues bit for bit (ADR-0031).
+        self.canonical_order = bool(canonical_order)
 
         self._lattice: Optional[np.ndarray] = None
         self._ref_pos: Optional[np.ndarray] = None
@@ -575,6 +580,8 @@ class NeighbourList:
             self._build_kdtree(lattice, positions)
         else:
             self._build_cell_linked(lattice, positions)
+        if self.canonical_order:
+            _canonical_pair_order(self)
         self._n_builds += 1
 
     def _uses_kdtree(self) -> bool:
@@ -1144,16 +1151,15 @@ def owned_neighbour_list(lattice: np.ndarray, positions: np.ndarray,
     key = (float(r_cut), n_atoms)
     nl = cache.get(key)
     if nl is None:
+        # canonical pair order on every build (NeighbourList default)
         nl = NeighbourList(r_cut=float(r_cut), skin_width=_OWNED_SKIN)
         nl.build(lattice, positions)
-        _canonical_pair_order(nl)
         cache[key] = nl
         while len(cache) > _OWNED_CACHE_SIZE:
             cache.popitem(last=False)
     else:
         cache.move_to_end(key)
-        if nl.check_and_rebuild(lattice, positions):
-            _canonical_pair_order(nl)
+        nl.check_and_rebuild(lattice, positions)
     return nl
 
 
@@ -1164,7 +1170,10 @@ def _canonical_pair_order(nl: "NeighbourList") -> None:
     swap = i > j
     lo = np.where(swap, j, i)
     hi = np.where(swap, i, j)
-    order = np.lexsort((hi, lo))
+    # each (i, j) occurs once (the list is minimum-image), so one int64
+    # key sorts like lexsort((hi, lo)), faster
+    order = np.argsort(lo.astype(np.int64) * (int(hi.max(initial=0)) + 1) + hi,
+                       kind="stable")
     rij = np.where(swap[:, None], -nl._pair_rij[:n], nl._pair_rij[:n])
     nl._pair_i = np.ascontiguousarray(lo[order], dtype=np.int32)
     nl._pair_j = np.ascontiguousarray(hi[order], dtype=np.int32)

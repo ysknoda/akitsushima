@@ -121,6 +121,8 @@ Three findings:
    (ADR-0030 decision 2).*
 6. **Restart of `md` and `relax` (Q14).**  The limit recorded in
    ADR-0025: a run longer than 12 h is not possible today.
+   *Done as ADR-0031 (0.2.0a21): md continues bit for bit, relax from
+   the checkpointed structure with the optimiser restarted.*
 7. **Langevin thermostat in `md` (Q14; moved from tier B by the user on
    2026-11-12).**  NVT for the whole system; `nemd` already integrates
    Langevin baths (ADR-0020), but only as its two heat-bath regions.  It

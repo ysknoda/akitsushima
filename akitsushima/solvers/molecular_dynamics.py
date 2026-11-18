@@ -22,6 +22,8 @@ from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
 from ..utils.mpi import _mpi_rank
 from ..utils.optional_matplotlib import have_matplotlib, plt
 from ..utils.timing import TimingCollector
+from ._checkpoint import (check_settings, load_checkpoint, output_sizes,
+                          save_checkpoint, truncate_outputs)
 
 __all__ = ["NVTSimulation", "NVESimulation", "NPTSimulation"]
 
@@ -287,6 +289,92 @@ class _BaseMDSimulation:
         return max(3 * N - n_fixed, 1)
 
     # ------------------------------------------------------------------ #
+    #  Checkpoint and restart (ADR-0031)
+    # ------------------------------------------------------------------ #
+    # Thermostat / barostat scalars a checkpoint carries; set per class.
+    _CK_SCALARS: Tuple[str, ...] = ()
+    _CK_ENSEMBLE = ""
+
+    def _ck_settings(self) -> dict:
+        """Settings a restart must match (ADR-0031 decision 9)."""
+        out = {
+            "ensemble": self._CK_ENSEMBLE,
+            "n_atoms": int(self.N),
+            "atom_types": list(self.atom_types),
+            "timestep": float(self.dt),
+            "equil_steps": int(self.equil_steps),
+            "thermo_every": int(self.thermo_every),
+            "traj_every": int(self.traj_every),
+            "velocity_rescale_steps": int(getattr(self, "velocity_rescale_steps", 0)),
+        }
+        for name in ("temperature", "tau_nhc", "tau_baro", "pressure_gpa"):
+            if hasattr(self, name):
+                out[name] = float(getattr(self, name))
+        return out
+
+    def _ck_begin(self, checkpoint, checkpoint_meta, outputs: dict):
+        """Restore the state from ``checkpoint`` if that file exists.
+
+        Returns None for a fresh run, else a dict with the next step, the
+        per-step lists, the extra scalars and the next XDATCAR frame
+        index.  The output files are cut back to their length at the
+        checkpoint."""
+        if not checkpoint or not os.path.isfile(checkpoint):
+            return None
+        cls = self.__class__.__name__
+        meta, arr = load_checkpoint(checkpoint)
+        now = dict(self._ck_settings(), **(checkpoint_meta or {}))
+        check_settings(meta["settings"], now, cls, checkpoint)
+        total = self.equil_steps + self.n_steps
+        if meta["step"] > total:
+            raise ValueError(
+                f"{cls}: the checkpoint {checkpoint} is at step {meta['step']}, "
+                f"beyond equil_steps + n_steps = {total}; n_steps can only be "
+                "raised to extend a run.")
+        self.positions = arr["positions"]
+        self.velocities = arr["velocities"]
+        self.lattice = arr["lattice"]
+        for name in self._CK_SCALARS:
+            setattr(self, name, float(meta["scalars"][name]))
+        self.rng = np.random.default_rng()
+        self.rng.bit_generator.state = meta["rng"]
+        truncate_outputs(outputs, meta["sizes"])
+        lists = {k[5:]: arr[k].tolist() for k in arr if k.startswith("list_")}
+        if "thermo_log_keys" in meta:
+            cols = [arr["tlog_" + k].tolist() for k in meta["thermo_log_keys"]]
+            self._thermo_log = [dict(zip(meta["thermo_log_keys"], row))
+                                for row in zip(*cols)]
+        if self.verbose:
+            print(f"  {cls}: continuing from {checkpoint} at step {meta['step']}")
+        return {"step": int(meta["step"]), "lists": lists,
+                "extra": meta["extra"], "frame": int(meta["frame"])}
+
+    def _ck_save(self, checkpoint, checkpoint_meta, step_next, lists: dict,
+                 extra: dict, handles: dict) -> None:
+        """Write the state after ``step_next`` completed steps."""
+        sizes = output_sizes(handles)
+        meta = {
+            "step": int(step_next),
+            "settings": dict(self._ck_settings(), **(checkpoint_meta or {})),
+            "scalars": {k: float(getattr(self, k)) for k in self._CK_SCALARS},
+            "rng": self.rng.bit_generator.state,
+            "sizes": sizes,
+            "extra": extra,
+            "frame": int(self._xdatcar_frame_idx),
+        }
+        arrays = {"positions": self.positions, "velocities": self.velocities,
+                  "lattice": self.lattice}
+        for k, v in lists.items():
+            arrays["list_" + k] = np.asarray(v, dtype=float)
+        tlog = getattr(self, "_thermo_log", None)
+        if tlog:
+            keys = list(tlog[0])
+            meta["thermo_log_keys"] = keys
+            for k in keys:
+                arrays["tlog_" + k] = np.array([r[k] for r in tlog])
+        save_checkpoint(checkpoint, meta, arrays)
+
+    # ------------------------------------------------------------------ #
     def _nhc_step(self) -> None:
         """
         2-chain Nose-Hoover-chain half-step -- VASP-style MTTK propagator.
@@ -445,6 +533,9 @@ class NVTSimulation(_BaseMDSimulation):
     thermo.log       -- step / time[ps] / E_pot / E_kin / E_tot / T / H_NHC
     POSCAR_final_MD  -- last frame as VASP 5 POSCAR
     """
+
+    _CK_ENSEMBLE = "nvt"
+    _CK_SCALARS = ("xi1", "xi2", "vxi1", "vxi2")
 
     def __init__(self,
                  lattice         : np.ndarray,
@@ -621,7 +712,8 @@ class NVTSimulation(_BaseMDSimulation):
     #  Main MD loop                                                        #
     # ------------------------------------------------------------------ #
 
-    def run(self) -> dict:
+    def run(self, checkpoint: Optional[str] = None, checkpoint_every: int = 0,
+            checkpoint_meta: Optional[dict] = None) -> dict:
         """
         Execute the NVT-MD simulation.
 
@@ -636,11 +728,27 @@ class NVTSimulation(_BaseMDSimulation):
         Returns
         -------
         dict: final state + time-averaged properties.
+
+        Checkpoint (ADR-0031)
+        ---------------------
+        ``checkpoint`` : path of an ``.npz``.  If the file exists, the run
+            continues from it: the state, the per-step averages and the
+            random-number state are restored, the output files are cut
+            back to their length at the checkpoint, and the run goes on
+            to ``equil_steps + n_steps`` -- bit for bit the run that was
+            not interrupted.  Raising ``n_steps`` extends a finished run.
+            The settings must match (a ValueError names any that differ).
+        ``checkpoint_every`` : write the checkpoint every this many steps
+            (0: only at the end).
+        ``checkpoint_meta`` : extra items that must match on a restart
+            (the CLI passes a hash of the potential).
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
         traj_path   = os.path.join(self.output_dir, "XDATCAR_nvt")
         thermo_path = os.path.join(self.output_dir, "thermo.log")
+        ck = self._ck_begin(checkpoint, checkpoint_meta,
+                            {"thermo": thermo_path, "traj": traj_path})
 
         # Initial force evaluation
         e_pot, forces, stress = self._compute_forces()
@@ -662,7 +770,12 @@ class NVTSimulation(_BaseMDSimulation):
             print(header)
             print("  " + "-" * len(header))
 
-        t_avg_list, e_pot_list, e_kin_list = [], [], []
+        lists = {"T": [], "e_pot": [], "e_kin": []}
+        if ck is not None:
+            lists.update(ck["lists"])
+        t_avg_list, e_pot_list, e_kin_list = lists["T"], lists["e_pot"], lists["e_kin"]
+        start = ck["step"] if ck is not None else 0
+        mode = "a" if ck is not None else "w"
 
         # Only rank 0 opens (and writes to) the real trajectory/thermo
         # files -- every other MPI rank writes to os.devnull instead.
@@ -675,16 +788,19 @@ class NVTSimulation(_BaseMDSimulation):
         # handle, so no other code needs to know which rank it is.
         _traj_path_use   = traj_path   if _mpi_rank == 0 else os.devnull
         _thermo_path_use = thermo_path if _mpi_rank == 0 else os.devnull
-        with (open(_traj_path_use,   "w") as traj_fh,
-              open(_thermo_path_use, "w") as thermo_fh):
+        with (open(_traj_path_use,   mode) as traj_fh,
+              open(_thermo_path_use, mode) as thermo_fh):
 
-            thermo_fh.write(header + "\n")
+            if ck is None:
+                thermo_fh.write(header + "\n")
+                _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
+                                     comment=f"akitsushima.py NVT-MD  T={self.temperature}K")
+                self._xdatcar_frame_idx = 1
+            else:
+                self._xdatcar_frame_idx = ck["frame"]
+            handles = {"thermo": thermo_fh, "traj": traj_fh}
 
-            _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
-                                 comment=f"akitsushima.py NVT-MD  T={self.temperature}K")
-            self._xdatcar_frame_idx = 1
-
-            for step in range(total_steps):
+            for step in range(start, total_steps):
                 self._tc.start("step")  # timing
                 t_sim  = step * self.dt
                 t_ps   = t_sim * 1e-3
@@ -776,6 +892,15 @@ class NVTSimulation(_BaseMDSimulation):
                         or (is_prod and step % self.traj_every == 0)):
                     self._flush_outputs([thermo_fh, traj_fh],
                                         fsync=self.fsync_every_step)
+
+                if (checkpoint and checkpoint_every
+                        and (step + 1) % checkpoint_every == 0):
+                    self._ck_save(checkpoint, checkpoint_meta, step + 1,
+                                  lists, {}, handles)
+
+            if checkpoint:
+                self._ck_save(checkpoint, checkpoint_meta, total_steps,
+                              lists, {}, handles)
 
         # ---- Final structure in POSCAR format ---------------------------
         out_poscar = os.path.join(self.output_dir, "POSCAR_final_MD")
@@ -917,6 +1042,8 @@ class NVESimulation(_BaseMDSimulation):
     POSCAR_final_NVE -- final structure in VASP 5 format
     """
 
+    _CK_ENSEMBLE = "nve"
+
     def __init__(self,
                  lattice        : np.ndarray,
                  positions      : np.ndarray,
@@ -1033,7 +1160,8 @@ class NVESimulation(_BaseMDSimulation):
         self._xdatcar_frame_idx += 1
 
     # ------------------------------------------------------------------
-    def run(self) -> dict:
+    def run(self, checkpoint: Optional[str] = None, checkpoint_every: int = 0,
+            checkpoint_meta: Optional[dict] = None) -> dict:
         """
         Execute the NVE-MD simulation.
 
@@ -1051,17 +1179,35 @@ class NVESimulation(_BaseMDSimulation):
         -------
         dict with final positions, velocities, lattice,
         time-averaged T and E_pot, and total E_tot drift.
+
+        Checkpoint (ADR-0031)
+        ---------------------
+        ``checkpoint`` : path of an ``.npz``.  If the file exists, the run
+            continues from it: the state, the per-step averages and the
+            random-number state are restored, the output files are cut
+            back to their length at the checkpoint, and the run goes on
+            to ``equil_steps + n_steps`` -- bit for bit the run that was
+            not interrupted.  Raising ``n_steps`` extends a finished run.
+            The settings must match (a ValueError names any that differ).
+        ``checkpoint_every`` : write the checkpoint every this many steps
+            (0: only at the end).
+        ``checkpoint_meta`` : extra items that must match on a restart
+            (the CLI passes a hash of the potential).
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
         traj_path   = os.path.join(self.output_dir, "XDATCAR_nve")
         thermo_path = os.path.join(self.output_dir, "thermo.log")
+        ck = self._ck_begin(checkpoint, checkpoint_meta,
+                            {"thermo": thermo_path, "traj": traj_path})
 
         # ---- Initial force evaluation -----------------------------------
         e_pot, forces, stress = self._compute_forces()
         acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
         # Reference total energy (set after first force call so drift = 0 at step 0)
         e_tot_ref = e_pot + self._kinetic_energy()
+        if ck is not None:
+            e_tot_ref = ck["extra"]["e_tot_ref"]
 
         total_steps = self.equil_steps + self.n_steps
         GPa_fac = EV_ANG3_TO_GPA
@@ -1075,21 +1221,30 @@ class NVESimulation(_BaseMDSimulation):
             print(header)
             print("  " + "-" * len(header))
 
-        t_list, ep_list, ek_list = [], [], []
+        lists = {"T": [], "e_pot": [], "e_kin": []}
+        if ck is not None:
+            lists.update(ck["lists"])
+        t_list, ep_list, ek_list = lists["T"], lists["e_pot"], lists["e_kin"]
+        start = ck["step"] if ck is not None else 0
+        mode = "a" if ck is not None else "w"
 
         # Only rank 0 opens (and writes to) the real trajectory/thermo
         # files -- every other MPI rank writes to os.devnull instead.
         # See NVTSimulation.run() for the full rationale.
         _traj_path_use   = traj_path   if _mpi_rank == 0 else os.devnull
         _thermo_path_use = thermo_path if _mpi_rank == 0 else os.devnull
-        with (open(_traj_path_use,   "w") as traj_fh,
-              open(_thermo_path_use, "w") as thermo_fh):
-            thermo_fh.write(header + "\n")
-            _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
-                                 comment="akitsushima.py NVE-MD")
-            self._xdatcar_frame_idx = 1
+        with (open(_traj_path_use,   mode) as traj_fh,
+              open(_thermo_path_use, mode) as thermo_fh):
+            if ck is None:
+                thermo_fh.write(header + "\n")
+                _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
+                                     comment="akitsushima.py NVE-MD")
+                self._xdatcar_frame_idx = 1
+            else:
+                self._xdatcar_frame_idx = ck["frame"]
+            handles = {"thermo": thermo_fh, "traj": traj_fh}
 
-            for step in range(total_steps):
+            for step in range(start, total_steps):
                 self._tc.start("step")  # timing
                 t_ps = step * self.dt * 1e-3
 
@@ -1164,6 +1319,15 @@ class NVESimulation(_BaseMDSimulation):
                         or (is_prod and step % self.traj_every == 0)):
                     self._flush_outputs([thermo_fh, traj_fh],
                                         fsync=self.fsync_every_step)
+
+                if (checkpoint and checkpoint_every
+                        and (step + 1) % checkpoint_every == 0):
+                    self._ck_save(checkpoint, checkpoint_meta, step + 1, lists,
+                                  {"e_tot_ref": float(e_tot_ref)}, handles)
+
+            if checkpoint:
+                self._ck_save(checkpoint, checkpoint_meta, total_steps, lists,
+                              {"e_tot_ref": float(e_tot_ref)}, handles)
 
         # ---- Summary ---------------------------------------------------
         T_mean  = float(np.mean(t_list))  if t_list else 0.0
@@ -1296,6 +1460,10 @@ class NPTSimulation(_BaseMDSimulation):
     POSCAR_final_NPT -- final structure with updated cell
     md_npt_timeseries.png (if matplotlib available)
     """
+
+    _CK_ENSEMBLE = "npt"
+    _CK_SCALARS = ("xi1", "xi2", "vxi1", "vxi2", "p_eps",
+                   "xi1_b", "xi2_b", "vxi1_b", "vxi2_b")
 
     #: eV/A^3 -> GPa conversion
     _EV_ANG3_TO_GPA = EV_ANG3_TO_GPA
@@ -1621,7 +1789,8 @@ class NPTSimulation(_BaseMDSimulation):
     #  Main MD loop
     # ------------------------------------------------------------------
 
-    def run(self) -> dict:
+    def run(self, checkpoint: Optional[str] = None, checkpoint_every: int = 0,
+            checkpoint_meta: Optional[dict] = None) -> dict:
         """
         Execute the NPT-MD simulation.
 
@@ -1640,16 +1809,34 @@ class NPTSimulation(_BaseMDSimulation):
         -------
         dict with final positions, velocities, lattice,
         time-averaged T, P, V, and H_NPT drift.
+
+        Checkpoint (ADR-0031)
+        ---------------------
+        ``checkpoint`` : path of an ``.npz``.  If the file exists, the run
+            continues from it: the state, the per-step averages and the
+            random-number state are restored, the output files are cut
+            back to their length at the checkpoint, and the run goes on
+            to ``equil_steps + n_steps`` -- bit for bit the run that was
+            not interrupted.  Raising ``n_steps`` extends a finished run.
+            The settings must match (a ValueError names any that differ).
+        ``checkpoint_every`` : write the checkpoint every this many steps
+            (0: only at the end).
+        ``checkpoint_meta`` : extra items that must match on a restart
+            (the CLI passes a hash of the potential).
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
         traj_path   = os.path.join(self.output_dir, "XDATCAR_npt")
         thermo_path = os.path.join(self.output_dir, "thermo.log")
+        ck = self._ck_begin(checkpoint, checkpoint_meta,
+                            {"thermo": thermo_path, "traj": traj_path})
 
         # Initial force evaluation
         e_pot, forces, stress = self._compute_forces()
         acc   = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
         H_ref = self._npt_conserved(e_pot)
+        if ck is not None:
+            H_ref = ck["extra"]["H_ref"]
 
         total_steps = self.equil_steps + self.n_steps
         header = (f"{'Step':>8}  {'Time(ps)':>10}  {'E_pot(eV)':>14}  "
@@ -1666,19 +1853,28 @@ class NPTSimulation(_BaseMDSimulation):
             print(header)
             print("  " + "-" * len(header))
 
-        T_list, P_list, V_list = [], [], []
+        lists = {"T": [], "P": [], "V": []}
+        if ck is not None:
+            lists.update(ck["lists"])
+        T_list, P_list, V_list = lists["T"], lists["P"], lists["V"]
+        start = ck["step"] if ck is not None else 0
+        mode = "a" if ck is not None else "w"
 
         # Only rank 0 opens (and writes to) the real trajectory/thermo
         # files -- every other MPI rank writes to os.devnull instead.
         # See NVTSimulation.run() for the full rationale.
         _traj_path_use   = traj_path   if _mpi_rank == 0 else os.devnull
         _thermo_path_use = thermo_path if _mpi_rank == 0 else os.devnull
-        with (open(_traj_path_use,   "w") as traj_fh,
-              open(_thermo_path_use, "w") as thermo_fh):
-            thermo_fh.write(header + "\n")
-            self._xdatcar_frame_idx = 1
+        with (open(_traj_path_use,   mode) as traj_fh,
+              open(_thermo_path_use, mode) as thermo_fh):
+            if ck is None:
+                thermo_fh.write(header + "\n")
+                self._xdatcar_frame_idx = 1
+            else:
+                self._xdatcar_frame_idx = ck["frame"]
+            handles = {"thermo": thermo_fh, "traj": traj_fh}
 
-            for step in range(total_steps):
+            for step in range(start, total_steps):
                 self._tc.start("step")  # timing
                 t_ps    = step * self.dt * 1e-3
                 P_inst  = self._pressure_inst(stress)   # [eV/A^3]
@@ -1775,6 +1971,15 @@ class NPTSimulation(_BaseMDSimulation):
                         or (is_prod and step % self.traj_every == 0)):
                     self._flush_outputs([thermo_fh, traj_fh],
                                         fsync=self.fsync_every_step)
+
+                if (checkpoint and checkpoint_every
+                        and (step + 1) % checkpoint_every == 0):
+                    self._ck_save(checkpoint, checkpoint_meta, step + 1, lists,
+                                  {"H_ref": float(H_ref)}, handles)
+
+            if checkpoint:
+                self._ck_save(checkpoint, checkpoint_meta, total_steps, lists,
+                              {"H_ref": float(H_ref)}, handles)
 
         # ---- Summary ---------------------------------------------------
         T_mean  = float(np.mean(T_list)) if T_list else 0.0

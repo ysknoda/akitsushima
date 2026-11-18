@@ -1,5 +1,5 @@
 ---
-status: proposed (2026-11-18)
+status: accepted (2026-11-18; implemented in 0.2.0a21 -- see Result)
 ---
 
 # Restart of `md` and `relax` from a checkpoint
@@ -113,6 +113,122 @@ can be restarted, so a run is limited to what finishes inside one job
     recorded here.  If it slows an md step by more than 5 %, the
     ordering is applied only to runs that write a checkpoint.
 
-## Result
+## Result (2026-11-18, 0.2.0a21)
 
-(to be appended)
+**Neighbour-list order (decision 11).**  `NeighbourList.build` now puts
+its candidates in canonical order (option `canonical_order`, default
+on).  The owned lists of ADR-0028 step 3 get it from there.  The sort
+uses one int64 key per pair, which orders like `lexsort` because the
+list is minimum-image, so each (i, j) occurs once.  Cost with SW Si,
+cell-list back-end, 1 thread, the two orders alternated:
+
+| | without | with |
+|---|---|---|
+| one build, 4096 atoms | 15.7 ms | 17.2 ms (+10 %) |
+| NVT step, 4096 atoms (21 builds in 300 steps) | 27.0-28.0 ms | 27.2-29.7 ms |
+| NVT step, 512 atoms | 3.7-4.0 ms | 3.8-4.0 ms |
+
+The expected cost per step is 21 x 1.5 ms / 300 = 0.1 ms, below 1 %.
+The measured step times vary by +-5 % from load alone, so the ordering
+stays on for every run.  `lexsort` took +40 % per build.  Switching
+the ordering off makes the restarted NVT, NVE and NPT runs of the test
+below differ from the uninterrupted ones, so it is what makes them
+equal.
+
+**md.**
+- The new module `solvers/_checkpoint.py` holds what md and relax
+  share:
+  - atomic npz writing on rank 0;
+  - the settings check (both ways: an item on one side only is a
+    difference);
+  - file lengths and truncation;
+  - the potential hash.
+- `_BaseMDSimulation` gains `_ck_settings`, `_ck_begin` and `_ck_save`.
+- The three `run` methods take `checkpoint`, `checkpoint_every` and
+  `checkpoint_meta`.
+- The checkpoint stores:
+  - positions, velocities and cell;
+  - the chain variables (NVT: 4; NPT: 9 with `p_eps` and the barostat
+    chain);
+  - the per-step lists behind the averages and the NVT thermo records;
+  - the reference energy of the drift (NVE `e_tot_ref`, NPT `H_ref`);
+  - the random-number state;
+  - the next XDATCAR frame index;
+  - the byte lengths of `thermo.log` and the XDATCAR.
+- A checkpoint is written every `checkpoint_every` steps and at the
+  end.  The final one makes extension possible: equal settings with a
+  larger `n_steps` continue a finished run.
+- `velocity_rescale_steps` was added to the settings that must match
+  (it changes the dynamics during equilibration).
+
+`tests/test_md_restart.py`:
+- For NVT, NVE and NPT, a run killed at step 37 by an exception from
+  the force call (after the step-25 checkpoint, with lines past it
+  already in the files) and restarted equals the uninterrupted run.
+  Positions, velocities, cell, every scalar of the result, the XDATCAR
+  and `thermo.log` are bit-identical.  The one exception is the NVT
+  column `NL_builds`, which counts the builds of the neighbour list in
+  each process.
+- An extended run equals the longer run.
+- Different temperature, ensemble or potential hash, an absent hash,
+  and `n_steps` below the checkpoint are refused.
+
+**relax.**
+- `GeometryOptimiser.run` takes the same three arguments.
+- Every `checkpoint_every` steps it saves, before the row is logged:
+  the structure about to be logged, the steps used, the best structure
+  and the file lengths.  A restart logs that structure again as the
+  same step, with the same energy.
+- `_log_row`, `_update_best` and `_finalise` add the step offset, and
+  `run` lowers `max_steps` by it for the method loop.
+- The method headers are written only on a fresh start.
+- At the end a final checkpoint is written with the result, and with
+  the file lengths taken before the `Converged:` summary line.
+- A restart from a final checkpoint:
+  - returns the stored result, without new steps or file changes, if
+    the run converged or `max_steps` is not larger;
+  - otherwise continues from the last structure with rows appended
+    where the summary was.
+- The settings compared are:
+  - method and atoms;
+  - `relax_cell`;
+  - the convergence switches and thresholds;
+  - `save_best`;
+  - `cell_update_scheme`;
+  - the fixed degrees of freedom.
+
+`tests/test_relax_restart.py`, for all six methods:
+- the rows before the checkpoint are kept;
+- the checkpointed structure is logged again with the same energy;
+- the steps run 0..n-1 without gaps or repeats;
+- the XDATCAR has one frame per row;
+- a finished run is not redone, and raising `max_steps` continues it;
+- different settings are refused;
+- writing checkpoints does not change the path.
+
+**CLI.**
+- `md` and `relax` read `checkpoint` (default `md_checkpoint.npz` and
+  `relax_checkpoint.npz` in `output_dir`), `checkpoint_every` (default
+  1000 for md and 10 for relax) and `restart` (default true).
+- `restart: false` deletes the checkpoint.
+- The potential hash covers the potential section and every file it
+  names.
+- The templates show the keys.
+
+`tests/test_cli_restart.py` checks four things:
+- a finished md run is extended through the CLI;
+- `restart: false` starts afresh;
+- a changed LJ epsilon is refused;
+- relax continues after `max_steps` is raised.
+
+The first full-suite run had one failure.  The template-key guard
+`test_relax_template_keys_are_all_read_by_cmd_relax` looks for
+`rel_cfg.get("<key>"` in `cmd_relax.py`, and the keys were read inside
+the shared helper.  The commands now read the keys themselves and pass
+the values.
+
+Full suite after the fix: 875 passed, 1 skipped (14.5 min).
+
+**Not done here.**
+- The md classes of `gcmc` and `osmc` have no checkpoint.
+- `anneal` keeps its own `restart: true` convention.

@@ -11,6 +11,7 @@ from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..utils.mpi import _mpi_rank
 from .common import (
     _check_poscar,
+    _checkpoint_setup,
     _check_yaml,
     _fmt_time,
     _print_header,
@@ -157,7 +158,15 @@ def cmd_relax(args) -> int:
                   pppm_order=pot_cfg.get("pppm_order",6))
 
     t0 = _time.perf_counter()
-    result = GeometryOptimiser(**kw).run()
+    # Checkpoint and restart (ADR-0031): an existing checkpoint is
+    # continued (optimiser state afresh) unless `restart: false`.
+    ck_path, ck_every, ck_meta = _checkpoint_setup(
+        rel_cfg.get("checkpoint", os.path.join(output_dir, "relax_checkpoint.npz")),
+        rel_cfg.get("checkpoint_every", 10),
+        rel_cfg.get("restart", True), pot_cfg, verbose)
+    result = GeometryOptimiser(**kw).run(checkpoint=ck_path,
+                                         checkpoint_every=ck_every,
+                                         checkpoint_meta=ck_meta)
     t_relax = _time.perf_counter() - t0
 
     if not is_root:

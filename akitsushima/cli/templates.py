@@ -117,6 +117,12 @@ relax:
 
   max_steps:     2000
   skin_width:    0.5
+  # -- checkpoint and restart (ADR-0031) -----------------------------
+  checkpoint_every: 10               # steps; relax_checkpoint.npz in output_dir
+  restart:       true                # continue from an existing checkpoint
+                                     # (optimiser state starts afresh; raise
+                                     # max_steps to go on after it was reached);
+                                     # false: discard it and start afresh
 
   # Step control and method-specific knobs.  These reach
   # GeometryOptimiser but were absent from this template, so the RFO
@@ -272,7 +278,11 @@ md:
   skin_width:   0.5
   seed:         42
   timing:       true
-  verbose:      true
+  verbose:      true  # -- checkpoint and restart (ADR-0031) -------------------------------
+  checkpoint_every: 1000           # steps; md_checkpoint.npz in output_dir
+  restart:      true               # continue from an existing checkpoint
+                                   # (bit for bit; raise n_steps to extend);
+                                   # false: discard it and start afresh
 """
 
 _YAML_MD_NVE_DEFAULT = """\
@@ -313,7 +323,11 @@ md:
   skin_width:   0.5
   seed:         42
   timing:       true
-  verbose:      true
+  verbose:      true  # -- checkpoint and restart (ADR-0031) -------------------------------
+  checkpoint_every: 1000           # steps; md_checkpoint.npz in output_dir
+  restart:      true               # continue from an existing checkpoint
+                                   # (bit for bit; raise n_steps to extend);
+                                   # false: discard it and start afresh
 """
 
 _YAML_MD_NPT_DEFAULT = """\
@@ -358,7 +372,11 @@ md:
   skin_width:  0.5
   seed:        42
   timing:      true
-  verbose:     true
+  verbose:     true  # -- checkpoint and restart (ADR-0031) -------------------------------
+  checkpoint_every: 1000           # steps; md_checkpoint.npz in output_dir
+  restart:      true               # continue from an existing checkpoint
+                                   # (bit for bit; raise n_steps to extend);
+                                   # false: discard it and start afresh
 """
 
 _YAML_GCMC_DEFAULT = """\

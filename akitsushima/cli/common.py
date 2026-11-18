@@ -103,6 +103,44 @@ def _input_hash(lattice, positions, atom_types, pot_cfg: dict) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+def _potential_files(section) -> list:
+    """Every string in a potential section that names an existing file
+    (model files, tables, parameter files), at any depth."""
+    out = []
+    if isinstance(section, dict):
+        for v in section.values():
+            out += _potential_files(v)
+    elif isinstance(section, (list, tuple)):
+        for v in section:
+            out += _potential_files(v)
+    elif isinstance(section, str) and os.path.isfile(section):
+        out.append(section)
+    return out
+
+
+def _checkpoint_setup(path: str, every, restart, pot_cfg: dict, verbose: bool):
+    """(path, every, meta) for ``run(checkpoint=...)`` (ADR-0031).
+
+    The command reads ``checkpoint``, ``checkpoint_every`` and
+    ``restart`` from its own section and passes them here.  ``restart``
+    false deletes an existing checkpoint, so the run starts afresh;
+    otherwise an existing one is continued.  ``meta`` carries a hash of
+    the potential section and of the files it names, which a restart
+    must match."""
+    from ..solvers._checkpoint import potential_hash
+
+    every = int(every)
+    if restart is False and os.path.isfile(path) and _mpi_rank == 0:
+        os.remove(path)
+        if verbose:
+            print(f"  restart: false -- removed {path}; starting afresh")
+    meta = {"potential_hash": potential_hash(pot_cfg, _potential_files(pot_cfg))}
+    if verbose:
+        state = "continues from it" if os.path.isfile(path) else "none yet"
+        print(f"  Checkpoint   : {path} every {every} steps ({state})")
+    return path, every, meta
+
+
 def _cli_force_fn(pot_cfg: dict, caller: str):
     """(force_fn, r_cut) from a YAML potential section, with the Buckingham
     bridge's (buck_params, charges) resolved to a callable too, and r_cut

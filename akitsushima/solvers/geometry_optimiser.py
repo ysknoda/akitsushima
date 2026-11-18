@@ -24,6 +24,13 @@ from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
 from ..utils.mpi import _mpi_rank
+from ._checkpoint import (
+    check_settings,
+    load_checkpoint,
+    output_sizes,
+    save_checkpoint,
+    truncate_outputs,
+)
 from ..utils.timing import TimingCollector
 
 __all__ = ["GeometryOptimiser"]
@@ -394,6 +401,12 @@ class GeometryOptimiser:
         self._best_pos = None
         self._best_lat = None
         self._best_step = -1
+        # Checkpoint state (ADR-0031); set by run()
+        self._step_offset = 0
+        self._ck_path = None
+        self._ck_every = 0
+        self._ck_meta = None
+        self._ck_resume = None
         self._MAX_STEP = float(max_displacement)  # A -- overrides class default
         # The best history length is method-dependent, so a single shared
         # default cannot serve all three consumers.  Measured over three
@@ -812,7 +825,12 @@ class GeometryOptimiser:
     #  Common run entry-point                                              #
     # ------------------------------------------------------------------ #
 
-    def run(self) -> dict:
+    def run(
+        self,
+        checkpoint: str | None = None,
+        checkpoint_every: int = 0,
+        checkpoint_meta: dict | None = None,
+    ) -> dict:
         """
         Execute the geometry optimisation.
 
@@ -820,7 +838,36 @@ class GeometryOptimiser:
         -------
         dict with keys: energy, lattice, positions, atom_types, forces,
         converged, n_steps.
+
+        Checkpoint (ADR-0031)
+        ---------------------
+        ``checkpoint`` : path of an ``.npz``.  Every ``checkpoint_every``
+            steps the structure about to be logged, the steps used, the
+            best structure so far and the length of ``relax.log`` and
+            ``XDATCAR_relax`` are written there.  If the file exists when
+            the run starts, the run continues from that structure: the
+            output files are cut back to the checkpoint, the step count
+            goes on, and ``max_steps`` still bounds the total.  The
+            optimiser's own state (FIRE velocity and time step, L-BFGS
+            history, ...) starts afresh, so the continued path is not the
+            uninterrupted one.  A run that finished leaves a final
+            checkpoint: a restart then returns its result without new
+            steps, unless it stopped at ``max_steps`` and ``max_steps``
+            was raised.  Settings that differ from the checkpoint's are
+            refused.
+        ``checkpoint_meta`` : extra items that must match on a restart
+            (the CLI passes a hash of the potential).
         """
+        self._ck_path = checkpoint
+        self._ck_every = int(checkpoint_every)
+        self._ck_meta = checkpoint_meta
+        self._step_offset = 0
+        self._ck_resume = None
+        total_max = self.max_steps
+        if checkpoint and os.path.isfile(checkpoint):
+            done = self._ck_restore(checkpoint, total_max)
+            if done is not None:
+                return done
         dispatch = {
             "fire": self._run_fire,
             "lbfgs": self._run_lbfgs,
@@ -830,13 +877,138 @@ class GeometryOptimiser:
             "sd": self._run_sd,
         }
         self._tc.start("total")
-        result = dispatch[self.method]()
+        self.max_steps = total_max - self._step_offset
+        try:
+            result = dispatch[self.method]()
+        finally:
+            self.max_steps = total_max
+        if checkpoint:
+            self._ck_save_final(result)
         self._tc.stop("total")
         timing_summary = self._tc.summary()
         if timing_summary.get("enabled") and self.verbose and _mpi_rank == 0:
             self._tc.print_summary(label=f"GeometryOptimiser ({self.method.upper()})")
         result["timing"] = timing_summary
         return result
+
+    # ------------------------------------------------------------------ #
+    #  Checkpoint and restart (ADR-0031)                                   #
+    # ------------------------------------------------------------------ #
+
+    def _ck_settings(self) -> dict:
+        out = {
+            "method": self.method,
+            "n_atoms": int(self.N),
+            "atom_types": list(self.atom_types),
+            "relax_cell": bool(self.relax_cell),
+            "check_forces": bool(self.check_forces),
+            "check_stress": bool(self.check_stress),
+            "check_energy": bool(self.check_energy),
+            "fmax": float(self.fmax),
+            "pmax": float(self.pmax),
+            "emax": float(self.emax),
+            "save_best": bool(self.save_best),
+            "cell_update_scheme": str(self.cell_update_scheme),
+            "fixed_atom_dof": [int(i) for i in np.flatnonzero(self._fix_ions)],
+            "fixed_cell_dof": [int(i) for i in np.flatnonzero(self._fix_cell_mask)],
+        }
+        out.update(self._ck_meta or {})
+        return out
+
+    def _ck_paths(self) -> dict:
+        return {
+            "log": os.path.join(self.output_dir, "relax.log"),
+            "traj": os.path.join(self.output_dir, "XDATCAR_relax"),
+        }
+
+    def _ck_best(self, meta: dict, arrays: dict) -> None:
+        meta["best_e"] = float(self._best_e) if np.isfinite(self._best_e) else None
+        meta["best_step"] = int(self._best_step)
+        if self._best_pos is not None:
+            arrays["best_positions"] = self._best_pos
+            arrays["best_lattice"] = self._best_lat
+
+    def _ck_save_step(self, gstep: int, log_fh) -> None:
+        """Checkpoint before row ``gstep`` is written: a restart logs this
+        structure again as step ``gstep``."""
+        meta = {
+            "finished": False,
+            "used": int(gstep),
+            "settings": self._ck_settings(),
+            "sizes": output_sizes({"log": log_fh, "traj": self._xdatcar_fh}),
+            "frame": int(self._xdatcar_frame_idx),
+        }
+        arrays = {"positions": self.positions, "lattice": self.lattice}
+        self._ck_best(meta, arrays)
+        save_checkpoint(self._ck_path, meta, arrays)
+
+    def _ck_save_final(self, result: dict) -> None:
+        sizes = getattr(self, "_rows_end", {})
+        meta = {
+            "finished": True,
+            "used": int(result["n_steps"]),
+            "converged": bool(result["converged"]),
+            "energy": float(result["energy"]),
+            "settings": self._ck_settings(),
+            "sizes": sizes,
+            "frame": int(self._xdatcar_frame_idx),
+        }
+        arrays = {
+            "positions": self._final_pos,
+            "lattice": self._final_lat,
+            "result_positions": result["positions"],
+            "result_lattice": result["lattice"],
+            "result_forces": result["forces"],
+        }
+        self._ck_best(meta, arrays)
+        save_checkpoint(self._ck_path, meta, arrays)
+
+    def _ck_restore(self, path: str, total_max: int):
+        """Load ``path``; return the stored result if the run is complete,
+        else None after setting up the continuation."""
+        meta, arr = load_checkpoint(path)
+        check_settings(meta["settings"], self._ck_settings(),
+                       "GeometryOptimiser", path)
+        used = int(meta["used"])
+        if self.save_best and meta.get("best_e") is not None:
+            self._best_e = float(meta["best_e"])
+            self._best_step = int(meta["best_step"])
+            self._best_pos = arr["best_positions"]
+            self._best_lat = arr["best_lattice"]
+        if meta["finished"] and (meta["converged"] or total_max <= used):
+            if self.verbose and _mpi_rank == 0:
+                print(f"\n  GeometryOptimiser: {path} holds a finished run "
+                      f"({'converged' if meta['converged'] else 'max_steps reached'}"
+                      f", {used} steps); nothing to do.")
+            self.positions = arr["result_positions"]
+            self.lattice = arr["result_lattice"]
+            return {
+                "energy": float(meta["energy"]),
+                "lattice": self.lattice.copy(),
+                "positions": self.positions.copy(),
+                "atom_types": self.atom_types,
+                "forces": arr["result_forces"],
+                "converged": bool(meta["converged"]),
+                "n_steps": used,
+                "fix_atoms": self._fix_ions.reshape(self.N, 3).copy(),
+                "fix_cell": self._fix_cell_mask.reshape(3, 3).copy(),
+                "best_energy": self._best_e if self.save_best else None,
+                "best_step": self._best_step if self.save_best else None,
+                "timing": {},
+            }
+        if used >= total_max:
+            raise ValueError(
+                f"GeometryOptimiser: the checkpoint {path} has used {used} "
+                f"steps; max_steps = {total_max} leaves none.  Raise max_steps "
+                "to continue.")
+        self.positions = arr["positions"]
+        self.lattice = arr["lattice"]
+        self._step_offset = used
+        self._ck_resume = {"sizes": meta["sizes"], "frame": int(meta["frame"])}
+        if self.verbose and _mpi_rank == 0:
+            print(f"\n  GeometryOptimiser: continuing from {path} at step {used} "
+                  "(optimiser state starts afresh)")
+        return None
 
     # ------------------------------------------------------------------ #
     #  Shared logging / finalisation                                       #
@@ -886,8 +1058,12 @@ class GeometryOptimiser:
             if self._is_root
             else os.devnull
         )
-        self._xdatcar_fh = open(xdatcar_path, "w")
-        self._xdatcar_frame_idx = 1
+        resume = self._ck_resume
+        if resume is not None:
+            truncate_outputs(self._ck_paths(), resume["sizes"])
+        mode = "a" if resume is not None else "w"
+        self._xdatcar_fh = open(xdatcar_path, mode)
+        self._xdatcar_frame_idx = resume["frame"] if resume is not None else 1
         # Bug-fix note (code-check follow-up): the S9 fix wraps every
         # _run_* method's LOOP BODY in try/finally to guarantee
         # self._xdatcar_fh / log_fh get closed on an exception -- but that
@@ -901,14 +1077,14 @@ class GeometryOptimiser:
         # the remaining steps in their own try/except that closes
         # self._xdatcar_fh and re-raises on any failure.
         try:
-            if not self.relax_cell:
+            if not self.relax_cell and resume is None:
                 _write_xdatcar_header(
                     self._xdatcar_fh,
                     self.lattice,
                     self.atom_types,
                     comment=f"akitsushima.py relax [{self.method.upper()}]",
                 )
-            log_fh = open(log_path, "w")
+            log_fh = open(log_path, mode)
         except Exception:
             self._xdatcar_fh.close()
             raise
@@ -916,6 +1092,14 @@ class GeometryOptimiser:
         return log_fh, header, log_path
 
     def _log_row(self, log_fh, step, e, forces, stress, extra, GPa=EV_ANG3_TO_GPA):
+        step = step + self._step_offset
+        if (
+            self._ck_path
+            and self._ck_every
+            and step % self._ck_every == 0
+            and step != self._step_offset
+        ):
+            self._ck_save_step(step, log_fh)
         fmax_val = float(np.max(np.abs(forces)))
         pmax_val = float(np.max(np.abs(self._checked_stress(stress)))) * GPa
         row = (
@@ -1006,9 +1190,10 @@ class GeometryOptimiser:
             self._best_e = float(e)
             self._best_pos = self.positions.copy()
             self._best_lat = self.lattice.copy()
-            self._best_step = step
+            self._best_step = step + self._step_offset
 
     def _finalise(self, e, forces, stress, converged, n_steps):
+        n_steps = n_steps + self._step_offset
         status = "CONVERGED" if converged else "NOT CONVERGED (max steps reached)"
         # verbose=False silences the summary too: ElasticConstantsCalculator
         # runs 36 quiet relaxations and printed 36 of these blocks.
@@ -1021,6 +1206,7 @@ class GeometryOptimiser:
         # This is what POSCAR_relaxed will contain regardless of save_best.
         final_pos = self.positions.copy()
         final_lat = self.lattice.copy()
+        self._final_pos, self._final_lat = final_pos, final_lat
         e_final = float(e)
 
         # If save_best=True, write POSCAR_best with the lowest-energy
@@ -1108,7 +1294,8 @@ class GeometryOptimiser:
         # open for the rest of the process's lifetime. Wrapping the body
         # in try/finally guarantees they are always closed.
         try:
-            log_fh.write(header + "\n")
+            if self._ck_resume is None:
+                log_fh.write(header + "\n")
 
             dt = self._DT_START
             alpha = self._ALPHA_START
@@ -1178,6 +1365,9 @@ class GeometryOptimiser:
                 g = self._generalised_force(forces, stress)
                 v += 0.5 * dt * g
 
+            # file lengths before the summary line: a continued run
+            # (raised max_steps) appends its rows here (ADR-0031)
+            self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
             log_fh.write(f"\nConverged: {converged}\n")
         finally:
             log_fh.close()
@@ -1199,7 +1389,8 @@ class GeometryOptimiser:
         """
         log_fh, header, _ = self._open_log("||g||")
         try:
-            log_fh.write(header + "\n")
+            if self._ck_resume is None:
+                log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
             g = -self._generalised_force(forces, stress)  # gradient (grad E)
@@ -1294,6 +1485,9 @@ class GeometryOptimiser:
                 x = self._get_x()
                 e, forces, stress, g = e_new, f_new, st_new, g_new
 
+            # file lengths before the summary line: a continued run
+            # (raised max_steps) appends its rows here (ADR-0031)
+            self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
             log_fh.write(f"\nConverged: {converged}\n")
         finally:
             log_fh.close()
@@ -1337,7 +1531,8 @@ class GeometryOptimiser:
         """
         log_fh, header, _ = self._open_log("subspace")
         try:
-            log_fh.write(header + "\n")
+            if self._ck_resume is None:
+                log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
             x_buf: deque = deque(maxlen=self.memory)
@@ -1431,6 +1626,9 @@ class GeometryOptimiser:
                         e, forces, stress = self._get_forces_and_stress()
                 self._tc.lap("step")  # timing (covers trial energy evaluation)
 
+            # file lengths before the summary line: a continued run
+            # (raised max_steps) appends its rows here (ADR-0031)
+            self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
             log_fh.write(f"\nConverged: {converged}\n")
         finally:
             log_fh.close()
@@ -1458,7 +1656,8 @@ class GeometryOptimiser:
         """
         log_fh, header, _ = self._open_log("step_size")
         try:
-            log_fh.write(header + "\n")
+            if self._ck_resume is None:
+                log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
             x_buf: list[np.ndarray] = []
@@ -1553,6 +1752,9 @@ class GeometryOptimiser:
 
                 e, forces, stress = e_new, f_new, st_new
 
+            # file lengths before the summary line: a continued run
+            # (raised max_steps) appends its rows here (ADR-0031)
+            self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
             log_fh.write(f"\nConverged: {converged}\n")
         finally:
             log_fh.close()
@@ -1602,7 +1804,8 @@ class GeometryOptimiser:
         """
         log_fh, header, _ = self._open_log("trust_r")
         try:
-            log_fh.write(header + "\n")
+            if self._ck_resume is None:
+                log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
             g = -self._generalised_force(forces, stress)  # gradient grad E
@@ -1732,6 +1935,9 @@ class GeometryOptimiser:
 
                 x_prev, g_prev = x.copy(), g.copy()
 
+            # file lengths before the summary line: a continued run
+            # (raised max_steps) appends its rows here (ADR-0031)
+            self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
             log_fh.write(f"\nConverged: {converged}\n")
         finally:
             log_fh.close()
@@ -1751,7 +1957,8 @@ class GeometryOptimiser:
         """
         log_fh, header, _ = self._open_log("step_size")
         try:
-            log_fh.write(header + "\n")
+            if self._ck_resume is None:
+                log_fh.write(header + "\n")
 
             e, forces, stress = self._get_forces_and_stress()
             g = self._generalised_force(forces, stress)  # descent direction = +g
@@ -1820,6 +2027,9 @@ class GeometryOptimiser:
                 e, forces, stress = e_new, f_new, st_new
                 g = self._generalised_force(forces, stress)
 
+            # file lengths before the summary line: a continued run
+            # (raised max_steps) appends its rows here (ADR-0031)
+            self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
             log_fh.write(f"\nConverged: {converged}\n")
         finally:
             log_fh.close()

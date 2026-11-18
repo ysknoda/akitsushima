@@ -108,6 +108,11 @@
 > eta, and raises integer zeta by multiplication.  An atom-centred MLIP
 > force call is 2.1-2.8 times faster, and so is fitting.  The descriptor
 > agrees with the former kernel to 3e-16 relative.
+>
+> 0.2.0a21 (ADR-0031): `md` and `relax` write a checkpoint and continue
+> from it when run again (`restart: false` starts afresh).  md continues
+> bit for bit and can be extended by raising `n_steps`.  relax continues
+> from the checkpointed structure with the optimiser restarted.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -327,8 +332,8 @@ print(result["energy"] / 64, "eV/atom after relaxation")
 
 | Command | Purpose |
 |---|---|
-| `relax`  | Geometry optimisation (FIRE / L-BFGS / DIIS / RMM-DIIS / RFO) |
-| `md`     | Molecular dynamics (NVT / NVE / NPT) |
+| `relax`  | Geometry optimisation (FIRE / L-BFGS / DIIS / RMM-DIIS / RFO); restartable |
+| `md`     | Molecular dynamics (NVT / NVE / NPT); restartable, bit for bit |
 | `anneal` | MD-quench annealing or basin hopping; distinct minima, restartable |
 | `gcmc`   | Grand-canonical Monte Carlo MD (μVT) |
 | `neb`    | Climbing-image NEB transition-state search |
@@ -428,6 +433,22 @@ profile drift, gradient sign).  kappa depends on the length: run several
 and extrapolate 1/kappa against 1/L (example/nemd).  Long runs: launch
 detached; the checkpoint (`checkpoint_every`) lets a re-run continue bit
 for bit.
+
+`md` and `relax` write a checkpoint too (ADR-0031): `md_checkpoint.npz`
+every `checkpoint_every` steps (default 1000) and `relax_checkpoint.npz`
+(default every 10 steps) in `output_dir`.  Running the same input again
+continues from it -- resubmitting a job after its time limit is enough --
+and `restart: false` discards it and starts afresh.
+- An md run continues bit for bit: the state, the averages and the
+  random-number state are restored, and `thermo.log` and the XDATCAR
+  are cut back to the checkpoint before new lines are appended.
+  Raising `n_steps` extends a finished run.
+- relax continues from the checkpointed structure with the optimiser's
+  own state started afresh; raising `max_steps` continues a run that
+  stopped there, and a converged run is not redone.
+- A restart whose settings or potential differ from the checkpoint's
+  (the potential section and the bytes of the files it names are
+  hashed) stops with the list of differences.
 
 `kappa.decompose: {species: true, regions: {axis: c, bounds: [0, 0.5, 1]}}`
 splits the Green-Kubo tensor into kappa_g = (V/k_B T^2) int <J_g(0) J(t)>,
