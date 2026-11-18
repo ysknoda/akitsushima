@@ -88,12 +88,13 @@ def _fd_check(ff, lat, pos, types, h, tol_f, tol_s):
     np.testing.assert_allclose(F0.sum(axis=0), 0.0, atol=1e-9)
 
 
-def _fd4_check(ff, lat, pos, types, h, tol_f=1e-7, tol_s=1e-8):
+def _fd4_check(ff, lat, pos, types, h, tol_f=1e-7, tol_s=1e-8, h_strain=None):
     """Forces and stress against the fourth-order central difference
-    (8 [f(h) - f(-h)] - [f(2h) - f(-2h)]) / 12h."""
+    (8 [f(h) - f(-h)] - [f(2h) - f(-2h)]) / 12h; the strain step is
+    ``h_strain`` (default ``h``)."""
     E0, F0, S0 = ff(lat, pos, types)
 
-    def d4(fun):
+    def d4(fun, h=h):
         return (8 * (fun(h) - fun(-h)) - (fun(2 * h) - fun(-2 * h))) / (12 * h)
 
     for j in (0, 3):
@@ -114,7 +115,8 @@ def _fd4_check(ff, lat, pos, types, h, tol_f=1e-7, tol_s=1e-8):
             T[a, b] += x
             return ff(lat @ T, frac @ lat @ T, types)[0]
 
-        assert -d4(e_cell) / V == pytest.approx(S0[a, b], abs=tol_s), (a, b)
+        hs = h if h_strain is None else h_strain
+        assert -d4(e_cell, hs) / V == pytest.approx(S0[a, b], abs=tol_s), (a, b)
     np.testing.assert_allclose(
         F0.sum(axis=0), 0.0, atol=1e-9 + 1e-13 * np.abs(F0).max()
     )
@@ -123,6 +125,7 @@ def _fd4_check(ff, lat, pos, types, h, tol_f=1e-7, tol_s=1e-8):
 # ---------------------------------------------------------------- ACSF
 
 
+@pytest.mark.slow
 def test_atomic_jacobian_contraction_matches_finite_differences():
     """E = sum_i c_i . G_i with random c: forces and stress from the
     per-entry Jacobians against finite differences, on a distorted
@@ -166,6 +169,7 @@ def test_structure_table_is_the_per_atom_average_of_the_atomic_jacobian():
         (AtomicQELMModel, {"activation": "tanh"}),
     ],
 )
+@pytest.mark.slow
 def test_atomic_elm_rows_equal_its_engine_and_engine_is_conservative(cls, kw, tmp_path):
     structs = _random_structs(12, 0)
     m = cls(n_hidden=24, r0=0.1, eps0=0.01, reg=1e-6, verbose=False, **kw)
@@ -186,6 +190,7 @@ def test_atomic_elm_rows_equal_its_engine_and_engine_is_conservative(cls, kw, tm
     _fd4_check(ff, s["lattice"], s["positions"], s["atom_types"], 3e-5)
 
 
+@pytest.mark.slow
 def test_atomic_elm_recovers_a_teacher_of_its_own_form_exactly():
     """Labels from an atom-centred ELM with known output weights; a
     student with the same random layer (same seed) must recover them from
@@ -213,6 +218,7 @@ def test_atomic_elm_recovers_a_teacher_of_its_own_form_exactly():
     )
 
 
+@pytest.mark.slow
 def test_atomic_model_is_local_supercell_energy_is_extensive():
     """Locality: a 2x2x2 supercell has 8x the energy, the same forces
     per atom and the same stress."""
@@ -233,6 +239,7 @@ def test_atomic_model_is_local_supercell_energy_is_extensive():
     np.testing.assert_allclose(S8, S, atol=1e-12)
 
 
+@pytest.mark.slow
 def test_atomic_engine_is_invariant_under_rotation_translation_permutation():
     structs = _random_structs(10, 5)
     m = AtomicELMModel(n_hidden=16, verbose=False).fit(structs, _acsf())
@@ -252,6 +259,7 @@ def test_atomic_engine_is_invariant_under_rotation_translation_permutation():
     np.testing.assert_allclose(Fp, F[perm], atol=1e-10)
 
 
+@pytest.mark.slow
 def test_make_force_fn_takes_a_model_and_refuses_descriptor_fn():
     structs = _sw_si_structures(10, 0)
     m = AtomicELMModel(n_hidden=10, verbose=False).fit(structs, _si_acsf())
@@ -262,6 +270,7 @@ def test_make_force_fn_takes_a_model_and_refuses_descriptor_fn():
     assert not hasattr(__import__("akitsushima").ELMModel, "compute")
 
 
+@pytest.mark.slow
 def test_atomic_data_rows_follow_the_tabular_table():
     from akitsushima.fitting.descriptors import build_table
 
@@ -278,6 +287,7 @@ def test_atomic_data_rows_follow_the_tabular_table():
 # ---------------------------------------------------------------- CLI
 
 
+@pytest.mark.slow
 def test_cli_mlip_atom_centred_then_relax_and_md(tmp_path, monkeypatch):
     import yaml
     from test_cli_smoke import _ns
@@ -394,6 +404,7 @@ def test_cli_atom_centred_refuses_models_without_forces(tmp_path, monkeypatch, c
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
+@pytest.mark.slow
 def test_atomic_nn_rows_equal_its_engine_and_engine_is_conservative(tmp_path):
     import torch
 
@@ -435,6 +446,7 @@ def test_atomic_nn_rows_equal_its_engine_and_engine_is_conservative(tmp_path):
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
+@pytest.mark.slow
 def test_atomic_nn_learns_and_is_deterministic():
     from akitsushima.fitting.models.atomic_nn import AtomicNNModel
 

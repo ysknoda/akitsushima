@@ -284,6 +284,7 @@ def test_set_x_round_trips_only_when_the_cell_does_not_move():
     assert gaps[3] / gaps[1] == pytest.approx(100.0, rel=0.02)
 
 
+@pytest.mark.slow
 def test_rfo_variable_cell_rereads_its_state_vector_instead_of_carrying_it():
     """_run_rfo used to set ``x = x_new`` on an accepted step.
 
@@ -784,6 +785,7 @@ def test_nvt_n_dof_accounts_for_fixed_atoms():
 # NVE / NVT integration smoke tests
 # ===========================================================================
 
+@pytest.mark.slow
 def test_nve_energy_conservation():
     fn = _lj_force_fn(r_cut=3.2)
     al = randomly_perturbed(_fcc_al_supercell(), magnitude=0.05, seed=2)
@@ -807,6 +809,7 @@ def test_nve_energy_conservation():
         "over 200 steps of 0.1 fs")
 
 
+@pytest.mark.slow
 def test_nhc_thermostat_isolated_is_stable_and_bounded():
     """
     Direct unit check of the NHC half-step propagator (_nhc_step),
@@ -853,6 +856,7 @@ def test_nhc_thermostat_isolated_is_stable_and_bounded():
         f"initial transient from a cold start; got mean={T_hist.mean():.1f} K")
 
 
+@pytest.mark.slow
 def test_nvt_runs_and_moves_toward_target_temperature():
     """
     Light coupled integration smoke test: starting well below the target
@@ -924,6 +928,7 @@ def test_npt_smoke():
     assert result["positions"].shape == al["positions"].shape
 
 
+@pytest.mark.slow
 def test_npt_drives_volume_toward_target_pressure_direction():
     """Bug D regression + NPT barostat sign fix: starting from a cell
     deliberately compressed (resp. expanded) relative to the true LJ
@@ -1010,6 +1015,7 @@ def test_local_energy_of_atom_matches_pair_energy_for_dimer():
     assert u0 == pytest.approx(V_expected, rel=1e-8)
 
 
+@pytest.mark.slow
 def test_gcmc_md_short_run_smoke():
     lattice = np.eye(3) * 15.0
     rng = np.random.default_rng(0)
@@ -1138,6 +1144,7 @@ def test_neb_finds_analytic_saddle_on_synthetic_double_well(tmp_path):
     assert ts_x == pytest.approx(x0, abs=1e-2)
 
 
+@pytest.mark.slow
 def test_neb_wraps_images_back_into_the_periodic_box(tmp_path):
     """
     S20 regression: NEBOptimiser.run() never wrapped image positions back
@@ -1416,6 +1423,7 @@ def test_compute_ifc_matches_tsa_hessian_supercell_one(small_cell_ok):
         "matrix and misclassifies every stable mode as imaginary")
 
 
+@pytest.mark.slow
 def test_phonon_dispersion_has_no_imaginary_modes_for_stable_crystal():
     """
     Integration-level S2 regression: a mechanically stable LJ FCC crystal
@@ -1442,6 +1450,7 @@ def test_phonon_dispersion_has_no_imaginary_modes_for_stable_crystal():
         "the 3 acoustic branches must vanish at Gamma (D-ASR)")
 
 
+@pytest.mark.slow
 def test_debye_temperature_from_vsound_runs_without_attributeerror():
     """
     S16 regression (newly found during the port): debye_temperature_from_
@@ -1608,6 +1617,7 @@ def test_run_md_does_not_crash_with_default_equilibration():
     assert np.all(np.isfinite(result["J_series"]))
 
 
+@pytest.mark.slow
 def test_compute_kappa_block_averaging_does_not_crash(tmp_path):
     """
     S18 regression: block_size = max(n // n_blocks, n_lag) was computed
@@ -1633,6 +1643,7 @@ def test_compute_kappa_block_averaging_does_not_crash(tmp_path):
         "(finite) uncertainty estimate should be reported, not NaN")
 
 
+@pytest.mark.slow
 def test_compute_kappa_warns_and_returns_nan_std_when_too_few_blocks(tmp_path):
     """S18 edge case: when fewer than 2 full-sized blocks fit (e.g.
     n_blocks=1), compute_kappa must warn and report kappa_std as NaN
@@ -1652,6 +1663,7 @@ def test_compute_kappa_warns_and_returns_nan_std_when_too_few_blocks(tmp_path):
     assert np.all(np.isnan(tc._kappa_std))
 
 
+@pytest.mark.slow
 def test_slack_debye_runs_with_both_theta_d_methods():
     """Basic smoke test: slack_debye() must run to completion (returning a
     finite, positive kappa) with both the default DOS-cutoff Debye
@@ -1675,6 +1687,7 @@ def test_slack_debye_runs_with_both_theta_d_methods():
 # GCMC: `mu_ex` is the FULL chemical potential, not the excess
 # ===========================================================================
 
+@pytest.mark.slow
 def test_gcmc_mu_is_the_full_chemical_potential(tmp_path):
     """
     Settles what GCMCMDSimulation's chemical-potential argument actually
@@ -1752,6 +1765,7 @@ def test_gcmc_mu_is_the_full_chemical_potential(tmp_path):
             f"chemical potential")
 
 
+@pytest.mark.slow
 def test_npt_reduces_to_nve_in_the_weak_coupling_limit():
     """C1 regression: NPTSimulation had no free-flight drift.
 
@@ -1793,6 +1807,7 @@ def test_npt_reduces_to_nve_in_the_weak_coupling_limit():
         "fractional coordinates are unchanged -- the drift is missing")
 
 
+@pytest.mark.slow
 def test_nhc_conserved_quantity_is_actually_conserved():
     """H2 regression: the Nose-Hoover chain kinetic term was divided by
     EV_ANG_TO_AMU_ANG_FS2, inflating it by 1/0.0096485 = 103.6x.
@@ -1825,6 +1840,7 @@ def test_nhc_conserved_quantity_is_actually_conserved():
     assert span < 1e-3, f"H_NHC is not conserved: span {span:.4e} eV"
 
 
+@pytest.mark.slow
 def test_rfo_variable_cell_result_is_self_consistent():
     """The energy/forces a relaxation returns must belong to the
     structure it returns.
@@ -1867,6 +1883,7 @@ def test_rfo_variable_cell_result_is_self_consistent():
 
 @pytest.mark.parametrize("method",
                          ["fire", "lbfgs", "diis", "rmmdiis", "rfo", "sd"])
+@pytest.mark.slow
 def test_save_best_records_a_real_best_for_every_method(method, tmp_path):
     """H1 regression: save_best must return the lowest energy it saw.
 
@@ -2060,6 +2077,7 @@ def test_line_search_trials_are_actually_on_the_line(tmp_path):
         f"{e_after_retry:.9f} eV after a rejected trial")
 
 
+@pytest.mark.slow
 def test_npt_drift_is_measured_over_production_not_equilibration(tmp_path):
     """The reported H_NPT drift must be an integrator diagnostic.
 
@@ -2102,6 +2120,7 @@ def test_npt_drift_is_measured_over_production_not_equilibration(tmp_path):
             f"(all rates: { {k: round(v, 4) for k, v in drifts.items()} })")
 
 
+@pytest.mark.slow
 def test_gcmc_deletion_uses_the_energy_change_with_the_right_sign(tmp_path):
     """
     ADR-0003 T7 regression.  Deletion acceptance is Frenkel & Smit eq. 5.6.9,
@@ -2242,6 +2261,7 @@ def test_heat_flux_is_the_time_derivative_of_the_energy_moment():
     np.testing.assert_allclose(J, J_fd, rtol=0, atol=1e-6 * np.abs(J_fd).max())
 
 
+@pytest.mark.slow
 def test_kappa_seed_changes_the_trajectory(tmp_path):
     """ADR-0003 T9 regression: the NVT equilibration ignored `seed`, so
     every seed produced the same heat-flux series."""
@@ -2279,6 +2299,7 @@ def _aln_tersoff_wurtzite(ca, volume=None, shear=0.0):
     return fn, lat, frac @ lat, types
 
 
+@pytest.mark.slow
 def test_fix_volume_relaxes_shape_at_constant_volume(tmp_path):
     """Wurtzite AlN started 3 % off in c/a and sheared, at 97 % of its
     equilibrium volume: every method keeps the volume to 1e-12, ends with
@@ -2313,6 +2334,7 @@ def test_fix_volume_relaxes_shape_at_constant_volume(tmp_path):
         assert r["energy"] <= ref.fun + 1e-6, method
 
 
+@pytest.mark.slow
 def test_fix_volume_on_cubic_cell_matches_isotropic_scaling(tmp_path):
     """Diamond Si (Tersoff) compressed isotropically and rattled: the cell
     stays the scaled cube (fix_volume only removes deviatoric stress)."""
@@ -2350,6 +2372,7 @@ def test_fix_volume_refusals():
                           fix_volume=True)
 
 
+@pytest.mark.slow
 def test_fire_variable_cell_does_not_limit_cycle(tmp_path):
     """FIRE + relax_cell on a 63-atom GeSn vacancy cell with a fitted SW
     (tests/data/fire_gesn, from the ADR-0021 GeSn CLI test).  FIRE used to

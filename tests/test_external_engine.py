@@ -79,6 +79,7 @@ def test_efs_round_trip_and_stress_factor(tmp_path):
         read_efs_file(str(p), 6)
 
 
+@pytest.mark.slow
 def test_self_engine_matches_in_process_and_its_energy_derivatives(self_engine):
     eng, direct = self_engine
     lat, pos, types = _si()
@@ -109,6 +110,7 @@ def test_self_engine_matches_in_process_and_its_energy_derivatives(self_engine):
     assert S[0, 0] == pytest.approx(-(Ep - Em) / (2 * h) / V, abs=1e-5)
 
 
+@pytest.mark.slow
 def test_cache_hits_misses_species_and_copies(self_engine):
     eng, _ = self_engine
     lat, pos, types = _si()
@@ -124,6 +126,7 @@ def test_cache_hits_misses_species_and_copies(self_engine):
     assert eng.n_calls == 3
 
 
+@pytest.mark.slow
 def test_failures_are_errors(tmp_path):
     lat, pos, types = _si()
     bad = ExternalFileEngine(cmd="exit 3", work_dir=str(tmp_path), verbose=False)
@@ -149,6 +152,7 @@ def test_failures_are_errors(tmp_path):
         missing(lat, pos, types)
 
 
+@pytest.mark.slow
 def test_relax_through_the_external_engine_follows_in_process(self_engine, tmp_path):
     from akitsushima.solvers import GeometryOptimiser
 
@@ -207,6 +211,7 @@ def test_yaml_route_and_start_up_rules(tmp_path):
         )
 
 
+@pytest.mark.slow
 def test_relax_through_the_cli(tmp_path, monkeypatch):
     from akitsushima.cli.cmd_relax import cmd_relax
     from akitsushima.cli.templates import _DUMP_MAP
@@ -237,6 +242,7 @@ def test_relax_through_the_cli(tmp_path, monkeypatch):
 ase = pytest.importorskip("ase")
 
 
+@pytest.mark.slow
 def test_ase_emt_as_an_external_code(tmp_path):
     from ase.build import bulk
     from ase.calculators.emt import EMT

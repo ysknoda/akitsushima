@@ -169,6 +169,7 @@ def _fcc_al_supercell(n=4, a=4.05):
     return np.eye(3) * (n * a), pos
 
 
+@pytest.mark.slow
 def test_candidate_pairs_retain_skin_shell_unlike_get_pairs_arrays():
     """
     Half 2 of the stale-distance defect, at the accessor level:
@@ -204,6 +205,7 @@ def test_candidate_pairs_retain_skin_shell_unlike_get_pairs_arrays():
 
 
 @pytest.mark.parametrize("skin", [0.0, 0.5, 1.0])
+@pytest.mark.slow
 def test_potentials_see_current_geometry_not_the_last_rebuild(skin):
     """
     The decisive end-to-end invariant, and the regression test for both
@@ -263,6 +265,7 @@ def test_potentials_see_current_geometry_not_the_last_rebuild(skin):
     assert np.max(np.abs(s_nl - s_exact)) < 1e-12
 
 
+@pytest.mark.slow
 def test_real_space_coulomb_sees_current_geometry_not_the_last_rebuild():
     """Same invariant for the real-space Ewald sum, which consumed the
     same cached rij/r (PPPMSolver is the caller that passes it a
@@ -505,6 +508,7 @@ NONORTHO_CASES = [
 @pytest.mark.parametrize("name,lat_fn,n,r_cut", NONORTHO_CASES,
                           ids=[c[0] for c in NONORTHO_CASES])
 @pytest.mark.parametrize("backend", ["cll", "kdtree"])
+@pytest.mark.slow
 def test_nonorthogonal_pairs_match_bruteforce(name, lat_fn, n, r_cut, backend):
     """
     CASE (c): both back-ends must reproduce the brute-force O(N^2)
@@ -637,6 +641,7 @@ def test_default_backend_selection():
 
 @pytest.mark.parametrize("name,lat_fn,n,r_cut", NONORTHO_CASES,
                           ids=[c[0] for c in NONORTHO_CASES])
+@pytest.mark.slow
 def test_default_backend_matches_bruteforce_and_numpy_bitwise(name, lat_fn, n, r_cut):
     """The default list finds the brute-force pairs on skewed cells, and the
     compiled cell list (no fastmath) gives the NumPy version's pairs, order
@@ -659,6 +664,7 @@ def test_default_backend_matches_bruteforce_and_numpy_bitwise(name, lat_fn, n, r
 @pytest.mark.skipif(not _HAS_KDTREE, reason="scipy cKDTree not installed")
 @pytest.mark.parametrize("name,lat_fn,n,r_cut", NONORTHO_CASES,
                           ids=[c[0] for c in NONORTHO_CASES])
+@pytest.mark.slow
 def test_kdtree_and_cell_list_give_the_same_candidates(name, lat_fn, n, r_cut):
     """Both back-ends hand the potentials the same candidate pairs (as a
     set; the order differs), out to r_list including the skin."""

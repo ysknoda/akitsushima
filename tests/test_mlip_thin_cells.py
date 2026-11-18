@@ -33,6 +33,7 @@ def _thin_cell():
     return s["lattice"], s["positions"], s["atom_types"]
 
 
+@pytest.mark.slow
 def test_mlip_declares_no_neighbour_list(mlip_fn):
     assert not uses_neighbour_list(mlip_fn)
     sw = ak.make_force_fn(ak.PotentialEngine().add(
@@ -40,6 +41,7 @@ def test_mlip_declares_no_neighbour_list(mlip_fn):
     assert uses_neighbour_list(sw)
 
 
+@pytest.mark.slow
 def test_relax_with_mlip_runs_on_a_cell_thinner_than_its_cutoff(mlip_fn, tmp_path):
     lat, pos, types = _thin_cell()
     kw = dict(force_fn=mlip_fn, method="fire", relax_cell=True, fmax=0.05,
@@ -53,6 +55,7 @@ def test_relax_with_mlip_runs_on_a_cell_thinner_than_its_cutoff(mlip_fn, tmp_pat
     np.testing.assert_array_equal(a["lattice"], b["lattice"])
 
 
+@pytest.mark.slow
 def test_md_with_mlip_runs_on_a_cell_thinner_than_its_cutoff(mlip_fn, tmp_path):
     lat, pos, types = _thin_cell()
     ak.NVTSimulation(lattice=lat, positions=pos, atom_types=types, force_fn=mlip_fn,

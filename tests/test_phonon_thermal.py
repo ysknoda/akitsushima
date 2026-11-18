@@ -37,6 +37,7 @@ def si():
     return fn, pc
 
 
+@pytest.mark.slow
 def test_mesh_is_gamma_centred_for_even_meshes(si):
     _, pc = si
     f = pc.mesh_frequencies(4)
@@ -45,6 +46,7 @@ def test_mesh_is_gamma_centred_for_even_meshes(si):
     assert np.all(np.abs(f[0, :3]) < 1e-4)
 
 
+@pytest.mark.slow
 def test_thermodynamic_identities(si):
     """U = F + TS, S = -dF/dT, C_v = dU/dT (central differences), T = 0
     gives the zero-point energy, and C_v -> 3 k_B per atom at high T."""
@@ -64,6 +66,7 @@ def test_thermodynamic_identities(si):
     assert r["n_imaginary"] == 0
 
 
+@pytest.mark.slow
 def test_free_energy_is_the_mode_sum(si):
     _, pc = si
     with contextlib.redirect_stdout(io.StringIO()):
@@ -71,6 +74,7 @@ def test_free_energy_is_the_mode_sum(si):
     assert F == pc.thermal_properties([300.0], q_mesh=8)["F_eV"][0]
 
 
+@pytest.mark.slow
 def test_mode_sum_matches_phonopy_mode_functions(si):
     """Our sums against phonopy's own per-mode formulas on the same
     frequencies.  The residue is phonopy's CODATA constants (k_B, h, eV
@@ -92,6 +96,7 @@ def test_mode_sum_matches_phonopy_mode_functions(si):
         assert r["Cv_J_K_mol"][k] == pytest.approx(Cp, rel=1e-5)
 
 
+@pytest.mark.slow
 def test_thermal_properties_match_phonopy(si):
     """End to end against phonopy (its own displacements and force
     constants, same force function, same Gamma-centred mesh and cutoff)."""
@@ -132,6 +137,7 @@ def test_debye_function_and_inversion():
     assert np.isnan(_debye_theta_from_cv(0.5, 0.0))
 
 
+@pytest.mark.slow
 def test_vsound_debye_temperature_uses_the_debye_mean(si):
     """Regression (ADR-0018): v_D lacked the 1/3 of 3/v_D^3 = 1/v_L^3 +
     2/v_T^3 and theta_D came out 0.69x.  With it, the low-temperature

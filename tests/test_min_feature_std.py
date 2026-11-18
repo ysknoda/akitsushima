@@ -92,6 +92,7 @@ def test_masked_elm_rows_are_still_derivatives_of_its_energy():
     _fd_rows_match(m, lab[:16], X[:16])
 
 
+@pytest.mark.slow
 def test_atom_centred_mask_of_every_column_leaves_no_force():
     structs = _random_structs(8, 0)
     m = AtomicELMModel(

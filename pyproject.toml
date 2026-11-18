@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "akitsushima"
-version = "0.2.0a18"
+version = "0.2.0a19"
 description = "Classical force-field and machine-learning potential toolkit for atomistic simulation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -60,6 +60,6 @@ include = ["akitsushima", "akitsushima.*"]
 [tool.pytest.ini_options]
 markers = [
     "mpi: requires a working mpirun/mpiexec (deselect with '-m \"not mpi\"')",
-    "slow: longer-running MD/GCMC/fitting integration tests",
+    "slow: 0.5 s or more with or without NUMBA_DISABLE_JIT=1, or sharing a costly module fixture (ADR-0028 addendum 4); the post-edit hook runs -m 'not slow'",
 ]
 testpaths = ["tests"]

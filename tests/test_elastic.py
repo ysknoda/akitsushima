@@ -100,6 +100,7 @@ def _relaxed_lj_fcc_al():
     return fn, result["lattice"], result["positions"], al["atom_types"]
 
 
+@pytest.mark.slow
 def test_cauchy_relation_c12_equals_c44_for_pairwise_potential_cubic_lattice():
     """For any purely pairwise (central-force) potential in a cubic
     crystal with a centrosymmetric lattice site (FCC qualifies), the
@@ -123,6 +124,7 @@ def test_cauchy_relation_c12_equals_c44_for_pairwise_potential_cubic_lattice():
     assert C[1, 1] == pytest.approx(C[2, 2], rel=1e-2)
 
 
+@pytest.mark.slow
 def test_bulk_modulus_is_positive_for_stable_equilibrium_crystal():
     """Sign regression: a genuinely relaxed (near-zero-stress) crystal
     must have a POSITIVE bulk modulus (basic mechanical-stability
@@ -258,6 +260,7 @@ def si_elastic():
     return fn, lat, pos, types, frac, res
 
 
+@pytest.mark.slow
 def test_tersoff_si_reproduces_published_constants(si_elastic):
     """Tersoff (1988) quotes for Si(C): C11 142.5, C12 75.4, C44 69,
     unrelaxed C44^0 118.8 GPa and Kleinman zeta 0.67 (UNCERTAIN ~85 %:
@@ -281,6 +284,7 @@ def test_tersoff_si_reproduces_published_constants(si_elastic):
     assert np.all(res["fit_rms_GPa"]["relaxed"] < 0.05)
 
 
+@pytest.mark.slow
 def test_clamped_tensor_matches_ase_tersoff(si_elastic):
     """Oracle: ASE's own Tersoff implementation (independent engine and
     stress code; ASE stress is tensile-positive, so C = +d sigma / d eta)."""
@@ -313,6 +317,7 @@ def test_clamped_tensor_matches_ase_tersoff(si_elastic):
     assert np.max(np.abs(res["C_clamped"] - ours["C_clamped"])) < 0.05
 
 
+@pytest.mark.slow
 def test_internal_strain_and_relaxed_tensor_match_force_constants(si_elastic):
     """ADR-0017 decision 5: du/deta = Phi^+ Lambda and
     C = C^0 - Lambda^T Phi^+ Lambda / V, with Lambda_{ia,j} = dF_ia/deta_j
@@ -368,6 +373,7 @@ def test_elastic_moduli_isotropic_identities():
 
 
 @pytest.mark.parametrize("name", ["cubic", "hexagonal", "triclinic"])
+@pytest.mark.slow
 def test_elastic_moduli_match_pymatgen(name):
     """Oracle: pymatgen's ElasticTensor (Voigt C in GPa)."""
     pytest.importorskip("pymatgen")
@@ -439,6 +445,7 @@ def test_born_stability_flags_negative_shear():
     assert not elastic_moduli(C)["born_stable"]
 
 
+@pytest.mark.slow
 def test_single_amplitude_is_central_difference():
     """strains=(d,) and delta=d are the same thing; both not allowed."""
     fn, lat, pos, types, _ = _diamond_si_tersoff()
@@ -482,6 +489,7 @@ def test_refuses_esm_and_zero_stress():
                                    relax_ions=False).compute()
 
 
+@pytest.mark.slow
 def test_cli_elastic_writes_results_json(tmp_path, monkeypatch):
     """`akitsushima elastic` from the shipped template on a jittered 64-atom
     Si cell: pre-relaxation recovers the reference, and the JSON carries

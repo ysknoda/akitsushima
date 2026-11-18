@@ -228,6 +228,7 @@ def test_loss_huber_tempers_outlier_structure_relative_to_squared(small_cell_ok)
         "reproduce plain squared-error loss (the r <= delta branch only)")
 
 
+@pytest.mark.slow
 def test_fit_potential_reduces_loss_from_bad_initial_guess(tmp_path, small_cell_ok):
     al = fcc_al_dict()
     structs_raw = _perturbed_set(al)
@@ -840,6 +841,7 @@ def test_structure_grouped_split_refuses_to_split_a_single_structure():
     "akitsushima.fitting.models.elm",
     "akitsushima.fitting.models.nn",
 ])
+@pytest.mark.slow
 def test_every_model_routes_its_split_through_the_grouped_helper(
         model_module, tmp_path, monkeypatch):
     """
@@ -1161,6 +1163,7 @@ def test_registry_refuses_a_flat_sw_set_for_multi_species_data():
     assert type(ps).__name__ == "MultiSpeciesStillingerWeberParameterSet"
 
 
+@pytest.mark.slow
 def test_multi_species_sw_fit_recovers_perturbed_parameters():
     """Parameter recovery end to end through fit_potential, restricted to
     parameters the data can actually identify: the two-body A and B of
@@ -1328,6 +1331,7 @@ def test_fit_potential_rejects_a_bad_local_method_before_any_loss_evaluation():
 
 
 @pytest.mark.parametrize("method", ["TNC", "SLSQP", "Nelder-Mead", "COBYQA"])
+@pytest.mark.slow
 def test_fit_potential_runs_with_non_default_local_methods(tmp_path, method, small_cell_ok):
     """Non-default methods through the real fit loop on the LJ problem
     used above: each must drive the loss down by three orders.  (Powell,

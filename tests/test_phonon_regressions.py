@@ -152,6 +152,7 @@ def aln():
     return _aln_calc()
 
 
+@pytest.mark.slow
 def test_interpolated_frequencies_do_not_depend_on_supercell(si4):
     """P1: Tersoff Si force constants reach well inside a 4x4x4 supercell,
     so a correct Fourier interpolation gives the same D(q) from 4x4x4 and
@@ -176,6 +177,7 @@ def test_band_structure_uses_the_complex_dynamical_matrix(si4):
     )
 
 
+@pytest.mark.slow
 def test_free_energy_matches_a_direct_mode_sum(si4):
     """P3: F_vib from the smeared DOS must equal the Bose-Einstein mode sum
     over the same q-mesh; the old THz/cm^-1 mix-up made it ~35x too big."""
@@ -217,6 +219,7 @@ def test_debye_velocities_are_physical_and_distinguish_l_from_t(si4):
     assert 200 < theta < 1000
 
 
+@pytest.mark.slow
 def test_hexagonal_path_points_are_the_reduced_points(aln):
     """P5: M = (1/2, 0, 0) on a hexagonal lattice must be q_red @ B (rows of
     B are the reciprocal vectors), not B @ q_red."""
@@ -228,6 +231,7 @@ def test_hexagonal_path_points_are_the_reduced_points(aln):
     np.testing.assert_allclose(res["frequencies"][-1], _freqs(aln, q_m), atol=1e-6)
 
 
+@pytest.mark.slow
 def test_asr_correction_leaves_optical_modes_alone_for_unequal_masses(aln):
     """P6: the IFC already satisfies the sum rule, so the Gamma correction
     must not move the AlN optical modes (the unweighted version shifted
@@ -236,6 +240,7 @@ def test_asr_correction_leaves_optical_modes_alone_for_unequal_masses(aln):
     np.testing.assert_allclose(_freqs(aln, np.zeros(3))[3:], raw[3:], atol=0.05)
 
 
+@pytest.mark.slow
 def test_matches_phonopy_at_general_q(aln):
     """The oracle itself, when phonopy is installed: every AlN frequency at
     a general (non-commensurate, complex-D) q within 0.01 THz."""

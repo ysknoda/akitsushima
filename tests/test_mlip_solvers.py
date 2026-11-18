@@ -68,6 +68,7 @@ def _cfg(cmd, model, structure, section):
     return cfg
 
 
+@pytest.mark.slow
 def test_neb_and_tsa_run_on_an_mlip(models, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     lat, pos = _diamond(2)
@@ -95,6 +96,7 @@ def test_neb_and_tsa_run_on_an_mlip(models, tmp_path, monkeypatch):
     assert _run(tmp_path, "tsa", cfg) == 0
 
 
+@pytest.mark.slow
 def test_neb_runs_on_a_tabular_mlip(models, tmp_path, monkeypatch):
     """neb, tsa and phonon need only E and F: a tabular model is fine."""
     monkeypatch.chdir(tmp_path)
@@ -113,6 +115,7 @@ def test_neb_runs_on_a_tabular_mlip(models, tmp_path, monkeypatch):
     assert _run(tmp_path, "neb", cfg) == 0
 
 
+@pytest.mark.slow
 def test_phonon_runs_on_an_mlip(models, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     lat, pos = _diamond(1)
@@ -136,6 +139,7 @@ def test_phonon_runs_on_an_mlip(models, tmp_path, monkeypatch):
     assert _run(tmp_path, "phonon", cfg) == 0
 
 
+@pytest.mark.slow
 def test_kappa_runs_on_an_atom_centred_mlip_without_the_fallback(
     models, tmp_path, monkeypatch, recwarn
 ):
@@ -200,6 +204,7 @@ def _gcmc_cfg(model, cmd="gcmc", species="Si"):
     return cfg
 
 
+@pytest.mark.slow
 def test_gcmc_runs_on_an_atom_centred_mlip(models, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     lat, pos = _diamond(2)
@@ -219,6 +224,7 @@ def test_gcmc_refuses_a_tabular_mlip_and_untrained_elements(
         _run(tmp_path, "gcmc", _gcmc_cfg(models["atomic"], species="Ge"))
 
 
+@pytest.mark.slow
 def test_osmc_takes_an_atom_centred_mlip_not_a_tabular_one(
     models, tmp_path, monkeypatch
 ):

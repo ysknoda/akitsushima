@@ -53,6 +53,7 @@ def _cells():
 
 
 @pytest.mark.parametrize("r_cut", [3.1, 5.0, 7.3])
+@pytest.mark.slow
 def test_cell_list_equals_dense_search_bitwise(r_cut):
     for L, P in _cells():
         ref = _dense_neighbours(L, P, r_cut)
@@ -61,6 +62,7 @@ def test_cell_list_equals_dense_search_bitwise(r_cut):
             assert np.array_equal(a, b)
 
 
+@pytest.mark.slow
 def test_replicated_cell_gives_the_same_descriptors():
     L, P = list(_cells())[1]
     d = acsf.ACSF.from_grid(["Ge", "Sn"], 5.0, g2={"eta": [4.0], "rs": [2.4, 3.8]},
@@ -74,6 +76,7 @@ def test_replicated_cell_gives_the_same_descriptors():
         np.testing.assert_allclose(G2[r * len(P):(r + 1) * len(P)], G1, rtol=0, atol=1e-12)
 
 
+@pytest.mark.slow
 def test_large_cell_is_linear():
     """3456 atoms: the dense search needed ~8 GB here; the cell list ~MB."""
     L, P = list(_cells())[1]

@@ -85,6 +85,7 @@ def _rocksalt_mgo(n):
     return lat, pos, ["Mg"] * (len(pos) // 2) + ["O"] * (len(pos) // 2)
 
 
+@pytest.mark.slow
 def test_rdf_example():
     lat, pos = _fcc(A_AR, 5)
     ns = _run(_examples("solvers.rdf", "RadialDistributionFunction"), {})  # self-contained
@@ -106,6 +107,7 @@ def test_poscar_example(in_tmp):
     np.testing.assert_allclose(back["positions"], pos, atol=1e-8)
 
 
+@pytest.mark.slow
 def test_save_and_load_potential_lj_examples(in_tmp):
     lat, pos = _fcc(A_AR, 5)  # 26.3 A > 2 * (10 + 0.5)
     types = ["Ar"] * len(pos)
@@ -154,12 +156,14 @@ def si_mlip(in_tmp):
     return in_tmp
 
 
+@pytest.mark.slow
 def test_make_force_fn_mlip_example(si_mlip):
     ns = _run([e for e in _examples("fitting.force_fn", "make_force_fn")
                if "load_mlip_model" in e], _ns())
     assert callable(ns["fn"])
 
 
+@pytest.mark.slow
 def test_qelm_and_elm_fit_csv_examples(si_mlip):
     _run(_examples("fitting.models.quantized_elm", "QuantizedELMModel"), _ns(),
          subs=[("n_hidden=512", "n_hidden=16")])
@@ -167,6 +171,7 @@ def test_qelm_and_elm_fit_csv_examples(si_mlip):
          _ns(model=ak.ELMModel(n_hidden=16)))
 
 
+@pytest.mark.slow
 def test_phonon_example(in_tmp):
     # r_cut 5 A so that the 3x3x3 supercell of the 4-atom cell (15.8 A)
     # clears the minimum-image bound 2 * (5 + 0.5) A.
@@ -178,6 +183,7 @@ def test_phonon_example(in_tmp):
     assert ns["bands"] is not None
 
 
+@pytest.mark.slow
 def test_neb_and_tsa_examples():
     """Vacancy hop in fcc Ar: NEB, then the TSA example on its saddle."""
     lat, pos = _fcc(A_AR, 3)
@@ -198,6 +204,7 @@ def test_neb_and_tsa_examples():
          subs=[("run_irc()", "run_irc(max_steps=20)")])
 
 
+@pytest.mark.slow
 def test_gcmc_example(in_tmp):
     n = 20
     pos = np.random.default_rng(1).uniform(0.0, 24.0, (n, 3))
@@ -207,6 +214,7 @@ def test_gcmc_example(in_tmp):
     assert np.isfinite(ns["result"]["N_mean"])
 
 
+@pytest.mark.slow
 def test_diffusion_example():
     lat, pos = _fcc(A_AR, 5)
     fn = ak.make_force_fn(ak.PotentialEngine().add(
@@ -218,6 +226,7 @@ def test_diffusion_example():
                ("equil_steps=2000", "equil_steps=10")])
 
 
+@pytest.mark.slow
 def test_esm_example():
     # NaCl slab centred on z = 0: ESM's boundaries sit at z = +/- Lz/2.
     a = 5.64

@@ -185,6 +185,7 @@ def _pppm_solver(lattice, r_cut=2.7, mesh=64, order=8):
     return PPPMSolver(lattice, alpha=alpha, mesh=mesh, order=order, r_cut=r_cut)
 
 
+@pytest.mark.slow
 def test_pppm_force_matches_finite_difference():
     struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
     charges = _charges_array(struct)
@@ -202,6 +203,7 @@ def test_pppm_force_matches_finite_difference():
     assert_translationally_invariant(f_analytic, atol=1e-6)
 
 
+@pytest.mark.slow
 def test_pppm_stress_matches_finite_difference():
     struct = randomly_perturbed(rocksalt_nacl_dict(), magnitude=0.08, seed=7)
     charges = _charges_array(struct)
@@ -298,6 +300,7 @@ def _esm_test_structure():
 
 
 @pytest.mark.parametrize("bc", ["bc1", "bc2", "bc3"])
+@pytest.mark.slow
 def test_esm_force_matches_finite_difference(bc):
     from akitsushima.engine.coulomb.esm import ESMCalculator
 
@@ -355,6 +358,7 @@ def test_esm_charge_density_recovers_atom_position():
     assert abs(peak_x - (Lx - rx)) > Lx / 4
 
 
+@pytest.mark.slow
 def test_esm_gpar0_poisson_solve_converges_quadratically():
     """Direct regression test for the cumsum -> trapezoidal fix: the
     G||=0 z-force residual (vs. finite difference) must shrink roughly by
@@ -612,6 +616,7 @@ def test_pair_potential_numba_matches_numpy():
 # Stillinger-Weber
 # ===========================================================================
 
+@pytest.mark.slow
 def test_sw_force_stress_match_finite_difference():
     from akitsushima.engine import StillingerWeberPotential
 
@@ -648,6 +653,7 @@ def test_sw_numba_matches_numpy():
     assert np.allclose(s0, s1, atol=1e-6)
 
 
+@pytest.mark.slow
 def test_sw_multi_species_path():
     """Exercise the nested-triple multi-species parameter format (not just
     the legacy flat single-species default)."""
@@ -771,6 +777,7 @@ def test_sw_flat_format_gamma_reaches_the_three_body_exponent():
     assert energy(distorted, 1.20, blind=True) == pytest.approx(e_lo, abs=1e-10)
 
 
+@pytest.mark.slow
 def test_sw_flat_format_forces_match_finite_difference_at_nonunit_gamma():
     """Forces and stress must be derivatives of the SAME energy gamma
     enters.  Threading a parameter into an energy expression but not
@@ -801,6 +808,7 @@ def test_sw_flat_format_forces_match_finite_difference_at_nonunit_gamma():
 
 
 @pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+@pytest.mark.slow
 def test_sw_multi_species_numba_matches_numpy():
     """Phase 5: the multi-species (nested-triple) path gained its own JIT
     kernel, table-driven off dense per-species-id arrays resolved from
@@ -878,6 +886,7 @@ _TERSOFF_SI_PARAMS = dict(
 )
 
 
+@pytest.mark.slow
 def test_tersoff_force_stress_match_finite_difference():
     from akitsushima.engine import TersoffPotential
 
@@ -913,6 +922,7 @@ def test_tersoff_numba_matches_numpy():
     assert np.allclose(s0, s1, atol=5e-3)
 
 
+@pytest.mark.slow
 def test_tersoff_multi_species_path():
     """Exercise the nested-triple multi-species parameter format."""
     from akitsushima.engine import TersoffPotential
@@ -933,6 +943,7 @@ def test_tersoff_multi_species_path():
 
 
 @pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+@pytest.mark.slow
 def test_tersoff_multi_species_numba_matches_numpy():
     """Phase 5: the multi-species path gained its own JIT kernels
     (_te_multi_zeta_jit / _te_multi_pass3_jit), table-driven off dense
@@ -987,6 +998,7 @@ def test_tersoff_multi_species_numba_matches_numpy():
 # EAM
 # ===========================================================================
 
+@pytest.mark.slow
 def test_eam_force_stress_match_finite_difference():
     from akitsushima.engine import EAMPotential
 
@@ -1254,6 +1266,7 @@ def _energy_volume_minimum(pot, a_grid, species, r_cut):
     return a_min, out[a_min]
 
 
+@pytest.mark.slow
 def test_tersoff_t3_silicon_reproduces_published_cohesive_energy():
     """Tersoff T3 silicon was fit to two measured numbers, which any
     correct implementation of the T3 parameter set must return:
@@ -1286,6 +1299,7 @@ def test_tersoff_t3_silicon_reproduces_published_cohesive_energy():
         f"already carries the 1/2, so the pair prefactor is 1")
 
 
+@pytest.mark.slow
 def test_sw_silicon_reproduces_published_cohesive_energy():
     """The original Stillinger-Weber silicon parameter set is constructed
     so that the diamond structure sits at
@@ -1334,6 +1348,7 @@ def _rocksalt_charges(a: float, n):
     return lattice, frac @ lattice, np.array(q)
 
 
+@pytest.mark.slow
 def test_ewald_energy_per_atom_is_supercell_invariant():
     """One infinite crystal, several supercells -- one energy per atom.
 
@@ -1422,6 +1437,7 @@ def test_ewald_points_at_pppm_instead_of_silently_truncating():
     assert np.isfinite(e)
 
 
+@pytest.mark.slow
 def test_pppm_accuracy_knob_actually_buys_accuracy():
     """Asking PPPM for more accuracy must not deliver less.
 
@@ -1700,6 +1716,7 @@ def test_tersoff_zeta_term_gradient_is_analytic(m, gam, dr):
         assert abs(g[n] - _fd4(z, v0[n], 1e-4)) < 1e-9, (n, g[n])
 
 
+@pytest.mark.slow
 def test_tersoff_two_species_forces_stress_are_exact_derivatives():
     """ADR-0015: with the analytic zeta gradient the two-species Tersoff
     forces and stress equal fourth-order differences of the energy to 2e-9

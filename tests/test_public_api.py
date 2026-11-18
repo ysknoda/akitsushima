@@ -193,6 +193,7 @@ def test_top_level_symbol_is_exported(name):
     assert name in akitsushima.__all__
 
 
+@pytest.mark.slow
 def test_nn_is_lazy_at_top_level(tmp_path):
     """F15 regression, verified at the top-level package too: importing
     akitsushima, or touching any of its other classes, must not import
@@ -318,6 +319,7 @@ def test_missing_torch_message_names_the_extra(monkeypatch, module, build):
 
 @pytest.mark.skipif(not os.path.isfile(_README),
                     reason="README.md not shipped (installed package)")
+@pytest.mark.slow
 def test_readme_mlip_example_runs(tmp_path, monkeypatch):
     """ADR-0024 Q25: the README's machine-learning-potential example, run as
     written.  Its relaxed energy must sit near the minimum of the
@@ -339,6 +341,7 @@ def test_readme_mlip_example_runs(tmp_path, monkeypatch):
     assert isinstance(ns["model"], ak.AtomicELMModel)
 
 
+@pytest.mark.slow
 def test_import_without_matplotlib_does_not_warn(tmp_path):
     """ADR-0024 O1: without matplotlib every `import akitsushima` warned,
     plot or no plot; now only a requested plot does."""

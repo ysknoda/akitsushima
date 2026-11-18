@@ -112,6 +112,7 @@ def test_baseline_forces_and_stress_are_derivatives_of_its_energy():
     np.testing.assert_allclose(t["ref_stress"], np.eye(3) - S)
 
 
+@pytest.mark.slow
 def test_engine_adds_the_baseline_atom_centred_and_tabular(tmp_path):
     structs = _random_structs(10, 0)
     base = PairBaseline(["Ge", "Sn", "Si"], [ZBL, BM])
@@ -184,6 +185,7 @@ def _isolated(species, box=30.0):
 
 
 @pytest.mark.parametrize("cls", [AtomicELMModel, AtomicQELMModel])
+@pytest.mark.slow
 def test_atomic_elm_obeys_the_isolated_atom_limit_exactly(cls, tmp_path):
     structs = _random_structs(12, 0)
     m = cls(n_hidden=24, r0=0.1, eps0=0.01, reg_search=[1e-6, 1e-3], verbose=False)
@@ -206,6 +208,7 @@ def test_atomic_elm_obeys_the_isolated_atom_limit_exactly(cls, tmp_path):
     assert np.abs(e_u - [ISO[s] for s in u.species]).max() > 1e-3
 
 
+@pytest.mark.slow
 def test_tabular_elm_isolated_atom_limit_one_species_only():
     si = _sw_si_structures(12, 0)
     y, lab, w, X = build_table(si, _si_acsf(), r0=0.1, eps0=0.01)
@@ -235,6 +238,7 @@ def test_tabular_elm_isolated_atom_limit_one_species_only():
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
+@pytest.mark.slow
 def test_atomic_nn_obeys_the_isolated_atom_limit(tmp_path):
     import torch
 
@@ -267,6 +271,7 @@ def test_atomic_nn_obeys_the_isolated_atom_limit(tmp_path):
 # ---------------------------------------------------------------- CLI
 
 
+@pytest.mark.slow
 def test_cli_mlip_with_baseline_and_isolated_atom(tmp_path, monkeypatch):
     import yaml
     from test_cli_smoke import _ns
@@ -329,6 +334,7 @@ def _inner_acsf(inner=(2.0, 2.8)):
     )
 
 
+@pytest.mark.slow
 def test_acsf_inner_cutoff_derivatives_and_invisibility():
     from test_mlip_chain_rule import _distorted_cell
 
@@ -361,6 +367,7 @@ def test_acsf_inner_cutoff_derivatives_and_invisibility():
         _inner_acsf((2.8, 2.0))
 
 
+@pytest.mark.slow
 def test_inner_cutoff_with_baseline_engine_is_conservative(tmp_path):
     """Atom-centred ELM on an inner-cutoff descriptor plus a baseline that
     covers the blind range: engine forces / stress are derivatives of
@@ -436,6 +443,7 @@ def _sw_pushed(structs, rs):
 
 
 @pytest.mark.parametrize("form,r_outer", [("atom_centred", 2.0), ("tabular", 2.3)])
+@pytest.mark.slow
 def test_cli_fits_born_mayer_to_short_range_data(form, r_outer, tmp_path, monkeypatch):
     import yaml
     from test_cli_smoke import _ns

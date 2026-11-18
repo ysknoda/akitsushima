@@ -44,11 +44,13 @@ already imported before akitsushima (by the caller), the ``workqueue``
 layer is selected instead, which loads no OpenMP runtime.  An explicit
 ``NUMBA_THREADING_LAYER`` is always respected.
 """
+
 import os
 import sys
 
 try:
     import numba as _numba
+
     _HAS_NUMBA = True
 except ImportError:
     _numba = None
@@ -68,6 +70,7 @@ if _HAS_NUMBA:
     _numba_njit = _numba.njit(cache=True, fastmath=True)
     _numba_par = _numba.njit(cache=True, fastmath=True, parallel=True)
 else:
+
     def _numba_njit(fn):
         """Identity decorator used when numba is unavailable."""
         return fn
@@ -76,6 +79,7 @@ else:
 
 
 if _HAS_NUMBA:
+
     @_numba.njit(cache=True, parallel=True)
     def _warm_threading_layer(n):
         s = 0
@@ -94,6 +98,11 @@ def _start_threading_layer() -> None:
         _numba.config.THREADING_LAYER = "workqueue"
     try:
         _warm_threading_layer(2)
+        # With NUMBA_DISABLE_JIT=1 the call above is plain Python and
+        # launches nothing, while numba.get_thread_id() inside the kernels
+        # still launches the layer -- after torch, and so aborts.
+        # get_num_threads() launches it in both modes.
+        _numba.get_num_threads()
     except Exception:  # pragma: no cover - leave the error to the first real kernel
         pass
 

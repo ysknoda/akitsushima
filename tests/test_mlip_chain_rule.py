@@ -152,6 +152,7 @@ def test_elm_activation_derivatives_match_finite_differences():
         assert np.allclose(m._dact(z)[ok], fd[ok], atol=1e-6), name
 
 
+@pytest.mark.slow
 def test_elm_learns_chain_consistent_data_and_direct_equals_lsqr():
     y, lab, w, X = _chain_table(n_struct=150)
     kw = dict(n_hidden=150, reg=1e-8, verbose=False, w_forces=1.0, w_stress=1.0)
@@ -370,6 +371,7 @@ def test_acsf_species_follow_atomic_number():
     assert _acsf().species == ["Si", "Ge", "Sn"]
 
 
+@pytest.mark.slow
 def test_acsf_derivatives_match_finite_differences():
     """Cell (~5 A) smaller than 2 r_c: several periodic images of each
     neighbour enter.  Positions and all nine cell components."""
@@ -495,6 +497,7 @@ def _sw_si_structures(n, seed):
 
 
 @pytest.mark.parametrize("kind", ["elm", "linear", "nn"])
+@pytest.mark.slow
 def test_mlip_engine_forces_and_stress_are_derivatives_of_its_energy(kind, tmp_path):
     if kind == "nn" and not HAS_TORCH:
         pytest.skip("torch not installed")
@@ -578,6 +581,7 @@ def _write_layout_b(root, structs):
 
 
 @pytest.mark.parametrize("model", ["elm", "linear"])
+@pytest.mark.slow
 def test_cli_mlip_with_acsf_then_relax_and_md_on_the_model(model, tmp_path,
                                                            monkeypatch):
     import yaml
@@ -780,6 +784,7 @@ def test_model_defaults_follow_the_adr_0004_follow_up():
         assert m.early_stopping_patience == 150 and m.epochs == 1500
 
 
+@pytest.mark.slow
 def test_nn_batch_structures_and_lbfgs_train_and_stay_consistent():
     """batch_structures and the full-batch L-BFGS optimiser run, keep the
     F rows derivatives of the energy, and L-BFGS is reproducible."""
@@ -814,6 +819,7 @@ def test_nn_batch_structures_and_lbfgs_train_and_stay_consistent():
 
 
 @pytest.mark.parametrize("model", ["elm", "linear"])
+@pytest.mark.slow
 def test_written_descriptor_tables_retrain_to_the_same_model(model, tmp_path,
                                                             monkeypatch):
     """write_table round trip (ADR-0021 plan, F2): the training and test

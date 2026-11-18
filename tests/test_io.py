@@ -195,6 +195,7 @@ def test_efs_read_applies_the_vasp_kb_unit_factor():
         os.remove(path)
 
 
+@pytest.mark.slow
 def test_vasp_kb_sign_matches_ases_production_reader():
     """VASP_KB_TO_EV_ANG3 must turn a raw OUTCAR "in kB" line into THIS
     engine's stress convention -- checked end to end against ASE, which

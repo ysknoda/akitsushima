@@ -63,6 +63,7 @@ def _sw_fn():
     return ak.make_force_fn(eng)
 
 
+@pytest.mark.slow
 def test_relax_api_matches_cli(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     lat, pos, types = _si64(3)
@@ -83,6 +84,7 @@ def test_relax_api_matches_cli(tmp_path, monkeypatch):
         (tmp_path / "cli_out" / "POSCAR_relaxed").read_text()
 
 
+@pytest.mark.slow
 def test_nvt_md_api_matches_cli(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     lat, pos, types = _si64(4)
@@ -107,6 +109,7 @@ def test_nvt_md_api_matches_cli(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("form", ["tabular", "atom_centred"])
+@pytest.mark.slow
 def test_mlip_elm_api_matches_cli(form, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     structs = _sw_si_structures(16, 1)
@@ -200,6 +203,7 @@ def _cli_mlip(tmp_path, form, extra):
 
 
 @pytest.mark.parametrize("form", ["tabular", "atom_centred"])
+@pytest.mark.slow
 def test_mlip_with_baseline_api_matches_cli(form, tmp_path, monkeypatch):
     from akitsushima.fitting.physics import PairBaseline
     from akitsushima.io import load_training_set
@@ -219,6 +223,7 @@ def test_mlip_with_baseline_api_matches_cli(form, tmp_path, monkeypatch):
         np.testing.assert_array_equal(a, b)
 
 
+@pytest.mark.slow
 def test_fit_with_descriptor_makes_a_force_field(tmp_path, monkeypatch):
     """G3: the tabular model needed descriptor_config set by hand."""
     monkeypatch.chdir(tmp_path)
@@ -242,6 +247,7 @@ def test_physics_arguments_write_the_cli_physics_config():
 
 
 @pytest.mark.parametrize("form", ["tabular", "atom_centred"])
+@pytest.mark.slow
 def test_baseline_is_subtracted_exactly_once(form):
     """Independent of the CLI: trained on raw labels with baseline=, the
     model must equal a baseline-free model trained on labels minus the
@@ -288,6 +294,7 @@ def test_build_training_set_api_matches_cli_dataset(tmp_path):
     assert len(load_training_set(str(tmp_path / "api" / "train" / "structures.csv"))) == res["n_train"]
 
 
+@pytest.mark.slow
 def test_force_fn_from_config_reproduces_cli_relax(tmp_path, monkeypatch):
     """ADR-0024 Q24 (G5): the YAML potential bridge is public."""
     monkeypatch.chdir(tmp_path)
@@ -307,6 +314,7 @@ def test_force_fn_from_config_reproduces_cli_relax(tmp_path, monkeypatch):
         (tmp_path / "cli_out" / "POSCAR_relaxed").read_text()
 
 
+@pytest.mark.slow
 def test_score_table_prints_energy_in_ev_per_atom(capsys):
     """ADR-0024 O8: the E rows are eV/atom; the table said eV."""
     desc = ACSF.from_grid(["Si"], DESC["r_cut"], DESC["g2"], DESC["g4"])

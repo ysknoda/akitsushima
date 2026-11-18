@@ -246,6 +246,7 @@ def _flux_check(fn, lat, pos, types, masses, rng):
 
 
 @pytest.mark.parametrize("kind", ["sw", "sw_gesn", "tersoff_xy", "eam"])
+@pytest.mark.slow
 def test_many_body_heat_flux_is_the_time_derivative_of_the_energy_moment(kind):
     if kind in ("sw", "sw_gesn"):
         lat, pos, rng = _cluster(2, 5.43 if kind == "sw" else 5.9, "d", 0)
@@ -278,6 +279,7 @@ def test_many_body_heat_flux_is_the_time_derivative_of_the_energy_moment(kind):
     assert np.abs(J_old - J_fd).max() > 1e-2 * scale
 
 
+@pytest.mark.slow
 def test_atom_centred_mlip_heat_flux_is_the_time_derivative():
     from test_mlip_atom_centred import _si_acsf
     from test_mlip_chain_rule import _sw_si_structures
@@ -295,6 +297,7 @@ def test_atom_centred_mlip_heat_flux_is_the_time_derivative():
     np.testing.assert_allclose(J, J_fd, rtol=0, atol=1e-5 * np.abs(J_fd).max())
 
 
+@pytest.mark.slow
 def test_tabular_mlip_has_no_site_terms():
     from test_mlip_atom_centred import _si_acsf
     from test_mlip_chain_rule import _sw_si_structures

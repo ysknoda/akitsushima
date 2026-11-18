@@ -257,6 +257,7 @@ def test_cmd_md_smoke(tmp_path):
     assert cmd_md(_ns(yaml_path)) == 0
 
 
+@pytest.mark.slow
 def test_cmd_gcmc_smoke(tmp_path):
     rng = np.random.default_rng(0)
     positions = rng.uniform(0, 15.0, size=(6, 3))
@@ -277,6 +278,7 @@ def test_cmd_gcmc_smoke(tmp_path):
     assert cmd_gcmc(_ns(yaml_path)) == 0
 
 
+@pytest.mark.slow
 def test_cmd_gcmc_smoke_accepts_deprecated_mu_ex_yaml_key(tmp_path):
     """
     Backward compatibility for config files predating the `mu_ex` -> `mu`
@@ -305,6 +307,7 @@ def test_cmd_gcmc_smoke_accepts_deprecated_mu_ex_yaml_key(tmp_path):
         assert cmd_gcmc(_ns(yaml_path)) == 0
 
 
+@pytest.mark.slow
 def test_cmd_neb_smoke(tmp_path):
     """S5/S20 regression coverage at the CLI level."""
     n = 2
@@ -338,6 +341,7 @@ def test_cmd_neb_smoke(tmp_path):
     assert cmd_neb(_ns(yaml_path)) == 0
 
 
+@pytest.mark.slow
 def test_cmd_tsa_smoke(tmp_path):
     """S6/S7/S22 regression coverage at the CLI level."""
     poscar = _al_supercell_poscar(tmp_path, name="POSCAR_saddle")
@@ -377,6 +381,7 @@ def _osmc_cfg(tmp_path, **sec):
     }
 
 
+@pytest.mark.slow
 def test_cmd_osmc_smoke(tmp_path):
     """osmc runs CFCMC (ADR-0009) and writes its estimators."""
     yaml_path = tmp_path / "osmc.yaml"
@@ -395,6 +400,7 @@ def test_cmd_osmc_refuses_old_lambda_dynamics_keys(tmp_path):
         cmd_osmc(_ns(yaml_path))
 
 
+@pytest.mark.slow
 def test_cmd_osmc_smoke_accepts_deprecated_mu_ex_yaml_key(tmp_path):
     """Backward compatibility counterpart of the gcmc test above, for the
     'osmc' YAML section."""
@@ -443,6 +449,7 @@ def test_cmd_phonon_smoke(tmp_path, al_poscar, small_cell_ok):
     assert cmd_phonon(_ns(yaml_path)) == 0
 
 
+@pytest.mark.slow
 def test_cmd_kappa_smoke(tmp_path):
     n = 2
     base = fcc_al_dict()
@@ -540,6 +547,7 @@ def _write_lj_training_set(tmp_path):
     return csv_path
 
 
+@pytest.mark.slow
 def test_cmd_fit_lj_end_to_end(tmp_path, small_cell_ok):
     """F1/F2/F3/F5/F12 regression coverage: the consolidated `fit` command
     must recover parameters close to the true LJ potential used to
@@ -566,6 +574,7 @@ def test_cmd_fit_lj_end_to_end(tmp_path, small_cell_ok):
     assert pair_params["sigma"] == pytest.approx(2.5, rel=0.2)
 
 
+@pytest.mark.slow
 def test_cmd_fit_lj_huber_loss_type_end_to_end(tmp_path, small_cell_ok):
     """Phase 3 (Huber loss) regression: cfg["loss_type"]="huber" plus
     the required huber_delta_* keys must flow all the way from a JSON
@@ -601,6 +610,7 @@ def test_cmd_fit_lj_huber_loss_type_end_to_end(tmp_path, small_cell_ok):
     assert pair_params["sigma"] == pytest.approx(2.5, rel=0.2)
 
 
+@pytest.mark.slow
 def test_cmd_fit_mie_end_to_end(tmp_path, small_cell_ok):
     """Phase 2 registry regression: `fit --potential mie` must work
     end-to-end through the exact same cmd_fit.py/parser.py/templates.py
@@ -651,6 +661,7 @@ def test_cmd_fit_mie_end_to_end(tmp_path, small_cell_ok):
     assert pair_params["sigma"] == pytest.approx(2.5, rel=0.2)
 
 
+@pytest.mark.slow
 def test_cmd_fit_r_cut_zero_is_not_ignored(tmp_path, small_cell_ok):
     """F12 regression: --r-cut 0 must not be silently dropped by a
     truthiness check (it must actually reach cfg["r_cut"])."""
@@ -844,6 +855,7 @@ def test_print_fit_result_handles_like_species_buckingham_pairs(capsys):
     assert "O-O" in out and "O-Zn" in out
 
 
+@pytest.mark.slow
 def test_cmd_fit_sw_end_to_end_saves_a_reloadable_potential(tmp_path):
     """The whole `fit --potential sw` path: fit, print, save, reload.
 
@@ -881,6 +893,7 @@ def test_cmd_fit_sw_end_to_end_saves_a_reloadable_potential(tmp_path):
     assert e_fit / 64 == pytest.approx(ref, abs=1e-6)
 
 
+@pytest.mark.slow
 def test_cmd_fit_multi_species_sw_round_trips_through_the_record_format(tmp_path):
     """`fit --potential sw` with initial_sw given as i/j/k records: the
     fitted potential must be written back in that same record-list form
@@ -969,6 +982,7 @@ def test_esm_command_refuses_a_relax_section(tmp_path, capsys):
     assert "coulomb_method: esm" in capsys.readouterr().out
 
 
+@pytest.mark.slow
 def test_cmd_fit_takes_the_potential_from_its_config(tmp_path, small_cell_ok):
     """ADR-0024 O4: `fit --config cfg` without --potential used
     --potential's default (buckingham) and failed with "Cannot build
@@ -990,6 +1004,7 @@ def test_cmd_fit_takes_the_potential_from_its_config(tmp_path, small_cell_ok):
     assert fitted["potential_type"] == "lj"
 
 
+@pytest.mark.slow
 def test_cmd_mlip_settings_print_the_atom_centred_defaults(tmp_path, capsys):
     """The [Settings] block printed n_hidden 512 (the tabular default) for
     an atom-centred ELM, which builds 400 hidden units."""

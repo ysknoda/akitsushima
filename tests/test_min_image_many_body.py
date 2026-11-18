@@ -146,6 +146,7 @@ def test_eam_too_small_cell_raises(n):
         _eam().compute(*_al(n))
 
 
+@pytest.mark.slow
 def test_eam_large_enough_cell_runs_and_counts_every_image():
     """3x3x3 (half-width 6.075 A) runs, and a 4x4x4 cell of the same
     crystal gives the same energy per atom: every image inside the

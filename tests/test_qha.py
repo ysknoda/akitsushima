@@ -35,6 +35,7 @@ def si(tmp_path_factory):
     return fn, st
 
 
+@pytest.mark.slow
 def test_relax_at_volume_keeps_volume_and_cubic_shape(si):
     _, st = si
     for r, _, f in st.values():
@@ -48,6 +49,7 @@ def test_relax_at_volume_keeps_volume_and_cubic_shape(si):
     assert st[0.95][0]["pressure_GPa"] > 4 and st[1.05][0]["pressure_GPa"] < -3
 
 
+@pytest.mark.slow
 def test_mode_gruneisen_matches_log_derivative_of_frequencies(si):
     """Independent of the dD/dV projection: for non-degenerate modes away
     from crossings, gamma = -d ln w / d ln V, by central differences of
@@ -64,6 +66,7 @@ def test_mode_gruneisen_matches_log_derivative_of_frequencies(si):
     assert np.allclose(g, ref, atol=2e-3)
 
 
+@pytest.mark.slow
 def test_mode_gruneisen_matches_phonopy(si):
     """Oracle: phonopy's GruneisenBase on phonopy force constants of the
     same three relaxed structures (same force function)."""
@@ -107,6 +110,7 @@ def _qha_inputs(st, T):
 
 @pytest.mark.parametrize("eos,peos", [("birch-murnaghan", "birch_murnaghan"),
                                       ("vinet", "vinet")])
+@pytest.mark.slow
 def test_quasi_harmonic_matches_phonopy(si, eos, peos):
     """Oracle: PhonopyQHA on the same E(V), F, S, C_v (converted to its
     kJ/mol and J/K/mol units)."""
@@ -135,6 +139,7 @@ def test_quasi_harmonic_matches_phonopy(si, eos, peos):
     assert np.max(np.abs(g - pg)) < 1e-3 * np.max(np.abs(pg))
 
 
+@pytest.mark.slow
 def test_thermodynamic_gamma_agrees_with_mean_mode_gamma(si):
     """gamma_th = alpha B V / C_v (QHA) against sum(gamma_i c_i) / sum(c_i)
     from the mode parameters at 300 K: equal in the quasi-harmonic limit
@@ -170,6 +175,7 @@ def test_quasi_harmonic_synthetic_limits():
     assert q["V_A3"][-1] < V.max()
 
 
+@pytest.mark.slow
 def test_qha_command_stops_on_imaginary_modes(tmp_path, monkeypatch):
     """A volume with a mode below -imaginary_tol_THz ends the run unless
     skip_unstable_volumes is set; then it is dropped and reported."""

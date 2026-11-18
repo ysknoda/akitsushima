@@ -169,6 +169,7 @@ def _tomita():
 
 
 @pytest.mark.parametrize("use_numba", [False, True])
+@pytest.mark.slow
 def test_multi_species_tomita_energy_matches_brute_force(use_numba):
     """Tomita et al. (2018) GeSn: legs from the pair records, lambda from
     the triple record, each unordered pair once."""
@@ -182,6 +183,7 @@ def test_multi_species_tomita_energy_matches_brute_force(use_numba):
 
 
 @pytest.mark.parametrize("use_numba", [False, True])
+@pytest.mark.slow
 def test_multi_species_forces_and_stress_are_derivatives(use_numba):
     nested = _tomita()
     lat, pos = _rattled(4, a=5.9)
@@ -208,6 +210,7 @@ def test_multi_species_forces_and_stress_are_derivatives(use_numba):
         assert -(Ep - Em) / (2 * h) / V == pytest.approx(S[a, b], abs=1e-6)
 
 
+@pytest.mark.slow
 def test_sw_si_elastic_constants_are_stillinger_webers():
     """SW Si at a = 5.430950 A: C11 151.4, C12 76.4, C44 (ions relaxed)
     56.4 GPa -- the values published for this parameter set (Cowley,
@@ -227,6 +230,7 @@ def test_sw_si_elastic_constants_are_stillinger_webers():
     assert C[3, 3] == pytest.approx(56.4, abs=0.5)
 
 
+@pytest.mark.slow
 def test_mixed_records_supply_only_lambda_epsilon_and_costheta0():
     """A mixed record's sigma, a and gamma are not used (LAMMPS pair_sw):
     changing them leaves the energy unchanged; its lambda does not."""

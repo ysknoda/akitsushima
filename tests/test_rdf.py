@@ -40,6 +40,7 @@ def _supercell(struct: dict, n: int) -> dict:
     }
 
 
+@pytest.mark.slow
 def test_rdf_single_species_partial_equals_total():
     al = _supercell(fcc_al_dict(), n=4)
     rdf = RadialDistributionFunction(r_max=6.0, n_bins=100)

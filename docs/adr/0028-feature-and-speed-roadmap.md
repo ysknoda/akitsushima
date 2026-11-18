@@ -439,3 +439,119 @@ now also records `call_first_s`.
 Full suite: 835 passed (31.5 min, loaded machine), including the 26 new
 tests.  The first run, before canonical ordering, had the one NEMD
 restart failure described above and 830 passed.
+
+## Addendum 4: slow marks and the post-edit hook (tier A step 4, 2026-11-18)
+
+Tests that take 0.5 s or more are marked `@pytest.mark.slow` (0.2.0a19).
+The post-edit hook (the user's global
+`~/.claude/hooks/post_edit_python_check.sh`) now runs
+`pytest tests -q --tb=short -m "not slow"`.  The full suite is still run
+by hand before each commit.  The user approved the hook change on
+2026-11-18.  It is one line, and in a project without a `slow` marker
+`-m "not slow"` still selects every test.
+
+**What the measurement found.**  The hook had never reported a result
+for akitsushima, for two reasons.
+- Its timeout is 60 s, and the full suite takes 26.6 min with the JIT
+  and 2 h 45 min without it.
+- The hook sets `NUMBA_DISABLE_JIT=1`.  Under that setting the suite
+  aborted on its seventh test (`Fatal Python error: Aborted`, libomp
+  initialised twice).  The cause was in `utils/jit.py`.
+  - The warm-up kernel that starts numba's threading layer on import
+    (0.2.0a11) runs as plain Python when the JIT is disabled, so it
+    started nothing.
+  - `numba.get_thread_id()` inside the pair, SW and Tersoff kernels
+    still launches the layer.  It did so after collection had imported
+    torch, and that is the order that aborts.
+  - `_start_threading_layer` now also calls `numba.get_num_threads()`,
+    which launches the layer in both modes.
+  - `tests/test_openmp_order.py` now runs both import orders with the
+    JIT on and off.  Before the fix, only the case "akitsushima first,
+    JIT off" failed; after it, all four pass.
+
+The run without the JIT then had one failure:
+`test_atomic_option_rows_equal_engine_and_engine_is_conservative[AtomicELMModel-kw0]`.
+Its fourth-order force check misses by 1.2e-7 against a 1e-7 tolerance.
+- This is rounding noise, not a wrong derivative.  The force error takes
+  either sign and grows as the step shrinks: with the JIT it is 3e-9 at
+  h = 1e-4 and -1.2e-7 at 7.5e-6, and the same holds without it.
+- The PCA-whitened energy carries about 1e-12 eV of noise, and
+  h = 3e-5 is too small for that.
+- The fit itself differs between the two modes (different rounding in
+  an ill-conditioned solve), so the noise falls differently.
+- `_fd4_check` now takes a separate strain step.  The ELM case uses a
+  displacement step of 1e-4 (error 3e-9 with the JIT, 6e-9 without)
+  and keeps 3e-5 for strain: at 1e-4 the stress error is 6e-8, above
+  `tol_s` = 1e-8.
+
+**Rule for `slow`.**  A test is marked if either holds:
+- it took 0.5 s or more (setup + call + teardown) with or without the
+  JIT;
+- it shares a costly module fixture with slow tests.
+A parametrised test is marked as a whole if any case is slow.
+
+The fixture rule was found on the first try of the fast set.  It took
+172 s although its tests had summed to 19 s, because a module fixture's
+cost moves to whichever test uses it first.
+- The MPI fixtures cost 119 s, 19 s and 12 s.  Every test in
+  `test_mpi.py` and `test_mpi_cli.py` is now slow.
+- Three single fast users of 1-5 s fixtures are slow: the `si` fixture
+  in `test_qha.py`, `aln` in `test_phonon_regressions.py` and `mlip_fn`
+  in `test_mlip_thin_cells.py`.
+- Two fixtures keep their fast users, because the cost is spread over
+  several refusal and format tests: `models` in `test_mlip_solvers.py`
+  (1.7 s, 4 tests) and `si_table` in `test_elm_options.py` (1.6 s, 8
+  tests).
+
+Candidate thresholds were compared on the measured times (both modes,
+whole functions marked):
+
+| Threshold | Slow functions | Fast tests | Fast set without JIT | with JIT |
+|---|---|---|---|---|
+| 0.3 s | 245 / 554 | 476 | 10.4 s | 7.6 s |
+| 0.5 s | 223 / 554 | 500 | 19.1 s | 11.1 s |
+| 0.75 s | 198 / 554 | 538 | 37.1 s | 20.5 s |
+| 1.0 s | 176 / 554 | 570 | 57.2 s | 28.6 s |
+
+With 0.5 s, the fast set is about half of the hook's budget once the
+~9 s of collection is added.  Collection imports every test module,
+torch included.  The 0.75 s set would leave little margin on a loaded
+machine.
+
+**Result**, with the machine loaded (load average 8-9):
+
+| Run | Tests | Time |
+|---|---|---|
+| `NUMBA_DISABLE_JIT=1 pytest -m "not slow"` | 480 passed, 1 skipped, 356 deselected | 25.5 s (30 s wall) |
+| the hook end to end, ruff included | same | 34 s wall |
+| `pytest -m slow` | 356 | the rest of the full suite |
+
+The fast set leaves out most finite-difference force and stress checks
+of the classical potentials, all MPI tests and the end-to-end CLI runs.
+It is a trip-wire, not a substitute for the full suite.
+
+Full suite after the change: 837 passed (27.7 min, loaded machine),
+including the two new JIT-off cases of `test_openmp_order.py`.
+
+**Where the full suite spends its time** (with the JIT, 1595 s):
+- The three ESM finite-difference tests take 670 s, 42 % of the suite
+  (`test_esm_force_matches_finite_difference[bc1-3]`).
+- Next come the MPI GCMC run (89 s), `test_msd_vacf_smoke_and_equipartition`
+  (37 s) and the multi-species SW fit (36 s).
+Without the JIT, the multi-species SW fit alone takes 3327 s.
+
+**`pytest-xdist` (Q13).**  Not added: it is a new dependency, and the
+ESM tests would bound any parallel run.  The bc2 case alone takes 297 s.
+Shortening the ESM tests (a smaller mesh or fewer displaced atoms in the
+finite-difference check) would cut the full suite by up to 40 %
+whether or not xdist is used.  This is left for the user to decide.
+
+**Re-measuring.**
+```
+pytest tests -q -p no:cacheprovider --durations=0 --junitxml=jit.xml
+NUMBA_DISABLE_JIT=1 pytest tests -q -p no:cacheprovider --durations=0 --junitxml=nojit.xml
+NUMBA_DISABLE_JIT=1 pytest tests -q -m "not slow" --durations=25
+```
+The last command shows module-fixture setups that have moved into the
+fast set.  A new test is marked `slow` by its author when it takes
+0.5 s or more.

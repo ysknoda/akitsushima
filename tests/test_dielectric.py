@@ -95,6 +95,7 @@ def test_born_from_config_shapes_override_and_sum_rule():
 
 # ------------------------------------------------------------- NAC
 
+@pytest.mark.slow
 def test_nac_leaves_commensurate_points_and_matches_phonopy(mgo):
     """Oracle: phonopy's Gonze-Lee NAC with the same Z* and eps_inf on its
     own force constants.  A non-symmetric, anisotropic Z* and eps_inf
@@ -145,6 +146,7 @@ def test_nac_leaves_commensurate_points_and_matches_phonopy(mgo):
 
 # ------------------------------------------------------------- dielectric
 
+@pytest.mark.slow
 def test_lyddane_sachs_teller_and_two_routes_to_eps0(mgo, tmp_path):
     """Rocksalt has one IR-active triplet, so eps_0 / eps_inf =
     (w_LO / w_TO)^2 exactly (Lyddane-Sachs-Teller); and eps_0 from the
@@ -213,6 +215,7 @@ def test_piezoelectric_tensor_units_and_definitions():
     assert np.allclose(r2["e_C_m2"] - r["e_C_m2"], 0.1)
 
 
+@pytest.mark.slow
 def test_piezo_command_reuses_elastic_by_hash_and_refuses_others(tmp_path, monkeypatch):
     """MgO (centrosymmetric): e = 0 and the note; load_elastic is accepted
     for the same POSCAR + potential and refused for another potential."""
@@ -236,6 +239,7 @@ def test_piezo_command_reuses_elastic_by_hash_and_refuses_others(tmp_path, monke
         cmd_piezo(_ns(tmp_path / "p.yaml"))
 
 
+@pytest.mark.slow
 def test_dielectric_refuses_a_potential_without_charges(tmp_path, monkeypatch):
     import yaml
     from test_cli_smoke import _ns

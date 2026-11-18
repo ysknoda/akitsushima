@@ -142,6 +142,7 @@ def _as_float(tok):
 
 
 @pytest.mark.parametrize("case", sorted(_CASES))
+@pytest.mark.slow
 def test_logs_agree_across_ranks(mpi_runs, case):
     for name in _FILES[case][0]:
         ref = _tokens(mpi_runs[(case, 1)] / name)
@@ -161,6 +162,7 @@ def test_logs_agree_across_ranks(mpi_runs, case):
 
 
 @pytest.mark.parametrize("case", sorted(_CASES))
+@pytest.mark.slow
 def test_structures_agree_across_ranks(mpi_runs, case):
     for name in _FILES[case][1]:
         ref = parse_poscar(str(mpi_runs[(case, 1)] / name))
@@ -178,6 +180,7 @@ def test_structures_agree_across_ranks(mpi_runs, case):
 
 
 @pytest.mark.parametrize("case", sorted(_CASES))
+@pytest.mark.slow
 def test_outputs_written_once_by_rank_zero(mpi_runs, case):
     """Every rank writing the same log would interleave or duplicate its
     lines; the line count must not scale with the rank count."""
@@ -231,6 +234,7 @@ def mpi_fit_runs(tmp_path_factory):
     return out
 
 
+@pytest.mark.slow
 def test_fit_prints_and_writes_once_by_rank_zero(mpi_fit_runs):
     ref_lines = mpi_fit_runs[1][1]
     for n in _RANKS:
@@ -241,6 +245,7 @@ def test_fit_prints_and_writes_once_by_rank_zero(mpi_fit_runs):
         assert (out_dir / "fitted_potential.json").exists()
 
 
+@pytest.mark.slow
 def test_fit_result_agrees_across_ranks(mpi_fit_runs):
     import json
     ref = json.load(open(mpi_fit_runs[1][0] / "fitted_potential.json"))["params"]

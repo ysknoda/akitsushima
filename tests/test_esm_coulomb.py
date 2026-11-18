@@ -34,6 +34,7 @@ CH = {"Mg": 2.0, "O": -2.0}
 
 
 @pytest.mark.parametrize("bc", ["bc1", "bc2", "bc3"])
+@pytest.mark.slow
 def test_point_charge_energy_is_gaussian_plus_erfc_complement(bc):
     lat = np.diag([16.0, 16.0, 32.0])
     d = 3.0
@@ -75,6 +76,7 @@ def _fn(bc="bc1", nz=128):
     )
 
 
+@pytest.mark.slow
 def test_buckingham_esm_forces_and_stress_are_energy_derivatives():
     lat, pos, t = _mgo_slab()
     fn = _fn()
@@ -104,6 +106,7 @@ def test_buckingham_esm_forces_and_stress_are_energy_derivatives():
         assert S[a, a] == pytest.approx(-(Ep - Em) / (2 * h) / V, abs=6e-5)
 
 
+@pytest.mark.slow
 def test_positions_wrapped_into_the_cell_give_the_same_result():
     lat, pos, t = _mgo_slab()
     fn = _fn()
@@ -195,6 +198,7 @@ def test_mlip_takes_no_coulomb_method():
         )
 
 
+@pytest.mark.slow
 def test_yaml_buckingham_with_esm_builds_a_complete_force_function(tmp_path):
     from akitsushima.fitting.io_utils import save_potential
     from akitsushima.solvers.config_bridge import _build_force_fn_from_yaml
@@ -223,6 +227,7 @@ def test_yaml_buckingham_with_esm_builds_a_complete_force_function(tmp_path):
         _build_force_fn_from_yaml(dict(cfg, coulomb_method="ewald"))
 
 
+@pytest.mark.slow
 def test_esm_matches_ewald_for_a_symmetric_slab_in_a_long_cell():
     """A dipole-free slab: ESM bc1 against 3D Ewald with a long vacuum (no
     slab correction needed), both point charges, same Buckingham."""

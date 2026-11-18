@@ -115,6 +115,7 @@ def test_temperature_schedules():
 
 
 # ------------------------------------------------------------- basin hopping
+@pytest.mark.slow
 def test_basin_hopping_finds_the_lj13_icosahedron(tmp_path):
     res = _bh(tmp_path, "bh", 60)
     assert res["best"]["E"] == pytest.approx(LJ13_GLOBAL_MIN, abs=1e-4)
@@ -129,6 +130,7 @@ def test_basin_hopping_finds_the_lj13_icosahedron(tmp_path):
     assert h == sorted(h)
 
 
+@pytest.mark.slow
 def test_basin_hopping_step_adapts_towards_the_target_acceptance(tmp_path):
     # LJ13 at kT = 0.8 accepts almost every move, so the step must grow.
     _bh(tmp_path, "bh", 30)
@@ -139,6 +141,7 @@ def test_basin_hopping_step_adapts_towards_the_target_acceptance(tmp_path):
     assert len(set(steps[:10])) == 1
 
 
+@pytest.mark.slow
 def test_restart_reproduces_the_uninterrupted_run(tmp_path):
     full = _bh(tmp_path, "full", 16)
     _bh(tmp_path, "split", 7)
@@ -153,6 +156,7 @@ def test_restart_reproduces_the_uninterrupted_run(tmp_path):
     assert resumed["best"]["H"] == pytest.approx(full["best"]["H"], abs=1e-9)
 
 
+@pytest.mark.slow
 def test_restart_drops_ledger_lines_after_the_checkpoint(tmp_path):
     _bh(tmp_path, "bh", 5)
     out = tmp_path / "bh"
@@ -162,6 +166,7 @@ def test_restart_drops_ledger_lines_after_the_checkpoint(tmp_path):
     assert [r["cycle"] for r in _ledger(out)] == list(range(9))
 
 
+@pytest.mark.slow
 def test_failed_trials_are_logged_and_skipped(tmp_path, monkeypatch):
     real = GlobalOptimiser._quench
 
@@ -180,6 +185,7 @@ def test_failed_trials_are_logged_and_skipped(tmp_path, monkeypatch):
     assert res["n_failed"] == 2 and not res["aborted"]
 
 
+@pytest.mark.slow
 def test_consecutive_failures_stop_the_run(tmp_path, monkeypatch):
     real = GlobalOptimiser._quench
 
@@ -197,6 +203,7 @@ def test_consecutive_failures_stop_the_run(tmp_path, monkeypatch):
     assert os.path.isfile(tmp_path / "bh" / "POSCAR_best")
 
 
+@pytest.mark.slow
 def test_min_energy_per_atom_marks_a_collapse_as_failed(tmp_path):
     # The icosahedron (-3.41 eV/atom) is "below" a floor of -3.40: every
     # quench that reaches it fails, as an MLIP collapse would.
@@ -210,6 +217,7 @@ def test_min_energy_per_atom_marks_a_collapse_as_failed(tmp_path):
 
 
 # ------------------------------------------------------------- md_quench
+@pytest.mark.slow
 def test_md_quench_heals_a_defected_silicon_cell(tmp_path):
     fn, rc = _sw_si()
     lat, pos = _diamond_si(jitter=0.8)
@@ -244,6 +252,7 @@ def test_md_quench_heals_a_defected_silicon_cell(tmp_path):
     assert led[1]["T"] == 1300.0
 
 
+@pytest.mark.slow
 def test_md_quench_continues_the_trajectory_and_redraws_after_an_md_failure(
     tmp_path, monkeypatch
 ):
@@ -293,6 +302,7 @@ def test_md_quench_continues_the_trajectory_and_redraws_after_an_md_failure(
     assert res["n_failed"] == 1
 
 
+@pytest.mark.slow
 def test_npt_md_quench_runs_with_cell_relaxation(tmp_path):
     fn, rc = _sw_si()
     lat, pos = _diamond_si(a=5.50, jitter=0.05)
@@ -323,6 +333,7 @@ def test_npt_md_quench_runs_with_cell_relaxation(tmp_path):
     assert res["best"]["V"] == pytest.approx(8 * 5.431**3, rel=2e-3)
 
 
+@pytest.mark.slow
 def test_initial_velocities_continue_an_nvt_run(tmp_path):
     fn, rc = _sw_si()
     lat, pos = _diamond_si(jitter=0.05)
@@ -409,6 +420,7 @@ def test_enthalpy_wrapper_stress_matches_finite_differences():
         assert S0[a, b] == pytest.approx(-dHde / V, abs=2e-6), (a, b)
 
 
+@pytest.mark.slow
 def test_cell_relaxed_under_pressure_ends_at_that_pressure(tmp_path):
     fn, rc = _sw_si()
     lat, pos = _diamond_si()
@@ -467,6 +479,7 @@ def _cli_cfg(tmp_path, method, **anneal):
     return path, cfg
 
 
+@pytest.mark.slow
 def test_cli_basin_hopping_from_the_template(tmp_path):
     from test_cli_smoke import _ns
 
@@ -494,6 +507,7 @@ def test_cli_refuses_unknown_keys(tmp_path, capsys):
     assert "fmaxx" in capsys.readouterr().out
 
 
+@pytest.mark.slow
 def test_md_collapse_below_the_energy_floor_rewinds_the_trajectory(tmp_path, monkeypatch):
     """An MLIP that collapses during an MD chunk raises nothing; the chunk's
     last frame is checked against min_energy_per_atom like a quench is."""

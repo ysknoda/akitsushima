@@ -124,6 +124,7 @@ def test_sic_reproduces_tersoff1989_table_ii():
     assert abs(B - 220.0) <= 5.0
 
 
+@pytest.mark.slow
 def test_tersoff1989_forces_stress_are_energy_derivatives():
     pot = TersoffPotential(tersoff1989_to_triplets(
         TERSOFF_1989["elements"], TERSOFF_1989["chi"], ["Si", "C"]), ["Si", "C"])
@@ -238,6 +239,7 @@ def test_zhou_embedding_continuous_and_matches_printed(el):
         assert abs(p[k] - ZHOU_2004[el][k]) < tol, k
 
 
+@pytest.mark.slow
 def test_zhou_al_erratum_gives_equilibrium_at_r_e():
     """Zhou (2004) defines r_e as the equilibrium nearest-neighbour spacing.
     With A = 0.314873 (ZHOU_2004_ERRATA; printed 0.134873) fcc Al has a0 =
@@ -255,6 +257,7 @@ def _ni3al(a=3.646, n=4):
     return _cell(a, FCC, ["Al", "Ni", "Ni", "Ni"], n)
 
 
+@pytest.mark.slow
 def test_zhou_eam_forces_stress_are_energy_derivatives():
     pot = zhou_eam({s: ZHOU_2004[s] for s in ("Al", "Ni")}, ["Al", "Ni"])
     lat, pos, types = _rattled(_ni3al(), 5, amp=0.08)
@@ -274,6 +277,7 @@ def test_zhou_eam_forces_stress_are_energy_derivatives():
         assert abs(s[a_, b_] + _fd4(e) / vol) < 1e-9
 
 
+@pytest.mark.slow
 def test_zhou_cutoff_switch_changes_lattice_energy_below_1e5():
     """The C2 switch over the last 0.5 A before r_c (1e-6 decay criterion)
     changes the L1_2 Ni3Al energy by < 1e-5 eV/atom against a 3 A longer
@@ -288,6 +292,7 @@ def test_zhou_cutoff_switch_changes_lattice_energy_below_1e5():
     assert abs(e1 - e2) < 1e-5
 
 
+@pytest.mark.slow
 def test_setfl_round_trip(tmp_path):
     pot = zhou_eam({s: ZHOU_2004[s] for s in ("Al", "Ni")}, ["Al", "Ni"])
     path = tmp_path / "NiAl.eam.alloy"
@@ -324,6 +329,7 @@ def test_zhou_parameter_set_derives_continuity_and_refuses_derived_keys():
 #  I/O, YAML route and CLI
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_fitted_json_reloads_to_the_same_potential(tmp_path):
     from akitsushima.fitting.io_utils import load_potential, save_potential
     cases = [
@@ -349,6 +355,7 @@ def test_fitted_json_reloads_to_the_same_potential(tmp_path):
     assert saved["tersoff1989"]["chi"] == {"C-Si": 0.9776}
 
 
+@pytest.mark.slow
 def test_yaml_route_builds_mixing_tersoff_and_eam(tmp_path):
     from akitsushima.fitting import registry
     t = registry.get_by_yaml_type("tersoff").build_from_yaml(
@@ -391,6 +398,7 @@ def _write_training(root, force_fn, cells):
 
 @pytest.mark.parametrize("potential, template", [
     ("tersoff", "tersoff1989"), ("tersoff", "records"), ("eam", None)])
+@pytest.mark.slow
 def test_cli_template_runs_and_recovers_its_own_potential(tmp_path, potential, template):
     """--write-config (and --template) writes a config that `fit` runs as
     written; on data labelled by the template's own potential, a fit of one
@@ -449,6 +457,7 @@ def test_cli_template_runs_and_recovers_its_own_potential(tmp_path, potential, t
                      "--template", "nope"]) == 1
 
 
+@pytest.mark.slow
 def test_fit_restarts_continue_from_the_best_point_and_stop_early(tmp_path):
     """ADR-0015: `restarts` reruns the local search from the best point (a
     rotated simplex for Nelder-Mead); with a 10-iteration cap per run the
@@ -488,6 +497,7 @@ def test_rotated_restart_simplex_is_nondegenerate_and_within_bounds():
     assert not np.allclose(sim, other)
 
 
+@pytest.mark.slow
 def test_fit_time_limit_keeps_the_best_point_so_far(tmp_path):
     """ADR-0015: time_limit_hours stops the search at the next evaluation
     past the budget and returns the best point evaluated so far."""
@@ -519,6 +529,7 @@ def _eam_struct(seed=11):
                    "ref_forces": F, "ref_stress": S}
 
 
+@pytest.mark.slow
 def test_residual_vector_squares_sum_to_the_loss():
     from akitsushima.fitting.loss import generic_loss_function, generic_residuals, residual_length
     truth, struct = _eam_struct()
@@ -532,6 +543,7 @@ def test_residual_vector_squares_sum_to_the_loss():
                                       rel=1e-12)
 
 
+@pytest.mark.slow
 def test_least_squares_recovers_the_reference(tmp_path):
     """ADR-0015 Q21: local_method 'least_squares' (dogbox on the residual
     vector) returns to the Zhou Ni-Al parameters from 2 % off,

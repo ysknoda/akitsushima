@@ -47,6 +47,7 @@ def _fcc_al_supercell(n=2):
     }
 
 
+@pytest.mark.slow
 def test_msd_vacf_smoke_and_equipartition():
     """Real (short) NVE trajectory: outputs must be finite/sane-shaped,
     and VACF(0) (the mean-squared velocity per component, averaged over
@@ -107,6 +108,7 @@ def test_msd_vacf_smoke_and_equipartition():
         "k_B T / m (within statistical noise from a short trajectory)")
 
 
+@pytest.mark.slow
 def test_msd_einstein_and_green_kubo_agree_for_synthetic_random_walk():
     """Bypasses run_md() entirely, directly injecting a synthetic i.i.d.
     Gaussian random-walk trajectory with an EXACTLY known diffusion

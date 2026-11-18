@@ -66,6 +66,7 @@ def test_per_atom_heat_currents_add_up_to_the_heat_flux(kind):
     assert np.allclose(Ji.sum(axis=0) / V, J, rtol=1e-12, atol=1e-16)
 
 
+@pytest.mark.slow
 def test_kappa_decomposition_adds_up_to_kappa(tmp_path):
     """Species and regions of a binary LJ crystal: each decomposition sums
     to compute_kappa's tensor (the integral is linear in J_g)."""
@@ -99,6 +100,7 @@ def _nemd(tmp_path=None, **kw):
     return NEMDSimulation(L, P, T, fn, masses=np.full(len(T), 40.0), **args), fn
 
 
+@pytest.mark.slow
 def test_energy_changes_only_by_the_bath_heat():
     """E(t) - E(0) = Q_hot + Q_cold up to the Verlet error (dt 0.5 fs)."""
     sim, _ = _nemd(timestep=0.5)
@@ -108,6 +110,7 @@ def test_energy_changes_only_by_the_bath_heat():
     assert abs(st["E_minus_Q_drift_eV"]) < 2e-3 * Q
 
 
+@pytest.mark.slow
 def test_restart_continues_bit_for_bit(tmp_path, monkeypatch):
     """A run killed after a checkpoint and re-run with the same arguments
     ends exactly where an uninterrupted run does (positions, velocities,
@@ -135,6 +138,7 @@ def test_restart_continues_bit_for_bit(tmp_path, monkeypatch):
     assert st["Q_hot"] == ref.state["Q_hot"] and st["Q_cold"] == ref.state["Q_cold"]
 
 
+@pytest.mark.slow
 def test_baths_thermalise_to_their_temperature():
     """Both baths at 20 K over the whole cell: the mean temperature of the
     sampled profile is 20 K within its statistical error."""

@@ -72,28 +72,33 @@ def _assert_all_close(results: dict, key: str, **kwargs):
             f"np1={ref}, np{n}={results[n][key]}")
 
 
+@pytest.mark.slow
 def test_sw_energy_forces_stress_consistent_across_ranks(mpi_results):
     _assert_all_close(mpi_results, "e_sw", rtol=1e-8, atol=1e-10)
     _assert_all_close(mpi_results, "f_sw", rtol=1e-8, atol=1e-10)
     _assert_all_close(mpi_results, "s_sw", rtol=1e-8, atol=1e-10)
 
 
+@pytest.mark.slow
 def test_tersoff_energy_forces_stress_consistent_across_ranks(mpi_results):
     _assert_all_close(mpi_results, "e_te", rtol=1e-8, atol=1e-10)
     _assert_all_close(mpi_results, "f_te", rtol=1e-8, atol=1e-10)
     _assert_all_close(mpi_results, "s_te", rtol=1e-8, atol=1e-10)
 
 
+@pytest.mark.slow
 def test_eam_energy_forces_stress_consistent_across_ranks(mpi_results):
     _assert_all_close(mpi_results, "e_eam", rtol=1e-8, atol=1e-10)
     _assert_all_close(mpi_results, "f_eam", rtol=1e-8, atol=1e-10)
     _assert_all_close(mpi_results, "s_eam", rtol=1e-8, atol=1e-10)
 
 
+@pytest.mark.slow
 def test_fitting_loss_consistent_across_ranks(mpi_results):
     _assert_all_close(mpi_results, "loss", rtol=1e-8, atol=1e-10)
 
 
+@pytest.mark.slow
 def test_fitting_loss_with_sw_consistent_across_ranks(mpi_results):
     """Regression test for the local_only()-bypass bug found in
     code-check: SW's `compute()` used a raw `_mpi_comm.allreduce()` for
@@ -110,6 +115,7 @@ def test_fitting_loss_with_sw_consistent_across_ranks(mpi_results):
     _assert_all_close(mpi_results, "loss_sw", rtol=1e-8, atol=1e-10)
 
 
+@pytest.mark.slow
 def test_sw_tersoff_eam_energy_respects_local_only_under_mpi(mpi_results):
     """Direct, isolated regression test for the same local_only()-bypass
     bug (see test_fitting_loss_with_sw_consistent_across_ranks above):

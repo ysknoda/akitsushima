@@ -66,6 +66,7 @@ TABULAR = [
 
 
 @pytest.mark.parametrize("cls,kw", TABULAR)
+@pytest.mark.slow
 def test_tabular_option_rows_equal_engine_and_engine_is_conservative(
     si_table, cls, kw, tmp_path
 ):
@@ -130,6 +131,7 @@ ATOMIC = [
 
 
 @pytest.mark.parametrize("cls,kw", ATOMIC)
+@pytest.mark.slow
 def test_atomic_option_rows_equal_engine_and_engine_is_conservative(cls, kw, tmp_path):
     structs = _random_structs(12, 0)
     m = cls(n_hidden=24, r0=0.1, eps0=0.01, reg=1e-6, verbose=False, **kw)
@@ -149,8 +151,14 @@ def test_atomic_option_rows_equal_engine_and_engine_is_conservative(cls, kw, tmp
         # PCA keeps near-null directions (gain up to 1/sqrt(pca_eps)): the
         # fitted energy is strongly curved and the central difference is
         # off by 2e-6 at h = 1e-5 (falling as h^2), so a fourth-order
-        # difference is used
-        _fd4_check(ff, s["lattice"], s["positions"], s["atom_types"], 3e-5)
+        # difference is used.  Displacement step 1e-4, not 3e-5: the
+        # amplified energy carries ~1e-12 eV of rounding noise, so at 3e-5
+        # the force error is noise of either sign up to 1.2e-7 (above
+        # tol_f with NUMBA_DISABLE_JIT=1); at 1e-4 it is 3-6e-9.  The strain
+        # step stays 3e-5 (at 1e-4 the stress error is 6e-8 > tol_s).
+        _fd4_check(
+            ff, s["lattice"], s["positions"], s["atom_types"], 1e-4, h_strain=3e-5
+        )
     else:
         _fd_check(ff, s["lattice"], s["positions"], s["atom_types"], 1e-5, 1e-6, 1e-7)
 
@@ -334,6 +342,7 @@ def test_qelm_file_holds_integer_levels_and_int8_memory_mode(si_table, levels, t
     np.testing.assert_allclose(S1, S0, atol=1e-10)
 
 
+@pytest.mark.slow
 def test_atomic_qelm_int8_storage_memory_mode_and_engine(tmp_path):
     structs = _random_structs(12, 0)
     kw = dict(n_hidden=24, r0=0.1, eps0=0.01, reg=1e-6, verbose=False)

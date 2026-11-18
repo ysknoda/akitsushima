@@ -233,6 +233,7 @@ def _merge(dst: dict, src: dict) -> None:
 
 
 @pytest.mark.parametrize("key", sorted(_DUMP_MAP))
+@pytest.mark.slow
 def test_template_runs_as_shipped(key, tmp_path, monkeypatch):
     cfg = yaml.safe_load(_DUMP_MAP[key])
     _merge(cfg, _SHRINK[key])

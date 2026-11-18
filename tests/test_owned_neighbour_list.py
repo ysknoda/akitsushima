@@ -119,6 +119,7 @@ def _cache():
 
 @pytest.mark.parametrize("shear", [False, True], ids=["cubic", "sheared"])
 @pytest.mark.parametrize("name", sorted(POTENTIALS))
+@pytest.mark.slow
 def test_matches_all_pairs(monkeypatch, name, shear):
     make, structure = POTENTIALS[name]
     pot = make()
@@ -132,6 +133,7 @@ def test_matches_all_pairs(monkeypatch, name, shear):
 
 
 @pytest.mark.parametrize("name", ["sw", "sw_multi_gesn", "tersoff_xy", "eam"])
+@pytest.mark.slow
 def test_site_terms_match_all_pairs(monkeypatch, name):
     make, structure = POTENTIALS[name]
     pot = make()
@@ -159,6 +161,7 @@ def test_real_space_coulomb_matches_all_pairs(monkeypatch):
         _assert_close(a, b, f"real-space Coulomb {what}")
 
 
+@pytest.mark.slow
 def test_reuse_and_rebuild_stay_exact(monkeypatch):
     """A sequence of geometries an owned list meets in phonon / elastic /
     one-off use: each result equals the all-pairs one, the list is reused
@@ -220,6 +223,7 @@ def test_thin_cells_keep_the_all_pairs_path_and_its_checks():
     assert not _cache()
 
 
+@pytest.mark.slow
 def test_thread_pool_calls_are_correct(monkeypatch):
     """Phonon and elastic evaluate displaced cells in a thread pool."""
     pot = TersoffPotential(dict(T3_SI), species=["Si"])
@@ -237,6 +241,7 @@ def test_thread_pool_calls_are_correct(monkeypatch):
             _assert_close(a, b, f"cell {k} {q}")
 
 
+@pytest.mark.slow
 def test_cache_is_bounded_and_keyed_by_cutoff_and_size():
     lat, pos, _ = _si3()
     for k in range(nlm._OWNED_CACHE_SIZE + 2):
@@ -250,6 +255,7 @@ def test_cache_is_bounded_and_keyed_by_cutoff_and_size():
 
 
 @pytest.mark.parametrize("name", ["sw", "tersoff_xy", "eam", "lj"])
+@pytest.mark.slow
 def test_result_does_not_depend_on_when_the_list_was_built(monkeypatch, name):
     """Candidates are kept in np.triu_indices order after every build, so
     a call through a reused list, a freshly built one and the all-pairs

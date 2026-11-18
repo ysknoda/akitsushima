@@ -134,6 +134,7 @@ def test_file_without_a_map_loads_as_zscore(tmp_path):
     np.testing.assert_allclose(m2.predict_table(lab, X), m.predict_table(lab, X))
 
 
+@pytest.mark.slow
 def test_pca_atomic_nn_rows_equal_its_engine_and_engine_is_conservative(tmp_path):
     import torch
 
@@ -180,6 +181,7 @@ def test_pca_atomic_nn_rows_equal_its_engine_and_engine_is_conservative(tmp_path
     )
 
 
+@pytest.mark.slow
 def test_pca_atomic_nn_learns_and_keeps_the_isolated_atom_constraint():
     """Without the constraint, 20 epochs bring the training forces well
     below their spread (z-score 0.61, pca 0.47 eV/A against 1.15).  With

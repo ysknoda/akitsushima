@@ -56,12 +56,14 @@ def _calc(bc, pos, field=0.0, nz=512):
 
 
 @pytest.mark.parametrize("bc,d", sorted(REF))
+@pytest.mark.slow
 def test_pair_energy_matches_the_image_ewald_reference(bc, d):
     pos = _pair(d)
     E = _calc(bc, pos)(LAT, pos, ["Na", "Cl"])[0]
     assert abs(E - REF[(bc, d)]) / 2 < 8e-3
 
 
+@pytest.mark.slow
 def test_z_and_x_pairs_differ_only_by_the_lateral_images():
     """E3 made a pair along z 1.5 eV more bound than the same pair along x;
     the lateral-image difference between them is 0.2 eV (reference
@@ -73,6 +75,7 @@ def test_z_and_x_pairs_differ_only_by_the_lateral_images():
     assert Ez - Ex == pytest.approx(-4.6589 + 4.8741, abs=0.02)
 
 
+@pytest.mark.slow
 def test_external_field_slope_is_the_field_in_v_per_angstrom():
     """E2: the field was applied K = 14.40 times too strongly.  The change
     of the planar-averaged potential between E = 0 and E = 0.1 V/A must be

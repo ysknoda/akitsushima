@@ -96,6 +96,12 @@
 > results are bit-identical for the short-range potentials (real-space
 > Coulomb <= 1e-14 relative).  Systems under 100 atoms and cells thinner than
 > 2 (r_cut + 0.3 A) keep the all-pairs path.
+>
+> 0.2.0a19 (ADR-0028 step 4): tests that take 0.5 s or more (with or
+> without `NUMBA_DISABLE_JIT=1`) are marked `slow`; `pytest -m "not slow"`
+> runs the other 481 in about 30 s even without JIT.  With
+> `NUMBA_DISABLE_JIT=1`, importing torch after akitsushima no longer aborts
+> the process at the first engine kernel.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -753,6 +759,17 @@ pip install -e ".[all,dev]"
 pytest tests/
 ```
 
+The full suite takes about 30 min.  For a quick check while editing:
+
+```bash
+pytest tests/ -m "not slow"
+```
+
+`slow` marks every test that takes 0.5 s or more with or without
+`NUMBA_DISABLE_JIT=1`, or that shares a costly module fixture
+(docs/adr/0028-feature-and-speed-roadmap.md, addendum 4).  The rest, 481
+tests, run in about 30 s, also with the JIT disabled.
+
 `tests/test_mpi.py` spawns real `mpirun -np 1/2/4` subprocesses to check
 that results agree across rank counts; it is skipped automatically if
 `mpirun` or `mpi4py` is not available.
@@ -768,7 +785,8 @@ package happens after that. If torch was imported before akitsushima,
 the `workqueue` layer is chosen instead, which loads no OpenMP. So the
 order of imports, and of test files, no longer matters
 (tests/test_openmp_order.py). An explicit `NUMBA_THREADING_LAYER` is
-respected.
+respected. Since 0.2.0a19 this also holds with `NUMBA_DISABLE_JIT=1`,
+where the warm-up kernel runs as plain Python and used to start nothing.
 
 ## License
 

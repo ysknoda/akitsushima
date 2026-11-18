@@ -62,6 +62,7 @@ def _sim(fn, tmp_path, z=5.0, n0=5, **kw):
 
 
 @pytest.mark.parametrize("beta_c", [0.0, 2.0])
+@pytest.mark.slow
 def test_exactly_solvable_field_gives_the_muvt_averages(beta_c, tmp_path):
     r = _sim(_field_fn(beta_c * K_B * T), tmp_path).run()
     N_ex, bmu_ex = 5.0 * i0(beta_c), -np.log(i0(beta_c))

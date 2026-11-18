@@ -7,6 +7,12 @@ the CLI template tests before the torch-based MLIP tests.
 utils/jit.py now starts numba's threading layer on import (or selects
 ``workqueue`` when torch is already loaded).  Each order is checked in a
 fresh interpreter, since the failure is process state.
+
+With ``NUMBA_DISABLE_JIT=1`` (the post-edit hook's setting) the warm-up
+kernel is plain Python and started nothing, while ``numba.get_thread_id()``
+inside the kernels still launched the layer later -- after torch -- and the
+process aborted (ADR-0028 addendum 4).  Both orders are also checked with
+the JIT disabled.
 """
 
 import os
@@ -39,8 +45,10 @@ print("OK", numba.threading_layer(), float(e))
 """
 
 
+@pytest.mark.parametrize("jit", ["on", "off"])
 @pytest.mark.parametrize("first", ["torch", "akitsushima"])
-def test_numba_kernel_runs_whichever_is_imported_first(first):
+@pytest.mark.slow
+def test_numba_kernel_runs_whichever_is_imported_first(first, jit):
     imports = (
         "import torch\nimport akitsushima\n"
         if first == "torch"
@@ -49,8 +57,11 @@ def test_numba_kernel_runs_whichever_is_imported_first(first):
     env = {
         k: v
         for k, v in os.environ.items()
-        if k not in ("NUMBA_THREADING_LAYER", "KMP_DUPLICATE_LIB_OK")
+        if k
+        not in ("NUMBA_THREADING_LAYER", "KMP_DUPLICATE_LIB_OK", "NUMBA_DISABLE_JIT")
     }
+    if jit == "off":
+        env["NUMBA_DISABLE_JIT"] = "1"
     env["PYTHONPATH"] = REPO + os.pathsep + env.get("PYTHONPATH", "")
     r = subprocess.run(
         [sys.executable, "-c", imports + _BODY],
@@ -59,5 +70,5 @@ def test_numba_kernel_runs_whichever_is_imported_first(first):
         text=True,
         timeout=600,
     )
-    assert r.returncode == 0, f"order {first} first:\n{r.stdout}\n{r.stderr[-2000:]}"
+    assert r.returncode == 0, f"order {first} first, jit {jit}:\n{r.stdout}\n{r.stderr[-2000:]}"
     assert r.stdout.strip().splitlines()[-1].startswith("OK")
