@@ -142,6 +142,11 @@ Three findings:
   neighbours (Q10); models have to be retrained.
 - EAM kernel in numba; PPPM: no `_mesh_stress` on steps that do not need
   the stress, real FFT, charge assignment in numba (Q12).
+- ESM (`ESMCalculator`, also behind `ESMCoulomb`): no `_compute_stress`
+  on calls that do not need the stress (69 % of a bc2 call at 96x96x384),
+  and the Green-function matrices cached while the cell and grid are
+  unchanged (rebuilt on every call today).  Found in step 4; added to
+  tier B by the user on 2026-11-18 (addendum 4).
 - CSVR thermostat (Q14).
 - Active-learning command driven by the ensemble uncertainty (Q15).
 - Lattice thermal conductivity from third-order force constants in the
@@ -152,8 +157,8 @@ Three findings:
   potential files (`.sw`, `.tersoff`) (Q17).
 - GPU, ADR-0016 (Q23): stage 1 starts after step 5 and once access to
   the H100 is known.
-- `pytest-xdist` (Q13): decided after the durations of step 4; it needs
-  a new dev dependency.
+- `pytest-xdist` (Q13): not added after the durations of step 4
+  (addendum 4); reconsidered if the full suite exceeds 20 min again.
 
 ### Tier C: not now
 
@@ -533,18 +538,62 @@ It is a trip-wire, not a substitute for the full suite.
 Full suite after the change: 837 passed (27.7 min, loaded machine),
 including the two new JIT-off cases of `test_openmp_order.py`.
 
-**Where the full suite spends its time** (with the JIT, 1595 s):
-- The three ESM finite-difference tests take 670 s, 42 % of the suite
+**Where the full suite spent its time** (with the JIT, 1595 s):
+- The three ESM finite-difference tests took 670 s, 42 % of the suite
   (`test_esm_force_matches_finite_difference[bc1-3]`).
-- Next come the MPI GCMC run (89 s), `test_msd_vacf_smoke_and_equipartition`
+- Next came the MPI GCMC run (89 s), `test_msd_vacf_smoke_and_equipartition`
   (37 s) and the multi-species SW fit (36 s).
 Without the JIT, the multi-species SW fit alone takes 3327 s.
 
-**`pytest-xdist` (Q13).**  Not added: it is a new dependency, and the
-ESM tests would bound any parallel run.  The bc2 case alone takes 297 s.
-Shortening the ESM tests (a smaller mesh or fewer displaced atoms in the
-finite-difference check) would cut the full suite by up to 40 %
-whether or not xdist is used.  This is left for the user to decide.
+**ESM finite-difference test (follow-up grilling, 2026-11-18).**  The
+test ran 13 ESM evaluations per boundary condition on a 96x96x384 grid
+(11 s per call for bc1, 22 s for bc2) with a tolerance of atol 3e-2.
+Its comment said the forces were interpolated trilinearly, so a fine
+grid and a loose tolerance were needed.  That is no longer so: the
+analytic forces are the exact derivative of the discretised energy.
+
+| Grid | bc1 | bc2 | bc3 | max \|F - F_fd\| |
+|---|---|---|---|---|
+| 32x32x128 | 1.9 s | 3.4 s | 2.1 s | 5.3-5.4e-10 |
+| 48x48x192 | 6.4 s | 15.0 s | 11.4 s | 5.4-5.5e-10 |
+| 64x64x256 | 27.6 s | 52.0 s | 37.1 s | 5.6-5.7e-10 |
+| 96x96x384 | 163 s | 297 s | 198 s | 5.8e-10 (bc1) |
+
+The residual is the central difference's own error on every grid.  The
+test now uses 32x32x128 and atol 1e-6 (rtol 0), and the three cases take
+6.9 s together, with or without the JIT.  A force error planted in
+`_compute_forces` shows the gain: a relative error of 1e-6 now fails
+all three cases, while the old tolerance let even 1e-3 pass.
+Convergence to the continuum limit is covered by other tests:
+- `test_esm_gpar0_poisson_solve_converges_quadratically`
+- `test_esm_electrostatics.py` (image-Ewald references)
+- `test_esm_matches_ewald_for_a_symmetric_slab_in_a_long_cell`
+
+Full suite after the change: 837 passed in 872 s (14.5 min, loaded
+machine), against 1595-1661 s before.  The slowest entries are now the
+MPI GCMC fixture (100 s), then the multi-species SW fit and the MSD/VACF
+test (32 s each).
+
+The test stays `slow` (bc2 takes 3.3 s, above the 0.5 s rule).  The
+profile also showed two costs in ESM itself, which the user put in
+tier B rather than fixing now:
+- every call computes the stress, whether it is needed or not;
+- every call rebuilds the Green-function matrices.
+
+**`pytest-xdist` (Q13).**  Not added.  After the ESM change no single
+test bounds a parallel run.  But xdist is a new dependency, and its
+workers would compete with numba threads and MPI subprocesses on a
+machine that is already loaded.  It will be reconsidered if the full
+suite exceeds 20 min again.
+
+**Candidates for the same review**, left for later.  Each needs its own
+check that its size buys accuracy, unlike ESM, where the residual did
+not depend on the grid:
+- the PPPM finite-difference tests (8.4 s);
+- `test_esm_gpar0_poisson_solve_converges_quadratically` (14 s);
+- the multi-species SW fit (36 s, 3327 s without the JIT);
+- `test_gcmc_mu_is_the_full_chemical_potential` (10 s, 847 s without
+  the JIT).
 
 **Re-measuring.**
 ```

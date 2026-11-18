@@ -759,7 +759,7 @@ pip install -e ".[all,dev]"
 pytest tests/
 ```
 
-The full suite takes about 30 min.  For a quick check while editing:
+The full suite takes about 15 min.  For a quick check while editing:
 
 ```bash
 pytest tests/ -m "not slow"

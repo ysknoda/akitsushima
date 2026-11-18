@@ -305,8 +305,18 @@ def test_esm_force_matches_finite_difference(bc):
     from akitsushima.engine.coulomb.esm import ESMCalculator
 
     lattice, positions, atom_types, charges = _esm_test_structure()
+    # The analytic forces are the exact derivative of the discretised
+    # energy: the residual against the central difference is 5e-10 eV/A
+    # (the difference's own error) on every grid from 32x32x128 to
+    # 96x96x384 (ADR-0028 addendum 4).  So this check needs no fine grid,
+    # and its tolerance is set from that residual, not from the grid.  An
+    # earlier version interpolated the forces trilinearly, needed
+    # 96x96x384 and atol 3e-2, and took 11 min for the three cases.
+    # Convergence to the continuum limit is tested elsewhere
+    # (test_esm_gpar0_poisson_solve_converges_quadratically,
+    # test_esm_electrostatics.py, test_esm_matches_ewald_...).
     esm = ESMCalculator(lattice, positions, atom_types, charges=charges, bc=bc,
-                         sigma=0.3, n_grid_xy=96, n_grid_z=384)
+                         sigma=0.3, n_grid_xy=32, n_grid_z=128)
 
     def energy_of(pos):
         e, _, _ = esm(lattice, pos, atom_types)
@@ -314,12 +324,7 @@ def test_esm_force_matches_finite_difference(bc):
 
     _, f_analytic, _ = esm(lattice, positions, atom_types)
     f_numeric = finite_diff_forces(energy_of, positions)
-    # Mesh-based method with trilinear force interpolation (not matched to the
-    # Gaussian charge-assignment kernel the way PPPM's B-splines are) -- a
-    # looser, resolution-appropriate tolerance than Ewald/PPPM's near-machine
-    # precision is expected and was confirmed to shrink further with an even
-    # finer grid; this tolerance is set from the observed converged residual.
-    assert_forces_match(f_analytic, f_numeric, atol=3e-2, rtol=2e-2, label=f"ESM {bc}")
+    assert_forces_match(f_analytic, f_numeric, atol=1e-6, rtol=0.0, label=f"ESM {bc}")
 
 
 def test_esm_charge_density_recovers_atom_position():
