@@ -102,6 +102,12 @@
 > runs the other 481 in about 30 s even without JIT.  With
 > `NUMBA_DISABLE_JIT=1`, importing torch after akitsushima no longer aborts
 > the process at the first engine kernel.
+>
+> 0.2.0a20 (ADR-0030): the angular loop of the ACSF kernel computes
+> each cutoff factor once per neighbour and one exponential per distinct
+> eta, and raises integer zeta by multiplication.  An atom-centred MLIP
+> force call is 2.1-2.8 times faster, and so is fitting.  The descriptor
+> agrees with the former kernel to 3e-16 relative.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

@@ -224,7 +224,6 @@ def _fcut(r, pi_rc, r_off, r_on):
     return fc * sw, dfc * sw + fc * dsw
 
 
-@_numba_par
 def _acsf_kernel(
     ptr,
     nbj,
@@ -250,19 +249,98 @@ def _acsf_kernel(
     derivative with respect to the entry's vector v_m = r_j + shift - r_i.
     Every position and cell derivative follows from these (see
     :func:`_aggregate` and :func:`_contract`).
+
+    The per-term constants of the angular functions are prepared here
+    and the work is done by :func:`_acsf_kernel_impl` (ADR-0030): one
+    exponential per distinct (eta, G4/G5) pair, 2^(1-zeta) once per term,
+    and integer zeta raised by multiplication.
     """
+    g4_eta = np.asarray(g4_eta, dtype=np.float64)
+    g4_zeta = np.asarray(g4_zeta, dtype=np.float64)
+    g4_jk = np.asarray(g4_jk, dtype=np.float64)
+    n4 = g4_eta.shape[0]
+    combos = []
+    g4_e = np.zeros(n4, dtype=np.int64)
+    for q in range(n4):
+        key = (float(g4_eta[q]), bool(g4_jk[q] > 0.5))
+        if key not in combos:
+            combos.append(key)
+        g4_e[q] = combos.index(key)
+    exp_eta = np.array([c[0] for c in combos], dtype=np.float64)
+    exp_jk = np.array([c[1] for c in combos], dtype=np.bool_)
+    g4_K = 2.0 ** (1.0 - g4_zeta)
+    # zeta - 1 as an int where zeta is integral (zeta >= 1 is enforced by
+    # ACSF), else -1: the general power is kept for such terms
+    integral = g4_zeta == np.round(g4_zeta)
+    g4_zm1 = np.where(integral, np.round(g4_zeta) - 1.0, -1.0).astype(np.int64)
+    has_g4 = bool(np.any(g4_jk > 0.5))
+    return _acsf_kernel_impl(
+        ptr, nbj, vec, sp, n_sp, r_cut, g2_eta, g2_rs, g4_zeta,
+        np.asarray(g4_lam, dtype=np.float64), g4_jk, g4_e, g4_K, g4_zm1,
+        exp_eta, exp_jk, has_g4, pair_index, Dc, want_deriv, r_off, r_on,
+    )
+
+
+@_numba_njit
+def _pow_int(x, n):
+    """x**n for an integer n >= 0 by repeated squaring."""
+    out = 1.0
+    while n > 0:
+        if n & 1:
+            out *= x
+        x *= x
+        n >>= 1
+    return out
+
+
+@_numba_par
+def _acsf_kernel_impl(
+    ptr,
+    nbj,
+    vec,
+    sp,
+    n_sp,
+    r_cut,
+    g2_eta,
+    g2_rs,
+    g4_zeta,
+    g4_lam,
+    g4_jk,
+    g4_e,
+    g4_K,
+    g4_zm1,
+    exp_eta,
+    exp_jk,
+    has_g4,
+    pair_index,
+    Dc,
+    want_deriv,
+    r_off,
+    r_on,
+):
+    """The kernel of :func:`_acsf_kernel`.  Per atom, the distance and
+    cutoff factor of every neighbour entry are computed once (in the G2
+    loop) and reused by every angular pair the entry belongs to."""
     N = ptr.shape[0] - 1
     n2 = g2_eta.shape[0]
-    n4 = g4_eta.shape[0]
+    n4 = g4_zeta.shape[0]
+    n_exp = exp_eta.shape[0]
+    M_all = vec.shape[0]
     G = np.zeros((N, Dc))
-    M = vec.shape[0] if want_deriv else 1
+    M = M_all if want_deriv else 1
     dGdv = np.zeros((M, 3, Dc))
+    # per entry: |v|, fc and dfc/dr (entries of atom i are written by
+    # the iteration of atom i only)
+    r_m = np.empty(M_all)
+    fc_m = np.empty(M_all)
+    dfc_m = np.empty(M_all)
     pi_rc = math.pi / r_cut
     off4 = n_sp * n2
     # atoms are independent: atom i writes only G[i] and its own entries
     for i in _prange(N):
         s0 = ptr[i]
         s1 = ptr[i + 1]
+        E = np.empty(n_exp)
         # ---- G2 ----
         for m in range(s0, s1):
             j = nbj[m]
@@ -271,6 +349,9 @@ def _acsf_kernel(
             vz = vec[m, 2]
             r = math.sqrt(vx * vx + vy * vy + vz * vz)
             fc, dfc = _fcut(r, pi_rc, r_off, r_on)
+            r_m[m] = r
+            fc_m[m] = fc
+            dfc_m[m] = dfc
             for q in range(n2):
                 ch = sp[j] * n2 + q
                 x = r - g2_rs[q]
@@ -289,8 +370,9 @@ def _acsf_kernel(
             ax = vec[m, 0]
             ay = vec[m, 1]
             az = vec[m, 2]
-            ra = math.sqrt(ax * ax + ay * ay + az * az)
-            fa, dfa = _fcut(ra, pi_rc, r_off, r_on)
+            ra = r_m[m]
+            fa = fc_m[m]
+            dfa = dfc_m[m]
             for n in range(m + 1, s1):
                 k = nbj[n]
                 bx = vec[n, 0]
@@ -303,9 +385,10 @@ def _acsf_kernel(
                 if rc_ < 1e-10:
                     continue
                 in_jk = rc_ < r_cut
-                rb = math.sqrt(bx * bx + by * by + bz * bz)
-                fb, dfb = _fcut(rb, pi_rc, r_off, r_on)
-                if in_jk:
+                rb = r_m[n]
+                fb = fc_m[n]
+                dfb = dfc_m[n]
+                if has_g4 and in_jk:
                     fcc, dfcc = _fcut(rc_, pi_rc, r_off, r_on)
                 else:
                     fcc = 0.0
@@ -321,45 +404,57 @@ def _acsf_kernel(
                 dcb_y = ay * ia - cos_t * by / (rb * rb)
                 dcb_z = az * ia - cos_t * bz / (rb * rb)
                 pidx = pair_index[sp[j], sp[k]]
+                # one exponential per distinct (eta, G4/G5)
+                r5 = ra * ra + rb * rb
+                r4 = r5 + rc_ * rc_
+                for u in range(n_exp):
+                    if exp_jk[u]:
+                        E[u] = math.exp(-exp_eta[u] * r4) if in_jk else 0.0
+                    else:
+                        E[u] = math.exp(-exp_eta[u] * r5)
+                F4 = fa * fb * fcc
+                F5 = fa * fb
                 for q in range(n4):
                     jk = g4_jk[q]
                     if jk > 0.5:
                         # G4: fc(r_ij) fc(r_ik) fc(r_jk), c = b - a
                         if not in_jk:
                             continue
-                        F = fa * fb * fcc
+                        F = F4
                         t1 = dfa * fb * fcc / ra
                         t2 = fa * dfb * fcc / rb
                         t3 = fa * fb * dfcc / rc_
-                        rsum = ra * ra + rb * rb + rc_ * rc_
                     else:
                         # G5: fc(r_ij) fc(r_ik) only, no r_jk term
-                        F = fa * fb
+                        F = F5
                         t1 = dfa * fb / ra
                         t2 = fa * dfb / rb
                         t3 = 0.0
-                        rsum = ra * ra + rb * rb
-                    eta = g4_eta[q]
-                    zeta = g4_zeta[q]
                     lam = g4_lam[q]
                     ch = off4 + pidx * n4 + q
                     base_c = 1.0 + lam * cos_t
                     if base_c <= 0.0:
                         continue
-                    P = base_c**zeta
-                    E = math.exp(-eta * rsum)
-                    K = 2.0 ** (1.0 - zeta)
-                    G[i, ch] += K * P * E * F
+                    zm1 = g4_zm1[q]
+                    if zm1 >= 0:
+                        Pm1 = _pow_int(base_c, zm1)
+                    else:
+                        Pm1 = base_c ** (g4_zeta[q] - 1.0)
+                    P = Pm1 * base_c
+                    Ee = E[g4_e[q]]
+                    K = g4_K[q]
+                    G[i, ch] += K * P * Ee * F
                     if not want_deriv:
                         continue
+                    eta = exp_eta[g4_e[q]]
                     dFa_x = t1 * ax - t3 * cx
                     dFa_y = t1 * ay - t3 * cy
                     dFa_z = t1 * az - t3 * cz
                     dFb_x = t2 * bx + t3 * cx
                     dFb_y = t2 * by + t3 * cy
                     dFb_z = t2 * bz + t3 * cz
-                    dP = K * zeta * base_c ** (zeta - 1.0) * lam * E * F
-                    KPE = K * P * E
+                    dP = K * g4_zeta[q] * Pm1 * lam * Ee * F
+                    KPE = K * P * Ee
                     # d(exp)/da = -2 eta E (a - jk c), d/db = -2 eta E (b + jk c)
                     dGdv[m, 0, ch] += dP * dca_x + KPE * (
                         -2.0 * eta * (ax - jk * cx) * F + dFa_x

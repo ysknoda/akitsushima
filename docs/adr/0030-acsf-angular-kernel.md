@@ -1,5 +1,5 @@
 ---
-status: proposed (2026-11-18)
+status: accepted (2026-11-18; gate passed, 2.1-2.8 times -- see Result)
 ---
 
 # ACSF kernel: fewer operations in the angular loop
@@ -96,6 +96,52 @@ loaded machine (load average about 7), best of 3.
    accepted or rejected.  ADR-0028 step 5 links here for the two items
    taken out.  If the change is adopted, the version goes to 0.2.0a20.
 
-## Result
+## Result (2026-11-18, 0.2.0a20)
 
-(to be appended)
+**Implementation.**  `_acsf_kernel` keeps its signature.  It now
+prepares the per-term constants:
+- the index of each term's exponential among the distinct
+  (eta, G4/G5) pairs;
+- `2**(1 - zeta)`;
+- zeta - 1 as an integer where zeta is integral.
+
+It then calls `_acsf_kernel_impl`.  That kernel stores |v|, fc and
+dfc of each neighbour entry in the G2 loop and reads them back in the
+angular loop.  The other changes in the angular loop:
+- it evaluates one exponential per distinct (eta, G4/G5) per pair;
+- it raises integer zeta with `_pow_int` (repeated squaring) and forms
+  base^zeta as base^(zeta-1) * base, so the derivative reuses
+  base^(zeta-1);
+- it skips the cutoff of r_jk when the grid has no G4 term.
+
+**Equality.**  `tests/test_acsf_kernel_reference.py` (19 tests) passes
+to relative 1e-10 against the copied kernel.  The actual differences
+are far smaller.  On GeSn with 4096 atoms, G differs by at most
+1.2e-16 relative and dGdv by 2.8e-16; 87 % and 78 % of the elements are
+bit-identical.  The existing ACSF and MLIP tests (finite differences,
+chain rule, thin cells) pass with and without the JIT.  The two
+comparison tests are `slow`: without the JIT they take 2-12 s.
+
+**Gate.**  One ACSF(ac_elm_iso_r2 grid) + ELM(400) force call, old and
+new kernel alternated in one process: 3 rounds, best of 3 each, load
+average about 8.
+
+| Case | N | threads | old [ms] | new [ms] | speed-up |
+|---|---|---|---|---|---|
+| Si | 512 | 1 | 145.3 | 53.1 | 2.74 |
+| Si | 512 | 4 | 56.5 | 23.1 | 2.44 |
+| Si | 4096 | 1 | 1217.3 | 437.5 | 2.78 |
+| Si | 4096 | 4 | 435.8 | 181.2 | 2.41 |
+| GeSn | 512 | 1 | 147.4 | 58.1 | 2.53 |
+| GeSn | 512 | 4 | 54.3 | 25.0 | 2.17 |
+| GeSn | 4096 | 1 | 1207.9 | 472.0 | 2.56 |
+| GeSn | 4096 | 4 | 447.0 | 212.1 | 2.11 |
+
+Every case passes the 1.5x gate.  On the kernel alone (GeSn, 4096
+atoms, 1 thread), G takes 178 ms against 660 ms (3.7 times) and G with
+dGdv takes 410 ms against 1164 ms (2.8 times).  Writing dGdv is now the
+larger part of the kernel.  The share of the whole call that is not
+kernel grows with the thread count, which is why the 4-thread
+speed-ups are lower.
+
+Full suite: 855 passed, 1 skipped (14.1 min, loaded machine).

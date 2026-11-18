@@ -115,6 +115,10 @@ Three findings:
    contraction of force and virial without storing `dGdv`, radial terms
    computed once per pair, reuse of the neighbour list within a skin.
    This is also the CPU form of ADR-0016 decision 6.
+   *Done as ADR-0030 (0.2.0a20): only the arithmetic of the angular
+   loop changed, for 2.1-2.8 times per force call.  The fused
+   contraction and the skin reuse were taken out after measurement
+   (ADR-0030 decision 2).*
 6. **Restart of `md` and `relax` (Q14).**  The limit recorded in
    ADR-0025: a run longer than 12 h is not possible today.
 7. **Langevin thermostat in `md` (Q14; moved from tier B by the user on
