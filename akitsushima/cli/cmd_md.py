@@ -6,7 +6,7 @@ import time as _time
 
 import numpy as np
 
-from ..solvers import NPTSimulation, NVESimulation, NVTSimulation
+from ..solvers import LangevinSimulation, NPTSimulation, NVESimulation, NVTSimulation
 from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..utils.mpi import _mpi_rank
 from .common import (
@@ -33,6 +33,15 @@ def cmd_md(args) -> int:
     pot_cfg    = cfg.get("potential", {})
     md_cfg     = cfg.get("md",        {})
     ens        = str(md_cfg.get("ensemble", "nvt")).lower()
+    # NVT thermostat (ADR-0032): nhc (Nose-Hoover chain, default) or
+    # langevin (BAOAB); only the NVT ensemble has a choice.
+    thermostat = str(md_cfg.get("thermostat", "nhc")).lower()
+    if thermostat not in ("nhc", "langevin"):
+        raise ValueError(f"md: thermostat must be 'nhc' or 'langevin', got {thermostat!r}.")
+    if thermostat == "langevin" and ens != "nvt":
+        raise ValueError(
+            f"md: thermostat: langevin is available for ensemble: nvt only, "
+            f"not {ens!r} (ADR-0032).")
     # Only rank 0 prints anything and runs with verbose=True; every other
     # MPI rank stays silent. Without this guard, `mpirun -n N` would have
     # ALL N ranks independently execute cmd_md() and print the SAME
@@ -66,7 +75,10 @@ def cmd_md(args) -> int:
         print(f"  Equil steps  : {equil}  ({equil*dt/1000:.4f} ps)")
         print(f"  Prod  steps  : {n_steps}  ({n_steps*dt/1000:.4f} ps)")
         print(f"  Total steps  : {total}  ({total*dt/1000:.4f} ps)")
-        if ens in ("nvt", "npt"):
+        if thermostat == "langevin":
+            print(f"  Thermostat   : Langevin (BAOAB), damping "
+                  f"{md_cfg.get('damping', 100.0)} fs")
+        elif ens in ("nvt", "npt"):
             # The defaults differ per ensemble and must match what the
             # constructors below actually receive: printing 20.0 for an
             # NPT run that then ran at 100.0 was simply a false report.
@@ -121,6 +133,14 @@ def cmd_md(args) -> int:
                             tau_baro   =md_cfg.get("tau_baro",   1000.0),
                             velocity_rescale_steps=md_cfg.get(
                                 "velocity_rescale_steps", 0))
+    elif thermostat == "langevin":
+        # velocity_rescale_steps is passed so that a value above 0 stops
+        # with the reason instead of being ignored (ADR-0032 decision 8)
+        sim = LangevinSimulation(**common,
+                                 temperature=md_cfg.get("temperature", 300.0),
+                                 damping=md_cfg.get("damping", 100.0),
+                                 velocity_rescale_steps=md_cfg.get(
+                                     "velocity_rescale_steps", 0))
     else:
         sim = NVTSimulation(**common,
                             temperature=md_cfg.get("temperature",300.0),

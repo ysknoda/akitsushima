@@ -128,6 +128,8 @@ Three findings:
    Langevin baths (ADR-0020), but only as its two heat-bath regions.  It
    follows step 6 so that the random-number state is designed into the
    checkpoint from the start.
+   *Done as ADR-0032 (0.2.0a22): BAOAB, `thermostat: langevin` under
+   `ensemble: nvt`; restarts bit for bit with its random-number state.*
 8. **Ensemble ELM with an uncertainty output (Q15; ADR-0010 item 7).**
    ADR-0027 rounds 3-5 found that the spurious anneal minima differ from
    one ELM seed to the next, which more data does not remove.

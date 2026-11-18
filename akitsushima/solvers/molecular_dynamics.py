@@ -25,7 +25,7 @@ from ..utils.timing import TimingCollector
 from ._checkpoint import (check_settings, load_checkpoint, output_sizes,
                           save_checkpoint, truncate_outputs)
 
-__all__ = ["NVTSimulation", "NVESimulation", "NPTSimulation"]
+__all__ = ["NVTSimulation", "LangevinSimulation", "NVESimulation", "NPTSimulation"]
 
 
 class _BaseMDSimulation:
@@ -957,7 +957,9 @@ class NVTSimulation(_BaseMDSimulation):
         times  = [r["time_ps"] for r in self._thermo_log]
         T_list = [r["T_inst"] for r in self._thermo_log]
         E_list = [r["e_tot"]  for r in self._thermo_log]
-        H_list = [r["H_nhc"]  for r in self._thermo_log]
+        # NHC: the chain's conserved quantity; Langevin: E_tot - Q
+        h_key = "H_nhc" if "H_nhc" in self._thermo_log[0] else "e_minus_q"
+        H_list = [r[h_key] for r in self._thermo_log]
 
         fig, axes = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
 
@@ -971,7 +973,8 @@ class NVTSimulation(_BaseMDSimulation):
         axes[1].set_ylabel("Total energy (eV)")
 
         axes[2].plot(times, H_list, lw=0.8, color="darkorange")
-        axes[2].set_ylabel("NHC conserved qty (eV)")
+        axes[2].set_ylabel("NHC conserved qty (eV)" if h_key == "H_nhc"
+                           else "E_tot - Q (eV)")
         axes[2].set_xlabel("Time (ps)")
 
         for ax in axes:
@@ -990,6 +993,239 @@ class NVTSimulation(_BaseMDSimulation):
         fig.savefig(path, dpi=150)
         plt.close(fig)
         print(f"  MD time-series plot saved: {path}")
+
+
+# ============================================================================
+#  SECTION 6.1b: NVT molecular dynamics -- Langevin thermostat (BAOAB)
+# ============================================================================
+#
+#  Integrator : BAOAB splitting of Langevin dynamics.
+#  Reference  : B. Leimkuhler and C. Matthews, Appl. Math. Res. Express
+#               2013, 34; J. Chem. Phys. 138, 174102 (2013).  ADR-0032.
+# ============================================================================
+
+class LangevinSimulation(NVTSimulation):
+    """
+    NVT molecular dynamics with a Langevin thermostat on every atom,
+    integrated with BAOAB (ADR-0032).
+
+    One step:  B  v += dt/2 F/m
+               A  r += dt/2 v
+               O  v  = c v + sqrt(1 - c^2) sqrt(kT/m) xi,  c = exp(-dt/damping)
+               A  r += dt/2 v
+                  F = F(r)
+               B  v += dt/2 F/m
+
+    BAOAB samples configurations with a small time-step error; for a
+    harmonic potential <x^2> = kT/k exactly at any stable dt.  After
+    each O step the centre-of-mass velocity is removed (unless atoms are
+    fixed), so the crystal does not random-walk; the number of degrees
+    of freedom is that of NVTSimulation (3N - 3 without fixed atoms).
+
+    Parameters
+    ----------
+    As :class:`NVTSimulation`, with
+    damping : Langevin relaxation time 1/gamma [fs] (default 100).
+    ``tau_nhc`` is not used, and ``velocity_rescale_steps`` must be 0:
+    the thermostat itself relaxes to the target in a few damping times.
+
+    Output files
+    ------------
+    As NVTSimulation (XDATCAR_nvt, thermo.log, POSCAR_final_MD).  The
+    thermo.log column ``E-Q(eV)`` is E_tot minus the heat Q the
+    thermostat has added (O steps and centre-of-mass removal); its drift
+    measures the integration error, as H_NHC does for the chain.
+    """
+
+    _CK_ENSEMBLE = "langevin"
+    _CK_SCALARS: Tuple[str, ...] = ()
+
+    def __init__(self, *args, damping: float = 100.0,
+                 velocity_rescale_steps: int = 0, **kwargs):
+        if int(velocity_rescale_steps) != 0:
+            raise ValueError(
+                "LangevinSimulation: velocity_rescale_steps must be 0, got "
+                f"{velocity_rescale_steps}.  The Langevin thermostat relaxes "
+                "to the target temperature within a few damping times by "
+                "itself; rescaling is a Nose-Hoover-chain aid (ADR-0032).")
+        if not (damping > 0.0):
+            raise ValueError(
+                f"LangevinSimulation: damping must be > 0 fs, got {damping}.")
+        super().__init__(*args, velocity_rescale_steps=0, **kwargs)
+        self.damping = float(damping)
+
+    def _ck_settings(self) -> dict:
+        out = super()._ck_settings()
+        out.pop("tau_nhc", None)
+        out["damping"] = float(self.damping)
+        return out
+
+    def _o_step(self, c: float) -> float:
+        """Ornstein-Uhlenbeck step over dt, then removal of the
+        centre-of-mass velocity; returns the kinetic energy added [eV]."""
+        before = self._kinetic_energy()
+        sig = np.sqrt((1.0 - c * c) * K_B * self.temperature
+                      * EV_ANG_TO_AMU_ANG_FS2 / self.masses)
+        self.velocities = (c * self.velocities
+                           + sig[:, None] * self.rng.standard_normal((self.N, 3)))
+        if np.any(self._fix_mask):
+            self.velocities *= ~self._fix_mask
+        else:
+            self.velocities -= (np.sum(self.masses[:, None] * self.velocities, axis=0)
+                                / self.masses.sum())
+        return self._kinetic_energy() - before
+
+    def _wrap(self) -> None:
+        frac = self.positions @ np.linalg.inv(self.lattice)
+        frac -= np.floor(frac)
+        frac[frac >= 1.0] = 0.0
+        self.positions = frac @ self.lattice
+
+    def run(self, checkpoint: Optional[str] = None, checkpoint_every: int = 0,
+            checkpoint_meta: Optional[dict] = None) -> dict:
+        """
+        Execute the Langevin (BAOAB) NVT run.  ``checkpoint``,
+        ``checkpoint_every`` and ``checkpoint_meta`` as in
+        :meth:`NVTSimulation.run`; the checkpoint also holds the heat Q
+        and the random-number state, so a restart continues bit for bit.
+        """
+        self._tc.start("total")  # timing
+        self._ensure_output_dir(self.output_dir)
+        traj_path   = os.path.join(self.output_dir, "XDATCAR_nvt")
+        thermo_path = os.path.join(self.output_dir, "thermo.log")
+        ck = self._ck_begin(checkpoint, checkpoint_meta,
+                            {"thermo": thermo_path, "traj": traj_path})
+
+        e_pot, forces, stress = self._compute_forces()
+        acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
+        Q = float(ck["extra"]["Q"]) if ck is not None else 0.0
+        c = float(np.exp(-self.dt / self.damping))
+
+        total_steps = self.equil_steps + self.n_steps
+        header = (f"{'Step':>8}  {'Time(ps)':>10}  {'E_pot(eV)':>14}  "
+                  f"{'E_kin(eV)':>12}  {'E_tot(eV)':>12}  "
+                  f"{'T_inst(K)':>10}  {'E-Q(eV)':>14}  "
+                  f"{'NL_builds':>10}")
+        if self.verbose:
+            print(f"\nLangevin NVT-MD (BAOAB): T={self.temperature} K  "
+                  f"damping={self.damping} fs  dt={self.dt} fs  "
+                  f"steps={total_steps}  (equil={self.equil_steps})")
+            print(header)
+            print("  " + "-" * len(header))
+
+        lists = {"T": [], "e_pot": [], "e_kin": []}
+        if ck is not None:
+            lists.update(ck["lists"])
+        start = ck["step"] if ck is not None else 0
+        mode = "a" if ck is not None else "w"
+        _traj_path_use   = traj_path   if _mpi_rank == 0 else os.devnull
+        _thermo_path_use = thermo_path if _mpi_rank == 0 else os.devnull
+        with (open(_traj_path_use,   mode) as traj_fh,
+              open(_thermo_path_use, mode) as thermo_fh):
+            if ck is None:
+                thermo_fh.write(header + "\n")
+                _write_xdatcar_header(
+                    traj_fh, self.lattice, self.atom_types,
+                    comment=f"akitsushima.py Langevin NVT-MD  T={self.temperature}K")
+                self._xdatcar_frame_idx = 1
+            else:
+                self._xdatcar_frame_idx = ck["frame"]
+            handles = {"thermo": thermo_fh, "traj": traj_fh}
+
+            for step in range(start, total_steps):
+                self._tc.start("step")  # timing
+                t_ps = step * self.dt * 1e-3
+                # B
+                self.velocities += 0.5 * self.dt * acc
+                self.velocities *= ~self._fix_mask
+                # A
+                self.positions += 0.5 * self.dt * self.velocities
+                # O
+                Q += self._o_step(c)
+                # A
+                self.positions += 0.5 * self.dt * self.velocities
+                self._wrap()
+                # force, B
+                e_pot, forces, stress = self._compute_forces()
+                acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
+                self.velocities += 0.5 * self.dt * acc
+                self.velocities *= ~self._fix_mask
+
+                e_kin  = self._kinetic_energy()
+                e_tot  = e_pot + e_kin
+                T_inst = self._instantaneous_temperature()
+                is_prod = step >= self.equil_steps
+                if is_prod:
+                    lists["T"].append(T_inst)
+                    lists["e_pot"].append(e_pot)
+                    lists["e_kin"].append(e_kin)
+
+                self._tc.lap("step")  # timing
+                if step % self.thermo_every == 0:
+                    row = (f"{step:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
+                           f"{e_kin:12.6f}  {e_tot:12.6f}  "
+                           f"{T_inst:10.2f}  {e_tot - Q:14.6f}  "
+                           f"{self._nl.rebuild_count:10d}")
+                    thermo_fh.write(row + "\n")
+                    if self.verbose:
+                        print("  " + row)
+                    self._thermo_log.append({
+                        "step": step, "time_ps": t_ps, "e_pot": e_pot,
+                        "e_kin": e_kin, "e_tot": e_tot, "T_inst": T_inst,
+                        "e_minus_q": e_tot - Q,
+                        "nl_builds": self._nl.rebuild_count,
+                    })
+                if is_prod and step % self.traj_every == 0:
+                    self._write_trajectory_frame(traj_fh)
+                if self.flush_every_step and (
+                        step % self.thermo_every == 0
+                        or (is_prod and step % self.traj_every == 0)):
+                    self._flush_outputs([thermo_fh, traj_fh],
+                                        fsync=self.fsync_every_step)
+                if (checkpoint and checkpoint_every
+                        and (step + 1) % checkpoint_every == 0):
+                    self._ck_save(checkpoint, checkpoint_meta, step + 1,
+                                  lists, {"Q": Q}, handles)
+            if checkpoint:
+                self._ck_save(checkpoint, checkpoint_meta, total_steps,
+                              lists, {"Q": Q}, handles)
+
+        out_poscar = os.path.join(self.output_dir, "POSCAR_final_MD")
+        if _mpi_rank == 0:
+            write_poscar(out_poscar, self.lattice, self.positions,
+                         self.atom_types,
+                         title=f"Langevin MD final frame  T={self.temperature}K")
+        T_arr = np.array(lists["T"])
+        T_mean = float(T_arr.mean()) if len(T_arr) else 0.0
+        T_std = float(T_arr.std()) if len(T_arr) else 0.0
+        Ep_mean = float(np.mean(lists["e_pot"])) if lists["e_pot"] else 0.0
+        if self.verbose:
+            print(f"\n  Langevin NVT-MD finished.")
+            print(f"  <T>      = {T_mean:.2f} +/- {T_std:.2f} K  "
+                  f"(target {self.temperature} K)")
+            print(f"  <E_pot>  = {Ep_mean:.6f} eV")
+            print(f"  Heat added by the thermostat: {Q:.6f} eV")
+            print(f"  Trajectory : {traj_path}")
+            print(f"  Log        : {thermo_path}")
+            print(f"  Final POSCAR: {out_poscar}")
+        if (self.save_plots and have_matplotlib() and len(self._thermo_log) > 1
+                and _mpi_rank == 0):
+            self._save_md_plots()
+        self._tc.stop("total")  # timing
+        _timing = self._tc.summary()
+        if _timing.get("enabled") and _mpi_rank == 0:
+            self._tc.print_summary(label="LangevinSimulation")
+        return {
+            "positions"  : self.positions.copy(),
+            "velocities" : self.velocities.copy(),
+            "lattice"    : self.lattice.copy(),
+            "T_mean"     : T_mean,
+            "T_std"      : T_std,
+            "e_pot_mean" : Ep_mean,
+            "heat_added" : Q,
+            "thermo_log" : self._thermo_log,
+            "timing"     : _timing,
+        }
 
 
 # ============================================================================

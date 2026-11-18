@@ -113,6 +113,12 @@
 > from it when run again (`restart: false` starts afresh).  md continues
 > bit for bit and can be extended by raising `n_steps`.  relax continues
 > from the checkpointed structure with the optimiser restarted.
+>
+> 0.2.0a22 (ADR-0032): `md` with `ensemble: nvt` takes `thermostat:
+> langevin` (BAOAB, `damping` in fs, centre of mass kept at rest;
+> `ak.LangevinSimulation` in the API).  Its random-number state is part
+> of the checkpoint, so it restarts bit for bit too; `thermo.log` shows
+> E_tot - Q (Q the heat the thermostat added) as the integrator check.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -333,7 +339,7 @@ print(result["energy"] / 64, "eV/atom after relaxation")
 | Command | Purpose |
 |---|---|
 | `relax`  | Geometry optimisation (FIRE / L-BFGS / DIIS / RMM-DIIS / RFO); restartable |
-| `md`     | Molecular dynamics (NVT / NVE / NPT); restartable, bit for bit |
+| `md`     | Molecular dynamics (NVT with Nose-Hoover chain or Langevin BAOAB / NVE / NPT); restartable, bit for bit |
 | `anneal` | MD-quench annealing or basin hopping; distinct minima, restartable |
 | `gcmc`   | Grand-canonical Monte Carlo MD (μVT) |
 | `neb`    | Climbing-image NEB transition-state search |

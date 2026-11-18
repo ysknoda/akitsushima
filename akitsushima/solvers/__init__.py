@@ -3,7 +3,12 @@ from .elastic import ElasticConstantsCalculator, elastic_moduli, fit_equation_of
 from .gcmc import CFCMCSimulation, GCMCMDSimulation
 from .geometry_optimiser import GeometryOptimiser
 from .global_opt import GlobalOptimiser
-from .molecular_dynamics import NPTSimulation, NVESimulation, NVTSimulation
+from .molecular_dynamics import (
+    LangevinSimulation,
+    NPTSimulation,
+    NVESimulation,
+    NVTSimulation,
+)
 from .neb import NEBChain, NEBOptimiser
 from .phonon import PhononCalculator
 from .rdf import RadialDistributionFunction
@@ -14,6 +19,7 @@ __all__ = [
     "GeometryOptimiser",
     "GlobalOptimiser",
     "NVTSimulation",
+    "LangevinSimulation",
     "NVESimulation",
     "NPTSimulation",
     "GCMCMDSimulation",

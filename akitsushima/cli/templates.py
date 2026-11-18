@@ -237,6 +237,11 @@ potential:
 
 md:
   ensemble:     nvt
+  thermostat:   nhc                # nhc (Nose-Hoover chain) | langevin (BAOAB,
+                                   # ADR-0032).  langevin uses damping (fs,
+                                   # 1/gamma) instead of tau_nhc, and needs
+                                   # velocity_rescale_steps: 0
+  # damping:    100.0              # fs, langevin only
   output_dir:   ./nvt_output
   temperature:  300.0              # K
   timestep:     1.0                # fs

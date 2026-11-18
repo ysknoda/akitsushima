@@ -147,6 +147,7 @@ from .solvers import (
     NPTSimulation,
     NVESimulation,
     NVTSimulation,
+    LangevinSimulation,
     PhononCalculator,
     RadialDistributionFunction,
     ThermalConductivityCalculator,
@@ -156,7 +157,7 @@ from .solvers import (
 )
 from .solvers.config_bridge import force_fn_from_config
 
-__version__ = "0.2.0a21"
+__version__ = "0.2.0a22"
 
 __all__ = [
     "__version__",
@@ -180,7 +181,7 @@ __all__ = [
     "ELMModel", "QuantizedELMModel", "LinearModel", "NNModel",
     "AtomicELMModel", "AtomicQELMModel", "AtomicNNModel",
     # solvers
-    "GeometryOptimiser", "NVTSimulation", "NVESimulation", "NPTSimulation",
+    "GeometryOptimiser", "NVTSimulation", "LangevinSimulation", "NVESimulation", "NPTSimulation",
     "GCMCMDSimulation", "CFCMCSimulation",
     "NEBChain", "NEBOptimiser", "TransitionStateAnalyser",
     "PhononCalculator", "ThermalConductivityCalculator",
