@@ -18,6 +18,8 @@ from ..constants import ATOMIC_MASS, EV_ANG3_TO_GPA, EV_ANG_TO_AMU_ANG_FS2, K_B
 from ..engine.neighborlist import NeighbourList, neighbour_list_for, wrap_positions_into_cell
 from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
+from ..io.structure import _sort_species
+from ..io.trajectory import TrajectoryWriter, check_traj_format, traj_path as _traj_path
 from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
 from ..utils.mpi import _mpi_rank
 from ..utils.optional_matplotlib import have_matplotlib, plt
@@ -316,6 +318,28 @@ class _BaseMDSimulation:
     _CK_SCALARS: Tuple[str, ...] = ()
     _CK_ENSEMBLE = ""
 
+    # ------------------------------------------------------------------ #
+    #  Trajectory output (ADR-0034: xdatcar | extxyz | lammps-dump)
+    # ------------------------------------------------------------------ #
+    traj_format = "xdatcar"
+
+    def _traj_header(self, fh, lattice, atom_types, comment="") -> None:
+        """The XDATCAR header of a fixed cell; the other formats have none."""
+        if self.traj_format == "xdatcar":
+            _write_xdatcar_header(fh, lattice, atom_types, comment=comment)
+
+    def _traj_frame(self, fh, step, e_pot, forces, stress, variable_cell,
+                    comment="") -> None:
+        if not hasattr(self, "_traj_species"):
+            self._traj_species = _sort_species(self.atom_types)
+        w = TrajectoryWriter(fh, self.traj_format, variable_cell=variable_cell,
+                             species=self._traj_species)
+        w.frame_idx = self._xdatcar_frame_idx
+        w.frame(step, self.lattice, self.positions, self.atom_types,
+                energy=e_pot, forces=forces, stress=stress,
+                comment=comment or "akitsushima MD trajectory")
+        self._xdatcar_frame_idx += 1
+
     def _ck_settings(self) -> dict:
         """Settings a restart must match (ADR-0031 decision 9)."""
         out = {
@@ -328,6 +352,8 @@ class _BaseMDSimulation:
             "traj_every": int(self.traj_every),
             "velocity_rescale_steps": int(getattr(self, "velocity_rescale_steps", 0)),
         }
+        if self.traj_format != "xdatcar":  # absent for xdatcar: older checkpoints match
+            out["traj_format"] = self.traj_format
         for name in ("temperature", "tau_nhc", "tau_baro", "pressure_gpa"):
             if hasattr(self, name):
                 out[name] = float(getattr(self, name))
@@ -540,7 +566,9 @@ class NVTSimulation(_BaseMDSimulation):
     n_steps      : production MD steps.
     equil_steps  : equilibration steps (excluded from trajectory / averages).
     tau_nhc      : NHC thermostat time constant [fs]  (50--200 fs typical).
-    traj_every   : XYZ trajectory output interval [steps].
+    traj_every   : trajectory output interval [steps].
+    traj_format  : "xdatcar" (default) | "extxyz" | "lammps-dump" (ADR-0034):
+                   XDATCAR_<task>, traj_<task>.extxyz or traj_<task>.lammpstrj.
     thermo_every : thermo log output interval [steps].
     skin_width   : Verlet skin width [A] for neighbour-list lazy rebuild.
     seed         : RNG seed for initial velocity generation.
@@ -580,6 +608,7 @@ class NVTSimulation(_BaseMDSimulation):
                  tau_nhc         : float = 100.0,
                  output_dir      : str   = ".",
                  traj_every      : int   = 10,
+                 traj_format     : str   = "xdatcar",
                  thermo_every    : int   = 100,
                  equil_steps     : int   = 0,
                  skin_width      : float = 0.5,
@@ -610,6 +639,7 @@ class NVTSimulation(_BaseMDSimulation):
         self.tau_nhc        = tau_nhc
         self.output_dir     = output_dir
         self.traj_every     = traj_every
+        self.traj_format    = check_traj_format(traj_format)
         self.thermo_every   = thermo_every
         self.equil_steps    = equil_steps
         self.verbose        = verbose
@@ -710,24 +740,11 @@ class NVTSimulation(_BaseMDSimulation):
             self.lattice, self.positions, self.atom_types,
             neigh_list=self._nl)
 
-    def _write_trajectory_frame(self, fh) -> None:
-        """
-        Append one configuration to the open XDATCAR trajectory file.
-
-        Named for the format it writes.  It was _write_xyz_frame and took
-        `step` and `e_pot`, neither of which it used -- a leftover from an
-        XYZ writer that put them in the comment line.  XDATCAR has no
-        such field.
-
-        NVT uses a fixed cell, so only the "Direct configuration="
-        line and fractional coordinates are written per frame; the
-        header (comment, scale, lattice, species, counts) is written
-        once at the start of the file, before the MD loop begins.
-        """
-        _write_xdatcar_frame(fh, self.positions, self.lattice,
-                             self.atom_types, self._xdatcar_frame_idx,
-                             variable_header=False)
-        self._xdatcar_frame_idx += 1
+    def _write_trajectory_frame(self, fh, step, e_pot, forces, stress) -> None:
+        """Append one configuration to the open trajectory file (fixed
+        cell: an XDATCAR carries its header once, written before the
+        loop)."""
+        self._traj_frame(fh, step, e_pot, forces, stress, variable_cell=False)
 
     # ------------------------------------------------------------------ #
     #  Main MD loop                                                        #
@@ -766,7 +783,7 @@ class NVTSimulation(_BaseMDSimulation):
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
-        traj_path   = os.path.join(self.output_dir, "XDATCAR_nvt")
+        traj_path   = _traj_path(self.output_dir, "nvt", self.traj_format)
         thermo_path = os.path.join(self.output_dir, "thermo.log")
         ck = self._ck_begin(checkpoint, checkpoint_meta,
                             {"thermo": thermo_path, "traj": traj_path})
@@ -814,7 +831,7 @@ class NVTSimulation(_BaseMDSimulation):
 
             if ck is None:
                 thermo_fh.write(header + self._unc_header() + "\n")
-                _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
+                self._traj_header(traj_fh, self.lattice, self.atom_types,
                                      comment=f"akitsushima.py NVT-MD  T={self.temperature}K")
                 self._xdatcar_frame_idx = 1
             else:
@@ -905,7 +922,7 @@ class NVTSimulation(_BaseMDSimulation):
                     })
 
                 if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh)
+                    self._write_trajectory_frame(traj_fh, step, e_pot, forces, stress)
 
                 # Push this step's output to disk for real-time
                 # monitoring during a long-running MD calculation.
@@ -1113,7 +1130,7 @@ class LangevinSimulation(NVTSimulation):
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
-        traj_path   = os.path.join(self.output_dir, "XDATCAR_nvt")
+        traj_path   = _traj_path(self.output_dir, "nvt", self.traj_format)
         thermo_path = os.path.join(self.output_dir, "thermo.log")
         ck = self._ck_begin(checkpoint, checkpoint_meta,
                             {"thermo": thermo_path, "traj": traj_path})
@@ -1146,7 +1163,7 @@ class LangevinSimulation(NVTSimulation):
               open(_thermo_path_use, mode) as thermo_fh):
             if ck is None:
                 thermo_fh.write(header + self._unc_header() + "\n")
-                _write_xdatcar_header(
+                self._traj_header(
                     traj_fh, self.lattice, self.atom_types,
                     comment=f"akitsushima.py Langevin NVT-MD  T={self.temperature}K")
                 self._xdatcar_frame_idx = 1
@@ -1199,7 +1216,7 @@ class LangevinSimulation(NVTSimulation):
                         "nl_builds": self._nl.rebuild_count,
                     })
                 if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh)
+                    self._write_trajectory_frame(traj_fh, step, e_pot, forces, stress)
                 if self.flush_every_step and (
                         step % self.thermo_every == 0
                         or (is_prod and step % self.traj_every == 0)):
@@ -1289,7 +1306,9 @@ class NVESimulation(_BaseMDSimulation):
     velocities   : (N,3) [A/fs].  If None, drawn from Maxwell-Boltzmann
                    at ``temperature``.
     temperature  : used only when ``velocities`` is None [K].
-    traj_every   : XYZ frame output interval [steps].
+    traj_every   : trajectory output interval [steps].
+    traj_format  : "xdatcar" (default) | "extxyz" | "lammps-dump" (ADR-0034):
+                   XDATCAR_<task>, traj_<task>.extxyz or traj_<task>.lammpstrj.
     thermo_every : thermo log output interval [steps].
     skin_width   : Verlet skin [A].
     seed         : RNG seed for velocity generation.
@@ -1325,6 +1344,7 @@ class NVESimulation(_BaseMDSimulation):
                  velocities     : Optional[np.ndarray] = None,
                  temperature    : float = 300.0,
                  traj_every     : int   = 10,
+                 traj_format    : str   = "xdatcar",
                  thermo_every   : int   = 100,
                  output_dir     : str   = ".",
                  skin_width     : float = 0.5,
@@ -1352,6 +1372,7 @@ class NVESimulation(_BaseMDSimulation):
         self.equil_steps    = equil_steps
         self.temperature    = temperature
         self.traj_every     = traj_every
+        self.traj_format    = check_traj_format(traj_format)
         self.thermo_every   = thermo_every
         self.output_dir     = output_dir
         self.verbose        = verbose
@@ -1411,12 +1432,9 @@ class NVESimulation(_BaseMDSimulation):
             self.lattice, self.positions, self.atom_types,
             neigh_list=self._nl)
 
-    def _write_trajectory_frame(self, fh) -> None:
-        """Append one configuration to the open XDATCAR file (fixed cell)."""
-        _write_xdatcar_frame(fh, self.positions, self.lattice,
-                             self.atom_types, self._xdatcar_frame_idx,
-                             variable_header=False)
-        self._xdatcar_frame_idx += 1
+    def _write_trajectory_frame(self, fh, step, e_pot, forces, stress) -> None:
+        """Append one configuration to the open trajectory file (fixed cell)."""
+        self._traj_frame(fh, step, e_pot, forces, stress, variable_cell=False)
 
     # ------------------------------------------------------------------
     def run(self, checkpoint: Optional[str] = None, checkpoint_every: int = 0,
@@ -1455,7 +1473,7 @@ class NVESimulation(_BaseMDSimulation):
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
-        traj_path   = os.path.join(self.output_dir, "XDATCAR_nve")
+        traj_path   = _traj_path(self.output_dir, "nve", self.traj_format)
         thermo_path = os.path.join(self.output_dir, "thermo.log")
         ck = self._ck_begin(checkpoint, checkpoint_meta,
                             {"thermo": thermo_path, "traj": traj_path})
@@ -1496,7 +1514,7 @@ class NVESimulation(_BaseMDSimulation):
               open(_thermo_path_use, mode) as thermo_fh):
             if ck is None:
                 thermo_fh.write(header + self._unc_header() + "\n")
-                _write_xdatcar_header(traj_fh, self.lattice, self.atom_types,
+                self._traj_header(traj_fh, self.lattice, self.atom_types,
                                      comment="akitsushima.py NVE-MD")
                 self._xdatcar_frame_idx = 1
             else:
@@ -1570,7 +1588,7 @@ class NVESimulation(_BaseMDSimulation):
                         print("  " + row)
 
                 if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh)
+                    self._write_trajectory_frame(traj_fh, step, e_pot, forces, stress)
 
                 # Push this step's output to disk for real-time
                 # monitoring during a long-running MD calculation.
@@ -1704,7 +1722,9 @@ class NPTSimulation(_BaseMDSimulation):
     tau_nhc      : NHC thermostat time constant [fs].  Default 100 fs.
     tau_baro     : barostat time constant [fs].  Default 1000 fs.
                    Should be >= 5--10 x tau_nhc for stability.
-    traj_every   : XYZ frame interval [steps].
+    traj_every   : trajectory output interval [steps].
+    traj_format  : "xdatcar" (default) | "extxyz" | "lammps-dump" (ADR-0034):
+                   XDATCAR_<task>, traj_<task>.extxyz or traj_<task>.lammpstrj.
     thermo_every : log interval [steps].
     skin_width   : Verlet skin [A].
     seed         : RNG seed.
@@ -1752,6 +1772,7 @@ class NPTSimulation(_BaseMDSimulation):
                  tau_nhc        : float = 100.0,
                  tau_baro       : float = 1000.0,
                  traj_every     : int   = 10,
+                 traj_format    : str   = "xdatcar",
                  thermo_every   : int   = 100,
                  output_dir     : str   = ".",
                  skin_width     : float = 0.5,
@@ -1794,6 +1815,7 @@ class NPTSimulation(_BaseMDSimulation):
         self.tau_nhc      = tau_nhc
         self.tau_baro     = tau_baro
         self.traj_every   = traj_every
+        self.traj_format  = check_traj_format(traj_format)
         self.thermo_every = thermo_every
         self.output_dir   = output_dir
         self.verbose      = verbose
@@ -2026,8 +2048,8 @@ class NPTSimulation(_BaseMDSimulation):
     #  Trajectory output
     # ------------------------------------------------------------------
 
-    def _write_trajectory_frame(self, fh, step: int,
-                                e_pot: float, P_gpa: float) -> None:
+    def _write_trajectory_frame(self, fh, step: int, e_pot: float,
+                                P_gpa: float, forces=None, stress=None) -> None:
         """
         Append one configuration to the open XDATCAR file.
 
@@ -2040,10 +2062,8 @@ class NPTSimulation(_BaseMDSimulation):
         comment = (f"akitsushima.py NPT-MD  step={step}  E_pot={e_pot:.4f}eV  "
                   f"T={self._temperature_inst():.2f}K  P={P_gpa:.4f}GPa  "
                   f"V={self._volume():.4f}Ang3")
-        _write_xdatcar_frame(fh, self.positions, self.lattice,
-                             self.atom_types, self._xdatcar_frame_idx,
-                             variable_header=True, comment=comment)
-        self._xdatcar_frame_idx += 1
+        self._traj_frame(fh, step, e_pot, forces, stress, variable_cell=True,
+                         comment=comment)
 
     # ------------------------------------------------------------------
     #  Main MD loop
@@ -2086,7 +2106,7 @@ class NPTSimulation(_BaseMDSimulation):
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
-        traj_path   = os.path.join(self.output_dir, "XDATCAR_npt")
+        traj_path   = _traj_path(self.output_dir, "npt", self.traj_format)
         thermo_path = os.path.join(self.output_dir, "thermo.log")
         ck = self._ck_begin(checkpoint, checkpoint_meta,
                             {"thermo": thermo_path, "traj": traj_path})
@@ -2223,7 +2243,7 @@ class NPTSimulation(_BaseMDSimulation):
                         print("  " + row)
 
                 if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh, step, e_pot, P_gpa)
+                    self._write_trajectory_frame(traj_fh, step, e_pot, P_gpa, forces, stress)
 
                 # Push this step's output to disk for real-time
                 # monitoring during a long-running MD calculation.

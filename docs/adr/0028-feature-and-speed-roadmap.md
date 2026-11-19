@@ -139,6 +139,9 @@ Three findings:
    and writing extxyz, LAMMPS data and CIF; extxyz and LAMMPS dump as
    trajectory output; an ASE Calculator that wraps an akitsushima force
    function.  `ase` is an optional extra.
+   *Done as ADR-0034 (0.2.0a24): extxyz / LAMMPS data / CIF input,
+   `traj_format` for md, relax and gcmc, `reader: extxyz` for training
+   sets, `AkitsushimaCalculator`.*
 10. **Structure builders (Q16).**  Supercell, random alloy, vacancy,
    slab.  SQS generation is not part of it (tier C, Q19).
 11. **Anisotropic NPT (Q14).**  Full cell or per axis.  The in-plane

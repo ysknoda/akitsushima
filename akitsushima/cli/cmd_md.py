@@ -10,7 +10,8 @@ from ..solvers import LangevinSimulation, NPTSimulation, NVESimulation, NVTSimul
 from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..utils.mpi import _mpi_rank
 from .common import (
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _checkpoint_setup,
     _check_yaml,
     _print_header,
@@ -52,8 +53,8 @@ def cmd_md(args) -> int:
     verbose    = (md_cfg.get("verbose", True) and not getattr(args, "quiet", False)
                  and is_root)
 
-    poscar = struct_cfg.get("poscar", "POSCAR")
-    pos_data = _check_poscar(poscar)
+    poscar = _structure_file(struct_cfg, "POSCAR")
+    pos_data = _check_structure(struct_cfg, "POSCAR")
     if pos_data is None:
         return 1
 
@@ -103,6 +104,7 @@ def cmd_md(args) -> int:
         n_steps      = n_steps,
         equil_steps  = equil,
         traj_every   = md_cfg.get("traj_every",   10),
+        traj_format  = md_cfg.get("traj_format",  "xdatcar"),
         thermo_every = md_cfg.get("thermo_every", 100),
         output_dir   = output_dir,
         skin_width   = md_cfg.get("skin_width",   0.5),

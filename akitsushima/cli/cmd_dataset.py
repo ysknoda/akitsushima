@@ -25,7 +25,7 @@ def cmd_dataset(args) -> int:
 
     reader = str(sec.get("reader", "vasprun")).lower()
     if reader not in _READERS:
-        print(f"ERROR: dataset.reader must be vasprun | outcar, got '{reader}'.")
+        print(f"ERROR: dataset.reader must be vasprun | outcar | extxyz, got '{reader}'.")
         return 1
     energy = str(sec.get("energy", "wo_entropy")).lower()
     if energy not in _ENERGY_KEYS:
@@ -39,7 +39,7 @@ def cmd_dataset(args) -> int:
         print("ERROR: dataset.sources is required (VASP run directories).")
         return 1
     sources = [sources] if isinstance(sources, str) else list(sources)
-    cross = bool(sec.get("cross_check", True))
+    cross = bool(sec.get("cross_check", True)) and reader != "extxyz"
     # a number (eV) or the path of the isolated-atom VASP run (ADR-0026)
     e_atom = {
         str(k): (v if isinstance(v, str) else float(v))
@@ -58,11 +58,11 @@ def cmd_dataset(args) -> int:
 
     print("\n[Input]")
     print(
-        f"  Runs        : {len(runs)}  (reader {fname}"
+        f"  Runs        : {len(runs)}  (reader {reader if reader == 'extxyz' else fname}"
         f"{', cross-checked with ' + ('OUTCAR' if reader == 'vasprun' else 'vasprun.xml') if cross else ''})"
     )
     print(
-        f"  Energy      : {_ENERGY_KEYS[energy]}"
+        f"  Energy      : {'extxyz label' if reader == 'extxyz' else _ENERGY_KEYS[energy]}"
         f"{'  minus isolated atoms ' + str(e_atom) if e_atom else '  (raw DFT, eV/atom)'}"
     )
     print(f"  Frames      : {sec.get('frames', 'all')}")
@@ -73,7 +73,8 @@ def cmd_dataset(args) -> int:
             frames=sec.get("frames", "all"), isolated_atom_energy=e_atom,
             test_fraction=float(split.get("test_fraction", 0.0)),
             stratify=str(split.get("stratify", "composition")).lower(),
-            seed=int(split.get("seed", 0)), cross_check=cross)
+            seed=int(split.get("seed", 0)), cross_check=cross,
+            extxyz_keys=sec.get("extxyz_keys"))
     except (ValueError, FileNotFoundError) as exc:
         print(f"ERROR: {exc}")
         return 1

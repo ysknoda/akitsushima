@@ -14,7 +14,8 @@ from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..solvers.global_opt import GlobalOptimiser
 from ..utils.mpi import _mpi_rank
 from .common import (
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _check_yaml,
     _fmt_time,
     _print_header,
@@ -126,8 +127,8 @@ def cmd_anneal(args) -> int:
         print(f"[ERROR] {err}")
         return 1
 
-    poscar = struct_cfg.get("poscar", "POSCAR")
-    pos_data = _check_poscar(poscar)
+    poscar = _structure_file(struct_cfg, "POSCAR")
+    pos_data = _check_structure(struct_cfg, "POSCAR")
     if pos_data is None:
         return 1
 

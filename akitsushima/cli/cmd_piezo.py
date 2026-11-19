@@ -14,7 +14,8 @@ from ..utils.mpi import _mpi_rank
 from .cmd_elastic import cmd_elastic
 from .common import (
     _born_setup,
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _check_yaml,
     _cli_force_fn,
     _input_hash,
@@ -40,8 +41,8 @@ def cmd_piezo(args) -> int:
         return 1
     pot_cfg = cfg.get("potential", {})
     sec = cfg.get("piezo", {}) or {}
-    poscar = cfg.get("structure", {}).get("poscar", "POSCAR")
-    pos_data = _check_poscar(poscar)
+    poscar = _structure_file(cfg.get("structure", {}), "POSCAR")
+    pos_data = _check_structure(cfg.get("structure", {}), "POSCAR")
     if pos_data is None:
         return 1
     is_root = (_mpi_rank == 0)

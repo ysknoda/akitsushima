@@ -70,6 +70,8 @@ _YAML_RELAX_DEFAULT = """\
 
 structure:
   poscar: POSCAR                   # path to input POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: SW                         # SW | Tersoff | LJ | Morse | BornMayer | EAM | Buckingham
@@ -149,6 +151,7 @@ relax:
   # fix_cell:    [[0, 0, 0], [0, 0, 0], [1, 1, 1]]  # (3, 3) per lattice-vector
   #                                  # component, 1 = frozen (here: c fixed)
   flush_every_step: true             # flush relax.log/XDATCAR each step
+  traj_format: xdatcar               # xdatcar | extxyz | lammps-dump (ADR-0034)
   fsync_every_step: false            # fsync too (slow; for crash safety)
   timing:        true
 
@@ -217,6 +220,8 @@ _YAML_MD_NVT_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: Tersoff                    # see the timestep note in the md section below
@@ -279,6 +284,7 @@ md:
   tau_nhc:      100.0              # fs  NHC thermostat time constant (50-200 typical)
   velocity_rescale_steps: 1000     # = equil_steps: VS active during equilibration
   traj_every:   10                 # write trajectory every N steps
+  traj_format:  xdatcar            # xdatcar | extxyz | lammps-dump (ADR-0034)
   thermo_every: 50                 # write thermo log every N steps
   skin_width:   0.5
   seed:         42
@@ -296,6 +302,8 @@ _YAML_MD_NVE_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: Tersoff
@@ -324,6 +332,7 @@ md:
   n_steps:      10000
   equil_steps:  0
   traj_every:   10
+  traj_format:  xdatcar            # xdatcar | extxyz | lammps-dump
   thermo_every: 50
   skin_width:   0.5
   seed:         42
@@ -341,6 +350,8 @@ _YAML_MD_NPT_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: Tersoff
@@ -373,6 +384,7 @@ md:
   tau_baro:    200.0               # fs
   velocity_rescale_steps: 2000
   traj_every:  10
+  traj_format: xdatcar             # xdatcar | extxyz | lammps-dump
   thermo_every: 100
   skin_width:  0.5
   seed:        42
@@ -390,6 +402,8 @@ _YAML_GCMC_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: LJ
@@ -426,6 +440,7 @@ gcmc:
   max_disp:                0.2
   tau_nhc:                 100.0
   traj_every:              10
+  traj_format:             xdatcar  # xdatcar | extxyz | lammps-dump
   thermo_every:            1
   skin_width:              0.5
   seed:                    42
@@ -475,6 +490,8 @@ _YAML_PHONON_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: Tersoff
@@ -529,6 +546,8 @@ _YAML_KAPPA_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: Tersoff
@@ -578,6 +597,8 @@ _YAML_NEMD_DEFAULT = """\
 
 structure:
   poscar: POSCAR             # e.g. fcc Ar, 4 x 4 x 16 conventional cells
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   # Lennard-Jones argon, eps/k_B 119.8 K = 10.32 meV, sigma 3.405 A (the
@@ -791,6 +812,8 @@ _YAML_TSA_DEFAULT = """\
 
 structure:
   poscar: POSCAR_saddle
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: Tersoff
@@ -830,6 +853,8 @@ _YAML_OSMC_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: LJ
@@ -860,6 +885,7 @@ osmc:
   gcmc_attempts_per_cycle: 50
   tau_nhc:                 100.0
   traj_every:              10
+  traj_format:             xdatcar  # xdatcar | extxyz | lammps-dump
   thermo_every:            1
   seed:                    42
   verbose:                 true
@@ -879,6 +905,8 @@ _YAML_ESM_DEFAULT = """\
 
 structure:
   poscar: POSCAR_slab
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: Buckingham
@@ -914,6 +942,8 @@ _YAML_ELASTIC_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   # Tersoff, PRB 38, 9902 (1988), Si(C): C11 142.5, C12 75.4, C44 69 GPa
@@ -959,6 +989,8 @@ _YAML_GRUNEISEN_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
@@ -1016,6 +1048,8 @@ _YAML_QHA_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
@@ -1067,6 +1101,8 @@ _YAML_DIELECTRIC_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   # Rigid-ion MgO: Buckingham of Lewis and Catlow, J. Phys. C 18, 1149
@@ -1111,6 +1147,8 @@ _YAML_PIEZO_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   # Rigid-ion MgO: Buckingham of Lewis and Catlow, J. Phys. C 18, 1149
@@ -1165,6 +1203,8 @@ _YAML_ANNEAL_DEFAULT = """\
 
 structure:
   poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
 
 potential:
   type: SW
@@ -1246,7 +1286,10 @@ _YAML_DATASET_DEFAULT = """\
 dataset:
   sources:                  # a run directory, or a parent whose sub-directories are runs
     - ./vasp_runs
-  reader:      vasprun      # vasprun (vasprun.xml) | outcar (OUTCAR)
+  reader:      vasprun      # vasprun (vasprun.xml) | outcar (OUTCAR) | extxyz
+  #                         # extxyz (ADR-0034): each file is one run; labels
+  #                         # energy / forces / stress (ASE sign), renamed by
+  # extxyz_keys: {energy: energy, forces: forces, stress: stress}
   cross_check: true         # also read the other file; stop if any step disagrees
   energy:      wo_entropy   # wo_entropy | free | sigma0
   frames:      all          # all | last | first_last | <stride>

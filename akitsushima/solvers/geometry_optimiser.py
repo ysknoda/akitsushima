@@ -22,7 +22,8 @@ from ..engine.cell_gradient import cell_force_from_stress
 from ..engine.neighborlist import NeighbourList, neighbour_list_for, wrap_positions_into_cell
 from ..fitting.force_fn import _resolve_force_fn
 from ..io.poscar import write_poscar
-from ..io.xdatcar import _write_xdatcar_frame, _write_xdatcar_header
+from ..io.trajectory import TrajectoryWriter, check_traj_format, traj_filename
+from ..io.xdatcar import _write_xdatcar_header
 from ..utils.mpi import _mpi_rank
 from ._checkpoint import (
     check_settings,
@@ -145,6 +146,8 @@ class GeometryOptimiser:
     ----------------------------------------
     relax.log        -- step / energy / Fmax / Pmax / algorithm-specific metric
     XDATCAR_relax    -- every step's structure, VASP XDATCAR format
+                        (traj_format="extxyz": traj_relax.extxyz;
+                        "lammps-dump": traj_relax.lammpstrj; ADR-0034)
     POSCAR_relaxed   -- final structure in VASP 5 format
     POSCAR_best      -- lowest-energy structure seen (only with save_best)
     """
@@ -210,6 +213,7 @@ class GeometryOptimiser:
         trust_radius: float = 0.3,
         # -- output --------------------------------------------
         output_dir: str = "./relax_output",
+        traj_format: str = "xdatcar",
         skin_width: float = 0.5,
         verbose: bool = True,
         # -- constraints ---------------------------------------
@@ -394,6 +398,7 @@ class GeometryOptimiser:
         #   unless you specifically need crash-durable logs (e.g. for
         #   audit/compliance reasons) rather than just live monitoring.
         self.flush_every_step = bool(flush_every_step)
+        self.traj_format = check_traj_format(traj_format)
         self.fsync_every_step = bool(fsync_every_step)
 
         # Running best-energy tracker (populated during run() if save_best=True)
@@ -912,13 +917,17 @@ class GeometryOptimiser:
             "fixed_atom_dof": [int(i) for i in np.flatnonzero(self._fix_ions)],
             "fixed_cell_dof": [int(i) for i in np.flatnonzero(self._fix_cell_mask)],
         }
+        if self.traj_format != "xdatcar":  # absent for xdatcar: older checkpoints match
+            out["traj_format"] = self.traj_format
         out.update(self._ck_meta or {})
         return out
 
     def _ck_paths(self) -> dict:
         return {
             "log": os.path.join(self.output_dir, "relax.log"),
-            "traj": os.path.join(self.output_dir, "XDATCAR_relax"),
+            "traj": os.path.join(
+                self.output_dir, traj_filename("relax", self.traj_format)
+            ),
         }
 
     def _ck_best(self, meta: dict, arrays: dict) -> None:
@@ -1059,7 +1068,7 @@ class GeometryOptimiser:
         #                     each step only appends a
         #                     "Direct configuration=" block.
         xdatcar_path = (
-            os.path.join(self.output_dir, "XDATCAR_relax")
+            self._ck_paths()["traj"]
             if self._is_root
             else os.devnull
         )
@@ -1082,7 +1091,7 @@ class GeometryOptimiser:
         # the remaining steps in their own try/except that closes
         # self._xdatcar_fh and re-raises on any failure.
         try:
-            if not self.relax_cell and resume is None:
+            if not self.relax_cell and resume is None and self.traj_format == "xdatcar":
                 _write_xdatcar_header(
                     self._xdatcar_fh,
                     self.lattice,
@@ -1124,13 +1133,18 @@ class GeometryOptimiser:
             f"step={step}  E={float(e):.6f}eV  "
             f"Fmax={fmax_val:.4f}eV/A  Pmax={pmax_val:.4f}GPa"
         )
-        _write_xdatcar_frame(
-            self._xdatcar_fh,
-            wrap_positions_into_cell(self.positions, self.lattice),
+        w = TrajectoryWriter(
+            self._xdatcar_fh, self.traj_format, variable_cell=self.relax_cell
+        )
+        w.frame_idx = self._xdatcar_frame_idx
+        w.frame(
+            step,
             self.lattice,
+            wrap_positions_into_cell(self.positions, self.lattice),
             self.atom_types,
-            self._xdatcar_frame_idx,
-            variable_header=self.relax_cell,
+            energy=float(e),
+            forces=forces,
+            stress=stress,
             comment=comment,
         )
         self._xdatcar_frame_idx += 1

@@ -1,5 +1,5 @@
 ---
-status: proposed (2026-11-19)
+status: accepted (2026-11-19; implemented in 0.2.0a24 -- see Result)
 ---
 
 # Structure and trajectory I/O (extxyz, LAMMPS, CIF) and an ASE adapter
@@ -120,3 +120,96 @@ Tier A step 9 of ADR-0028 (Q14, Q17).  Agreed with the user on
     and accepted with the result.  ADR-0028 step 9 links here.  README and
     templates show `file`, `format`, `index` and `traj_format`.  The
     version goes to 0.2.0a24.
+
+## Result (2026-11-19, 0.2.0a24)
+
+**Implementation.**
+- `io/structure.py`:
+  - `read_structure` / `write_structure` (exported as
+    `ak.read_structure`, `ak.write_structure`) dispatch on the format;
+    every reader returns the dict of `parse_poscar`.
+  - extxyz: `read_extxyz` (all frames; Lattice required, pbc must be
+    T T T; stress from 6 or 9 values or a `virial`, returned in
+    akitsushima's sign) and `write_extxyz`.
+  - LAMMPS data: `read_lammps_data` (atomic or charge; the style from the
+    `Atoms # <style>` comment, `atom_style`, or 5 / 8 columns) and
+    `write_lammps_data` (types by atomic number unless `species` is given,
+    `# <element>` after each mass).
+  - `lammps_orientation(lattice)` returns the restricted-triclinic cell and
+    the rotation R (`r -> r @ R`); a left-handed cell is refused.
+  - CIF: read through `ase.io.read`, with partially occupied or mixed sites
+    refused; `write_cif` writes P1.
+- `io/trajectory.py`: `TrajectoryWriter` (xdatcar, extxyz, lammps-dump)
+  and `traj_filename`.  md (`_BaseMDSimulation._traj_frame`), relax
+  (`_log_row`) and gcmc / osmc write through it.
+  - md and relax frames carry the energy, forces and stress of the
+    frame's positions, which the force call of that step already has.
+  - gcmc frames carry the energy only.  osmc frames leave out the
+    fractional atom and therefore its U.
+  - The LAMMPS type map of gcmc includes the inserted species from the
+    first frame.
+  - The checkpoint settings carry `traj_format` only when it is not
+    xdatcar, so checkpoints of 0.2.0a21-a23 still match.
+- `io/ase_adapter.py`: `to_ase_atoms`, `from_ase_atoms` and
+  `AkitsushimaCalculator`.  The calculator class is built on first access,
+  and the three names are lazy attributes of `akitsushima`.  They are left
+  out of `__all__`, so that `from akitsushima import *` does not need ASE.
+- CLI: `_check_structure` reads `structure: {file | poscar, format, index,
+  species}` for every single-structure command.
+  - `file` without `format` uses auto detection.
+  - `poscar` keeps meaning POSCAR whatever the name, so existing inputs
+    with names like `Si.pos` still work.
+  - `file` and `poscar` together are refused.
+  - md, relax, gcmc and osmc read `traj_format`.
+  - The templates show `traj_format: xdatcar` and a commented `file` /
+    `format` / `index`.
+- `build_training_set(reader="extxyz", extxyz_keys=...)`: a source file,
+  or each `*.xyz` / `*.extxyz` of a source directory, is one run.  Frames
+  without an energy or forces label are refused.  `energy` and
+  `cross_check` do not apply.
+- `pyproject.toml`: extra `ase = ["ase>=3.22"]`, included in `all`.
+
+**Validation** (`tests/test_structure_io.py`, 18 tests; ASE 3.28).
+1. Own round trips are within 1e-13: extxyz (energy, forces, stress
+   sign, multi-frame `index`), LAMMPS data (in the LAMMPS orientation,
+   with species from the comments or the caller, and the charge style)
+   and CIF (cell Gram matrix and fractional coordinates).
+2. ASE in both directions:
+   - extxyz: ASE reads akitsushima's file exactly, and akitsushima reads
+     ASE's file within ASE's 8 decimals.
+   - lammps-data: both directions agree within 1e-10.
+   - lammps-dump-text: ASE reads the frames, cell, rotated positions,
+     forces and elements.
+   - CIF: a cell written by ASE is read back.
+3. A sheared 64-atom GeSn cell (Tomita SW):
+   - Lp is lower-triangular and R is a proper rotation (R R^T = I to
+     1e-14).
+   - Distances agree to 1e-12 and E to 1e-12 relative.
+   - F becomes F R (1e-10) and S becomes R^T S R (1e-12).
+4. Calculator:
+   - The energy, forces and stress equal the force function's
+     exactly.
+   - They agree with ASE's `calculate_numerical_forces` (eps 1e-4, 2e-6
+     eV/A) and `calculate_numerical_stress` (eps 1e-5, 2e-7 eV/A^3).
+   - For an ensemble, `results` holds the sigmas of `uncertainty()`.
+   - A pbc of F F T is refused.
+5. NVT with extxyz and lammps-dump trajectories, interrupted and
+   restarted, gives the same positions and a byte-identical trajectory.
+   A restart with another `traj_format` is refused.
+6. The CLI md run from a POSCAR and from an extxyz of the same exactly
+   representable structure (a = 5.375 A) writes byte-identical
+   `thermo.log`, `POSCAR_final_MD` and trajectory.
+7. A training set built from extxyz files written from the vasprun.xml
+   frames equals the vasprun one: the same split, and lattice,
+   positions, E, F and S within 1e-12.
+
+Also checked by hand: in each md ensemble (NVT, Langevin, NVE, NPT), the
+last extxyz frame matches the force function evaluated on that frame's
+positions.  The differences (E 5e-8 eV, F 2e-7 eV/A, S 6e-10 eV/A^3)
+come from writing the positions with 8 decimals.
+
+LAMMPS itself was not run; ASE's readers stand in for it (decision 9).
+A LAMMPS data file is written without reducing the tilt factors, so a
+strongly sheared cell may need `box tilt large` in older LAMMPS.
+
+Full suite: 910 passed, 1 skipped (14.9 min).

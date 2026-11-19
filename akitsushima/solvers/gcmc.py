@@ -12,7 +12,8 @@ from ..constants import ATOMIC_MASS, EV_ANG_TO_AMU_ANG_FS2, K_B
 from ..engine.neighborlist import NeighbourList, neighbour_list_for
 from ..fitting.mlip_engine import check_mlip_for_solver
 from ..io.poscar import write_poscar
-from ..io.xdatcar import _write_xdatcar_frame
+from ..io.structure import _sort_species
+from ..io.trajectory import TrajectoryWriter, check_traj_format, traj_path as _traj_path
 from ..utils.mpi import _mpi_rank
 from ..utils.optional_matplotlib import have_matplotlib, plt
 from ..utils.timing import TimingCollector
@@ -83,7 +84,9 @@ class GCMCMDSimulation(_BaseMDSimulation):
                      (remainder are displacements).  Default 0.5.
     max_disp    : maximum displacement amplitude for displacement moves [A].
     tau_nhc     : Nose-Hoover chain time constant [fs].
-    traj_every  : XYZ trajectory write interval [cycles].
+    traj_every  : trajectory write interval [cycles].
+    traj_format : "xdatcar" (default) | "extxyz" | "lammps-dump" (ADR-0034);
+                  energy per frame, no forces.
     thermo_every: thermo log write interval [cycles].
     output_dir  : directory for output files.
     seed        : RNG seed.
@@ -153,6 +156,7 @@ class GCMCMDSimulation(_BaseMDSimulation):
                  max_disp        : float = 0.2,
                  tau_nhc         : float = 100.0,
                  traj_every      : int   = 10,
+                 traj_format     : str   = "xdatcar",
                  thermo_every    : int   = 1,
                  output_dir      : str   = ".",
                  skin_width      : float = 0.5,
@@ -226,6 +230,7 @@ class GCMCMDSimulation(_BaseMDSimulation):
         self.max_disp     = float(max_disp)
         self.tau_nhc      = float(tau_nhc)
         self.traj_every   = int(traj_every)
+        self.traj_format  = check_traj_format(traj_format)
         self.thermo_every = int(thermo_every)
         self.output_dir   = output_dir
         self.verbose      = verbose
@@ -791,9 +796,19 @@ class GCMCMDSimulation(_BaseMDSimulation):
         """
         comment = (f"akitsushima.py GCMC  cycle={cycle}  N={self.N}  "
                   f"E_pot={e_pot:.6f}eV  T={self._temperature_inst():.2f}K")
-        _write_xdatcar_frame(fh, self.positions, self.lattice,
-                             self.atom_types, self._xdatcar_frame_idx,
-                             variable_header=True, comment=comment)
+        self._traj_out(fh, cycle, self.positions, self.atom_types, e_pot, comment)
+
+    def _traj_out(self, fh, cycle, positions, atom_types, energy, comment) -> None:
+        """One frame in ``traj_format`` (ADR-0034); energy only, no forces.
+        The LAMMPS type map holds the inserted species from the start."""
+        if not hasattr(self, "_traj_species"):
+            self._traj_species = _sort_species(list(self.atom_types) + [self.species])
+        w = TrajectoryWriter(fh, self.traj_format, variable_cell=True,
+                             species=self._traj_species)
+        w.frame_idx = self._xdatcar_frame_idx
+        w.frame(cycle, self.lattice, positions, atom_types, energy=energy,
+                comment=comment)
+        self._traj_species = w.species
         self._xdatcar_frame_idx += 1
 
     def _acceptance_rates(self) -> Tuple[float, float, float]:
@@ -828,8 +843,8 @@ class GCMCMDSimulation(_BaseMDSimulation):
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
-        traj_path   = os.path.join(self.output_dir,
-                                    f"XDATCAR_{self._xdatcar_task_name}")
+        traj_path   = _traj_path(self.output_dir, self._xdatcar_task_name,
+                                 self.traj_format)
         thermo_path = os.path.join(self.output_dir, "gcmc_md_thermo.log")
         n_path      = os.path.join(self.output_dir, "N_vs_cycle.dat")
 
@@ -1421,16 +1436,10 @@ class CFCMCSimulation(GCMCMDSimulation):
             f"akitsushima.py CFCMC  cycle={cycle}  N={self.N}  "
             f"lambda={self._lam:.4f}  U={e_pot:.6f}eV"
         )
-        _write_xdatcar_frame(
-            fh,
-            self.positions[:-1],
-            self.lattice,
-            self.atom_types[:-1],
-            self._xdatcar_frame_idx,
-            variable_header=True,
-            comment=comment,
-        )
-        self._xdatcar_frame_idx += 1
+        # U includes the fractional atom, which the frame leaves out, so
+        # it is not written as the frame's energy.
+        self._traj_out(fh, cycle, self.positions[:-1], self.atom_types[:-1],
+                       None, comment)
 
     def run(self) -> dict:
         res = super().run()

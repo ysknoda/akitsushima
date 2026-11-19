@@ -16,6 +16,8 @@ from ..utils.mpi import _mpi_rank
 __all__ = [
     "_check_yaml",
     "_check_poscar",
+    "_check_structure",
+    "_structure_file",
     "_resolve_masses",
     "_fmt_time",
     "_print_separator",
@@ -46,6 +48,46 @@ def _check_poscar(path: str):
             print(f"ERROR: POSCAR not found: '{path}'")
         return None
     data = parse_poscar(path)
+    if _mpi_rank == 0:
+        print(f"Loaded structure : {path}  ({data['natoms']} atoms)")
+    return data
+
+
+def _structure_file(struct_cfg: dict, default: str = "POSCAR") -> str:
+    """The structure path: ``structure.file`` (ADR-0034) or its alias
+    ``structure.poscar``."""
+    return str(struct_cfg.get("file", struct_cfg.get("poscar", default)))
+
+
+def _check_structure(struct_cfg: dict, default: str = "POSCAR"):
+    """
+    Read the structure a ``structure:`` section names (ADR-0034); return the
+    dict of ``parse_poscar``, or None after printing the error.
+
+    ``file`` (any of POSCAR, extxyz, LAMMPS data, CIF; ``format: auto``
+    decides from the name) or ``poscar`` (the alias: POSCAR unless
+    ``format`` says otherwise); ``index`` selects a frame of a multi-frame
+    file (default the last); ``species`` names the LAMMPS atom types.
+    """
+    from ..io.structure import read_structure
+
+    if "file" in struct_cfg and "poscar" in struct_cfg:
+        if _mpi_rank == 0:
+            print("ERROR: structure: give file or poscar, not both.")
+        return None
+    path = _structure_file(struct_cfg, default)
+    fmt = struct_cfg.get("format", "auto" if "file" in struct_cfg else "poscar")
+    if not os.path.isfile(path):
+        if _mpi_rank == 0:
+            print(f"ERROR: structure file not found: '{path}'")
+        return None
+    try:
+        data = read_structure(path, format=fmt, index=struct_cfg.get("index", -1),
+                              species=struct_cfg.get("species"))
+    except (ValueError, ImportError) as exc:
+        if _mpi_rank == 0:
+            print(f"ERROR: {exc}")
+        return None
     if _mpi_rank == 0:
         print(f"Loaded structure : {path}  ({data['natoms']} atoms)")
     return data

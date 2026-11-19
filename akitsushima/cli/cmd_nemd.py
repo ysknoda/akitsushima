@@ -11,7 +11,8 @@ import numpy as np
 from ..solvers.nemd import NEMDSimulation
 from ..utils.mpi import _mpi_rank
 from .common import (
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _check_yaml,
     _cli_force_fn,
     _input_hash,
@@ -36,8 +37,8 @@ def cmd_nemd(args) -> int:
         return 1
     pot_cfg = cfg.get("potential", {})
     sec = cfg.get("nemd", {}) or {}
-    poscar = cfg.get("structure", {}).get("poscar", "POSCAR")
-    pos = _check_poscar(poscar)
+    poscar = _structure_file(cfg.get("structure", {}), "POSCAR")
+    pos = _check_structure(cfg.get("structure", {}), "POSCAR")
     if pos is None:
         return 1
     is_root = (_mpi_rank == 0)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "akitsushima"
-version = "0.2.0a23"
+version = "0.2.0a24"
 description = "Classical force-field and machine-learning potential toolkit for atomistic simulation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -44,7 +44,8 @@ mpi = ["mpi4py>=3.1"]
 torch = ["torch>=2.0"]
 yaml = ["pyyaml>=6.0"]
 plotting = ["matplotlib>=3.7"]
-all = ["akitsushima[numba,mpi,torch,yaml,plotting]"]
+ase = ["ase>=3.22"]
+all = ["akitsushima[numba,mpi,torch,yaml,plotting,ase]"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

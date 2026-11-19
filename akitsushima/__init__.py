@@ -138,7 +138,7 @@ from .fitting import (
     make_force_fn,
     save_potential,
 )
-from .io import parse_poscar, write_poscar
+from .io import parse_poscar, read_structure, write_poscar, write_structure
 from .solvers import (
     CFCMCSimulation,
     DiffusionAnalyzer,
@@ -160,7 +160,7 @@ from .solvers import (
 )
 from .solvers.config_bridge import force_fn_from_config
 
-__version__ = "0.2.0a23"
+__version__ = "0.2.0a24"
 
 __all__ = [
     "__version__",
@@ -192,7 +192,9 @@ __all__ = [
     "ElasticConstantsCalculator", "elastic_moduli", "fit_equation_of_state",
     "DiffusionAnalyzer", "force_fn_from_config",
     # io
-    "parse_poscar", "write_poscar",
+    "parse_poscar", "write_poscar", "read_structure", "write_structure",
+    # AkitsushimaCalculator, to_ase_atoms, from_ase_atoms (ADR-0034) are
+    # lazy attributes, not in __all__: `import *` must not need ase.
 ]
 
 # NNModel / AtomicNNModel are resolved lazily, all the way up from
@@ -202,13 +204,16 @@ __all__ = [
 # own F15 bug-fix note -- for every caller who never touches them,
 # including everyone who just does `import akitsushima` for the
 # classical/engine functionality above).
-_LAZY = {"NNModel": "fitting", "AtomicNNModel": "fitting"}
+_LAZY = {"NNModel": "fitting", "AtomicNNModel": "fitting",
+         # ADR-0034: need the optional ase extra only when used
+         "AkitsushimaCalculator": "io.ase_adapter",
+         "to_ase_atoms": "io.ase_adapter", "from_ase_atoms": "io.ase_adapter"}
 
 
 def __getattr__(name):
     if name not in _LAZY:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from . import fitting as _fitting
-    value = getattr(_fitting, name)
+    import importlib
+    value = getattr(importlib.import_module("." + _LAZY[name], __name__), name)
     globals()[name] = value
     return value

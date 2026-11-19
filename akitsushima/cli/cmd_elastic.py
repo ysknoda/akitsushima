@@ -14,7 +14,8 @@ from ..solvers import ElasticConstantsCalculator, GeometryOptimiser
 from ..solvers.elastic import DEFAULT_STRAINS, elastic_moduli
 from ..utils.mpi import _mpi_rank
 from .common import (
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _check_yaml,
     _cli_force_fn,
     _input_hash,
@@ -51,8 +52,8 @@ def cmd_elastic(args) -> int:
     verbose    = (el_cfg.get("verbose", True) and not getattr(args, "quiet", False)
                   and is_root)
 
-    poscar = struct_cfg.get("poscar", "POSCAR")
-    pos_data = _check_poscar(poscar)
+    poscar = _structure_file(struct_cfg, "POSCAR")
+    pos_data = _check_structure(struct_cfg, "POSCAR")
     if pos_data is None:
         return 1
     lattice, positions = pos_data["lattice"], pos_data["positions"]

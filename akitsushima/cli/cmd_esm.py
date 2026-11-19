@@ -9,7 +9,8 @@ import numpy as np
 from ..engine.coulomb.esm import ESMCalculator
 from ..fitting.io_utils import _load_potential_json
 from .common import (
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _check_yaml,
     _print_header,
     _print_output_files,
@@ -30,8 +31,8 @@ def cmd_esm(args) -> int:
     pot_cfg    = cfg.get("potential",{})
     esm_cfg    = cfg.get("esm",      {})
 
-    poscar = struct_cfg.get("poscar","POSCAR_slab")
-    pos_data = _check_poscar(poscar)
+    poscar = _structure_file(struct_cfg, "POSCAR_slab")
+    pos_data = _check_structure(struct_cfg, "POSCAR_slab")
     if pos_data is None:
         return 1
 

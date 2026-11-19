@@ -125,6 +125,12 @@
 > field and their spread the uncertainty: `sigF_max` in md / relax logs,
 > sigma in the anneal ledger, and `mlip.evaluate` writes sigma_E,
 > sigma_F_max and sigma_S of a list of structures to CSV.
+>
+> 0.2.0a24 (ADR-0034): structures are read from POSCAR, extxyz, LAMMPS
+> data or CIF (`structure: {file, format, index}`); md, relax and gcmc
+> write `traj_format: xdatcar | extxyz | lammps-dump`; `dataset` reads
+> labelled extxyz (`reader: extxyz`); `ak.AkitsushimaCalculator` wraps a
+> force function for ASE.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -234,6 +240,7 @@ pip install -e ".[mpi]"         # multi-rank parallelism (requires mpi4py/mpirun
 pip install -e ".[torch]"       # NNModel
 pip install -e ".[yaml]"        # YAML config files for the CLI
 pip install -e ".[plotting]"    # matplotlib output (NEB/phonon/relax plots)
+pip install -e ".[ase]"         # CIF input and the ASE calculator (ADR-0034)
 pip install -e ".[all]"         # everything above
 ```
 
@@ -465,6 +472,35 @@ and `restart: false` discards it and starts afresh.
 `kappa.decompose: {species: true, regions: {axis: c, bounds: [0, 0.5, 1]}}`
 splits the Green-Kubo tensor into kappa_g = (V/k_B T^2) int <J_g(0) J(t)>,
 which add up to kappa exactly.
+
+### Structure and trajectory files, ASE (ADR-0034)
+
+Every command reads its structure from `structure: poscar:` as before or
+from `structure: file:`, whose format follows the name (`format: auto`):
+POSCAR / CONTCAR / `*.vasp`, `*.xyz` / `*.extxyz`, `*.data` / `*.lmp`
+(LAMMPS data, atom_style atomic or charge) and `*.cif` (read through ASE;
+partial occupancies are refused).  `index` picks a frame of a multi-frame
+file (default the last); `species` names the LAMMPS atom types when the
+Masses section has no `# <element>` comments.  Fixed atoms come from
+POSCAR only, and output structures stay POSCAR.
+
+`md`, `relax` and `gcmc` / `osmc` take `traj_format`: `xdatcar` (default),
+`extxyz` (`traj_<task>.extxyz` with energy, forces and stress in ASE's
+sign; gcmc frames carry the energy only) or `lammps-dump`
+(`traj_<task>.lammpstrj`, `id type element x y z fx fy fz`, metal units).
+LAMMPS files hold the cell in LAMMPS's orientation (a along x, b in the xy
+plane): writing rotates the structure, so it reads back as the same
+crystal turned.  `dataset` with `reader: extxyz` reads labelled extxyz
+files, one run per file (`extxyz_keys` renames the labels).
+
+```python
+import akitsushima as ak
+s = ak.read_structure("GeSn.cif")                    # dict as parse_poscar
+ak.write_structure("GeSn.data", s["lattice"], s["positions"], s["atom_types"])
+atoms = ak.to_ase_atoms(s["lattice"], s["positions"], s["atom_types"],
+                        calculator=ak.AkitsushimaCalculator(force_fn))
+atoms.get_stress()      # ASE's sign; sigma_E etc. in calc.results for an ensemble
+```
 
 ### Global structure search (ADR-0022)
 
@@ -780,7 +816,7 @@ term still uses the centre-of-mass approximation, with a warning.
 akitsushima/
 ├── constants.py        # physical constants
 ├── utils/              # timing, MPI helpers, numba JIT setup
-├── io/                 # POSCAR / XDATCAR / EFS file I/O
+├── io/                 # POSCAR, extxyz, LAMMPS, CIF, XDATCAR, EFS; ASE adapter
 ├── engine/              # energy / force / stress: pair, many-body, and Coulomb potentials
 ├── fitting/             # parameter sets, loss function, fitting driver, ML models
 ├── solvers/             # geometry optimisation, MD, GCMC, NEB, TSA, phonons, kappa

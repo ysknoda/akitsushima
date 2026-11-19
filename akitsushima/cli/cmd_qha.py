@@ -11,7 +11,8 @@ import numpy as np
 from ..solvers.qha import phonons_at, quasi_harmonic, relax_at_volume
 from ..utils.mpi import _mpi_rank
 from .common import (
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _born_setup,
     _check_yaml,
     _cli_force_fn,
@@ -35,7 +36,7 @@ def _volume_setup(args, section: str, title: str):
         return None
     pot_cfg = cfg.get("potential", {})
     sec = cfg.get(section, {})
-    pos_data = _check_poscar(cfg.get("structure", {}).get("poscar", "POSCAR"))
+    pos_data = _check_structure(cfg.get("structure", {}), "POSCAR")
     if pos_data is None:
         return None
     force_fn, _ = _cli_force_fn(pot_cfg, f"cmd_{section}")
@@ -49,7 +50,7 @@ def _volume_setup(args, section: str, title: str):
     out_dir = sec.get("output_dir", f"./{section}_output")
     if is_root:
         os.makedirs(out_dir, exist_ok=True)
-        _print_header(title, cfg, cfg.get("structure", {}).get("poscar"), pot_cfg)
+        _print_header(title, cfg, _structure_file(cfg.get("structure", {})), pot_cfg)
     lat, pos, types = pos_data["lattice"], pos_data["positions"], pos_data["atom_types"]
     sc = sec.get("supercell", 4)
     relax_kw = sec.get("relax", {}) or {}

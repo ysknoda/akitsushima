@@ -23,7 +23,13 @@ from .vasp import read_outcar, read_vasprun
 
 __all__ = ["build_training_set"]
 
-_READERS = {"vasprun": ("vasprun.xml", read_vasprun), "outcar": ("OUTCAR", read_outcar)}
+_READERS = {
+    "vasprun": ("vasprun.xml", read_vasprun),
+    "outcar": ("OUTCAR", read_outcar),
+    # ADR-0034: one extxyz file is one run (*.xyz / *.extxyz in a directory)
+    "extxyz": ("*.extxyz", None),
+}
+_EXTXYZ_SUFFIXES = (".xyz", ".extxyz")
 _ENERGY_KEYS = {
     "free": "energy_free",
     "wo_entropy": "energy_wo_entropy",
@@ -64,9 +70,48 @@ def _resolve_isolated_atoms(isolated_atom_energy, energy: str):
     return e_atom
 
 
+def _find_extxyz_runs(sources: list[str]) -> list[str]:
+    """An extxyz source file is one run; a directory gives each of its
+    ``*.xyz`` / ``*.extxyz`` files (sorted by name)."""
+    runs = []
+    for src in sources:
+        if os.path.isfile(src):
+            runs.append(src)
+            continue
+        if not os.path.isdir(src):
+            raise FileNotFoundError(f"dataset: source not found: '{src}'")
+        files = sorted(f for f in os.listdir(src) if f.lower().endswith(_EXTXYZ_SUFFIXES))
+        if not files:
+            raise FileNotFoundError(f"dataset: no *.xyz / *.extxyz file in '{src}'.")
+        runs.extend(os.path.join(src, f) for f in files)
+    return runs
+
+
+def _read_extxyz_run(path: str, keys: dict | None) -> list:
+    """Frames of one extxyz run with ``energy`` and ``forces`` labels
+    (``stress`` optional), keys as in :func:`read_extxyz`."""
+    from .structure import read_extxyz
+
+    k = {"energy": "energy", "forces": "forces", "stress": "stress"}
+    k.update(keys or {})
+    frames = read_extxyz(path, energy_key=k["energy"], forces_key=k["forces"],
+                         stress_key=k["stress"])
+    for n, f in enumerate(frames, start=1):
+        for need in ("energy", "forces"):
+            if need not in f:
+                raise ValueError(
+                    f"dataset: '{path}' frame {n} has no {need} label "
+                    f"(extxyz key '{k[need]}')."
+                )
+        f.setdefault("stress", None)
+    return frames
+
+
 def _find_runs(sources: list[str], filename: str) -> list[str]:
     """A source holding ``filename`` is one run; otherwise each immediate
     sub-directory holding it is (sorted by name)."""
+    if filename == _READERS["extxyz"][0]:
+        return _find_extxyz_runs(sources)
     runs = []
     for src in sources:
         if os.path.isfile(os.path.join(src, filename)):
@@ -215,13 +260,18 @@ def _write_split(out: str, items: list) -> None:
 def build_training_set(sources, output_dir="./training_set", reader="vasprun",
                        energy="wo_entropy", frames="all", isolated_atom_energy=None,
                        test_fraction=0.0, stratify="composition", seed=0,
-                       cross_check=True) -> dict:
+                       cross_check=True, extxyz_keys=None) -> dict:
     """Write a fit-layout training set from VASP runs; return a summary.
 
     sources : a run directory (holding vasprun.xml / OUTCAR) or a directory
         of run sub-directories, or a list of those.
     reader : "vasprun" | "outcar" (the other file cross-checks it when
-        ``cross_check``, within OUTCAR's printed precision).
+        ``cross_check``, within OUTCAR's printed precision) | "extxyz"
+        (ADR-0034: each source file, or each ``*.xyz`` / ``*.extxyz`` of a
+        source directory, is one run; ``energy`` and ``cross_check`` do not
+        apply).
+    extxyz_keys : {"energy", "forces", "stress"} -> the extxyz key names
+        (default ASE's; stress in ASE's sign, or a ``virial``).
     energy : "wo_entropy" | "free" | "sigma0".
     frames : "all" | "last" | "first_last" | a positive stride.
     isolated_atom_energy : {species: eV or path}; subtracted per atom when
@@ -240,7 +290,9 @@ def build_training_set(sources, output_dir="./training_set", reader="vasprun",
 
     reader = str(reader).lower()
     if reader not in _READERS:
-        raise ValueError(f"dataset.reader must be vasprun | outcar, got '{reader}'.")
+        raise ValueError(
+            f"dataset.reader must be vasprun | outcar | extxyz, got '{reader}'."
+        )
     energy = str(energy).lower()
     if energy not in _ENERGY_KEYS:
         raise ValueError(f"dataset.energy must be one of {list(_ENERGY_KEYS)}, got '{energy}'.")
@@ -252,9 +304,13 @@ def build_training_set(sources, output_dir="./training_set", reader="vasprun",
     runs = _find_runs(sources, fname)
 
     comps, run_items = [], []
+    ekey = "energy" if reader == "extxyz" else _ENERGY_KEYS[energy]
     for run in runs:
-        fr = read(os.path.join(run, fname))
-        if cross_check:
+        if reader == "extxyz":
+            fr = _read_extxyz_run(run, extxyz_keys)
+        else:
+            fr = read(os.path.join(run, fname))
+        if cross_check and reader != "extxyz":
             other = "OUTCAR" if reader == "vasprun" else "vasprun.xml"
             oread = read_outcar if reader == "vasprun" else read_vasprun
             _cross_check(run, fr, oread(os.path.join(run, other)))
@@ -267,8 +323,8 @@ def build_training_set(sources, output_dir="./training_set", reader="vasprun",
         for k in _select(fr, frames):
             f = fr[k]
             mine.append({"run": run, "step": k + 1, "frame": f,
-                         "e_raw": f[_ENERGY_KEYS[energy]],
-                         "target": (f[_ENERGY_KEYS[energy]] - shift) / f["natoms"]})
+                         "e_raw": f[ekey],
+                         "target": (f[ekey] - shift) / f["natoms"]})
         run_items.append(mine)
         n = len(types)
         comps.append(tuple(types.count(sp) / n for sp in sort_species(types)))

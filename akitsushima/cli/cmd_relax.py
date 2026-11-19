@@ -10,7 +10,8 @@ from ..fitting.force_fn import _resolve_force_fn
 from ..solvers.config_bridge import _build_force_fn_from_yaml
 from ..utils.mpi import _mpi_rank
 from .common import (
-    _check_poscar,
+    _check_structure,
+    _structure_file,
     _checkpoint_setup,
     _check_yaml,
     _fmt_time,
@@ -37,8 +38,8 @@ def cmd_relax(args) -> int:
     verbose    = (rel_cfg.get("verbose", True) and not getattr(args, "quiet", False)
                  and is_root)
 
-    poscar = struct_cfg.get("poscar", "POSCAR")
-    pos_data = _check_poscar(poscar)
+    poscar = _structure_file(struct_cfg, "POSCAR")
+    pos_data = _check_structure(struct_cfg, "POSCAR")
     if pos_data is None:
         return 1
 
@@ -144,6 +145,7 @@ def cmd_relax(args) -> int:
         fix_cell     = rel_cfg.get("fix_cell",      None),
         fix_volume   = bool(rel_cfg.get("fix_volume", False)),
         flush_every_step = rel_cfg.get("flush_every_step", True),
+        traj_format      = rel_cfg.get("traj_format", "xdatcar"),
         fsync_every_step = rel_cfg.get("fsync_every_step", False),
         timing       = bool(rel_cfg.get("timing", True)),
     )
