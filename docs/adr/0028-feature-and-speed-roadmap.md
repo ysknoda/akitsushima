@@ -144,6 +144,8 @@ Three findings:
    sets, `AkitsushimaCalculator`.*
 10. **Structure builders (Q16).**  Supercell, random alloy, vacancy,
    slab.  SQS generation is not part of it (tier C, Q19).
+   *Done as ADR-0035 (0.2.0a25): `akitsushima build` / `ak.build` with
+   bulk, supercell, substitute, vacancy, slab, rattle, strain, scale.*
 11. **Anisotropic NPT (Q14).**  Full cell or per axis.  The in-plane
     barostat of ADR-0010 item 2 is part of this step (Q24).  It is last
     because its verification (conserved quantity, each pressure

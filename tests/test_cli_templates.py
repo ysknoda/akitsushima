@@ -45,6 +45,7 @@ _COMMAND = {
     "mlip": "mlip",
     "dataset": "dataset",
     "anneal": "anneal",
+    "build": "build",
 }
 
 # Only step/cycle counts are overridden (section -> {key: value}).
@@ -69,6 +70,7 @@ _SHRINK = {
     "nemd": {"nemd": {"equil_steps": 20, "n_steps": 120}},
     "mlip": {},
     "dataset": {},
+    "build": {},
     "anneal": {"anneal": {"segment_steps": 20, "quench_every": 10,
                           "schedule": {"n_segments": 2},
                           "md": {"traj_every": 5, "thermo_every": 5}}},
@@ -213,6 +215,8 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         for r in range(5):
             write_run(tmp_path / cfg["dataset"]["sources"][0] / f"{r:03d}",
                       make_frames([("Si", 4 + r)], n_steps=2, seed=r))
+    elif key == "build":
+        pass  # starts from bulk: no input file
     else:  # pragma: no cover - guarded by test_every_template_key_is_covered
         raise KeyError(key)
 

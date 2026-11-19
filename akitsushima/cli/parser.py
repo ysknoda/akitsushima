@@ -4,6 +4,7 @@ import argparse
 from ..fitting import registry
 from ..fitting.driver import LOCAL_METHOD_OPTIONS
 from .cmd_anneal import cmd_anneal
+from .cmd_build import cmd_build
 from .cmd_dataset import cmd_dataset
 from .cmd_dielectric import cmd_dielectric
 from .cmd_elastic import cmd_elastic
@@ -52,6 +53,7 @@ _DISPATCH = {
     "fit":     cmd_fit,
     "dataset": cmd_dataset,
     "anneal":  cmd_anneal,
+    "build":   cmd_build,
 }
 
 
@@ -97,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip | dataset | anneal"))
+              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip | dataset | anneal | build"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -127,6 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
     _add("dataset", "Training set (fit / mlip layout) from VASP vasprun.xml / OUTCAR")
     _add("anneal", "Global structure search: MD-quench annealing or basin hopping")
+    _add("build",  "Build a structure: bulk / supercell / alloy / vacancy / slab (ADR-0035)")
 
     p_fit = sub.add_parser(
         "fit", help="Fit a classical potential "

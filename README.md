@@ -131,6 +131,12 @@
 > write `traj_format: xdatcar | extxyz | lammps-dump`; `dataset` reads
 > labelled extxyz (`reader: extxyz`); `ak.AkitsushimaCalculator` wraps a
 > force function for ASE.
+>
+> 0.2.0a25 (ADR-0035): `akitsushima build` and `ak.build` make structures:
+> bulk crystals, supercells (any integer matrix or `min_width`), random
+> alloys with exact counts, vacancies, (hkl) slabs with chosen
+> termination (ESM-ready cells), rattle, strain and scale; every random
+> step takes a seed and the choices are recorded in `<output>_build.json`.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -500,6 +506,39 @@ ak.write_structure("GeSn.data", s["lattice"], s["positions"], s["atom_types"])
 atoms = ak.to_ase_atoms(s["lattice"], s["positions"], s["atom_types"],
                         calculator=ak.AkitsushimaCalculator(force_fn))
 atoms.get_stress()      # ASE's sign; sigma_E etc. in calc.results for an ensemble
+```
+
+### Building structures (ADR-0035)
+
+`akitsushima build build.yaml` (template: `--dump-default build`) starts
+from `bulk` (diamond, fcc, bcc, hcp, zincblende, wurtzite, rocksalt) or a
+file and applies `steps` in order, writing `output` in any format above:
+
+| Step | Options |
+|---|---|
+| `supercell` | `[n1, n2, n3]`, a 3x3 integer matrix, or `{min_width: A}` |
+| `substitute` | `{from: Ge, to: {Sn: 8}, seed}` -- exact counts (a float is a fraction) |
+| `vacancy` | `{species, count, seed}` or `{indices: [...]}` |
+| `slab` | `{miller, layers, vacuum, termination, center: zero / middle, orthogonal_ab}` |
+| `rattle` | `{sigma, seed}` |
+| `strain` | `{epsilon: 3x3}` or `{volume, shear, seed}` (volume exact) |
+| `scale` | `{factor}` or `{volume}` |
+
+`repeat: n` builds n structures with every seed offset by k (an extxyz
+output holds them as frames, other formats get `_000`, `_001`, ...).  The
+record `<output>_build.json` keeps the input, the chosen indices and, per
+structure, the composition, volume and shortest distance per species pair.
+A slab's `layers` counts repeat units of thickness d_hkl; its atomic planes
+are listed and `termination: k` puts plane k on top.  The slab cell has c
+along z and is centred on z = 0 by default, as ESM needs; `orthogonal_ab`
+finds a rectangular in-plane cell.  The same functions are in the API:
+
+```python
+import akitsushima as ak
+s = ak.build.bulk("diamond", "Ge", 5.7624)
+s = ak.build.substitute(ak.build.supercell(s, [2, 2, 2]), "Ge", {"Sn": 8}, seed=1)
+z = ak.build.slab(ak.build.bulk("wurtzite", ["Zn", "O"], 3.25), (0, 0, 0, 1),
+                  layers=4, vacuum=15.0, orthogonal_ab=True)
 ```
 
 ### Global structure search (ADR-0022)

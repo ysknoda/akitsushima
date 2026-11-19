@@ -139,6 +139,7 @@ from .fitting import (
     save_potential,
 )
 from .io import parse_poscar, read_structure, write_poscar, write_structure
+from . import build  # noqa: E402  (ADR-0035: ak.build.bulk / supercell / ...)
 from .solvers import (
     CFCMCSimulation,
     DiffusionAnalyzer,
@@ -160,7 +161,7 @@ from .solvers import (
 )
 from .solvers.config_bridge import force_fn_from_config
 
-__version__ = "0.2.0a24"
+__version__ = "0.2.0a25"
 
 __all__ = [
     "__version__",
@@ -192,7 +193,7 @@ __all__ = [
     "ElasticConstantsCalculator", "elastic_moduli", "fit_equation_of_state",
     "DiffusionAnalyzer", "force_fn_from_config",
     # io
-    "parse_poscar", "write_poscar", "read_structure", "write_structure",
+    "parse_poscar", "write_poscar", "read_structure", "write_structure", "build",
     # AkitsushimaCalculator, to_ase_atoms, from_ase_atoms (ADR-0034) are
     # lazy attributes, not in __all__: `import *` must not need ase.
 ]

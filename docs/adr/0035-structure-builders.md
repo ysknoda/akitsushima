@@ -1,5 +1,5 @@
 ---
-status: proposed (2026-11-19)
+status: accepted (2026-11-19; implemented in 0.2.0a25 -- see Result)
 ---
 
 # Structure builders: bulk, supercell, alloy, vacancy, slab, perturbations
@@ -125,3 +125,96 @@ the user on 2026-11-19 (grilling, Q1-Q14).
     and accepted with the result.  ADR-0028 step 10 links here.  README
     section and `--dump-default build` template (GeSn with a Vegard
     lattice constant).  The version goes to 0.2.0a25.
+
+## Result (2026-11-19, 0.2.0a25)
+
+**Implementation.**
+- `akitsushima/build.py` (`ak.build`):
+  - `bulk`, `supercell`, `substitute`, `vacancy`, `slab`, `slab_planes`,
+    `rattle`, `strain`, `scale` and `summary`.
+  - Private variants (`_supercell`, `_substitute`, ...) also return what
+    they chose; the CLI records it.
+- **supercell.**
+  - A diagonal matrix keeps the loop and arithmetic of the former
+    `qha.build_supercell`, which is now a wrapper of it.  Its output is
+    byte-identical to the former implementation.
+  - A general matrix enumerates the lattice points n with n M^-1 in
+    [0, 1)^3 and wraps the atoms into the new cell.
+- **slab.**
+  - Integer column reduction of (h, k, l) gives a unimodular W.  Its first
+    two columns span the plane; the third has hkl . v3 = 1.
+  - The in-plane pair is Lagrange-Gauss reduced, and v3 is shifted by
+    integer in-plane vectors towards the normal.
+  - The re-based cell is turned to the LAMMPS orientation of ADR-0034, so
+    the normal is z and one repeat unit is d_hkl high.
+  - Atomic planes are the heights within 0.01 A, periodic in d_hkl.
+  - The slab keeps the atoms of the stacked repeat units whose height lies
+    in (z_k - layers d, z_k], which puts plane k on top.
+  - c becomes (0, 0, thickness + vacuum).
+  - `orthogonal_ab` picks the smallest-area rectangular combination of
+    a and b, with coefficients up to 8 (a vectorised search).
+  - Four-index (h k i l) input is accepted.
+- **summary.**  Shortest distances per species pair through a k-d tree
+  over the 27 neighbouring images of the wrapped cell.
+- **CLI.**  `akitsushima build` (`cli/cmd_build.py`) and the template
+  `--dump-default build`: a 64-atom Ge56Sn8 cell with the Vegard constant
+  5.7624 A from a(Ge) 5.658 A and a(alpha-Sn) 6.493 A.
+  - `start` is `{bulk: ...}`, `{file: path}` or `{file: {path, format,
+    index, species}}`.
+  - A slab step prints its planes and marks the top one.
+
+**Validation** (`tests/test_build.py`, 30 tests; ASE 3.28).
+1. bulk, all seven types, conventional and primitive:
+   - The Gram matrix and the per-species distances to the 16 nearest
+     neighbours equal those of `ase.build.bulk`.  ASE gets c and u
+     explicitly, since it defaults to measured c/a values.
+   - The shortest distances equal the analytic values (a sqrt(3)/4,
+     a/sqrt(2), a sqrt(3)/2, a/2, a, and 3/8 c for ideal wurtzite) to
+     1e-12.
+2. supercell:
+   - With diag(2, 2, 2) and two non-diagonal matrices (det 2 and 9) on a
+     perturbed 64-atom Si cell, the atom counts and volumes are right and
+     no atoms overlap.
+   - The SW energy per atom equals the cell's to 1e-12.
+   - The primitive-to-cubic matrix gives `ase.build.make_supercell`'s
+     cell and fractional positions.
+   - `min_width` is minimal in each direction.
+   - qha's wrapper equals the former loop bit for bit.
+3. substitute and vacancy:
+   - The counts are exact, and several targets get disjoint sites.
+   - The same seed gives the same structure and a different seed a
+     different one.
+   - Over 2000 seeds the per-site Sn frequencies pass chi-square (63
+     dof, p > 1e-3).
+   - Explicit indices and the errors (no seed, too many sites) work.
+4. slab:
+   - Si (100), (110), (111) and wurtzite ZnO (0001), (10-10), 3 layers:
+     the atom count and in-plane area equal `ase.build.surface`'s.
+   - c is along z with a and b in the xy plane, the slab is centred on
+     z = 0, and Lz = thickness + vacuum.
+   - The shortest distance in the slab equals the bulk bond.
+   - ZnO (0001) has 4 planes (Zn, O, Zn, O), and `termination: k` puts
+     plane k's species on top.  Si has 4 planes in (100) and 2 in (111).
+   - The rectangular Si(111) cell passes
+     `ESMCalculator._validate_lattice`.
+   - An oblique cell without `orthogonal_ab` warns.
+5. rattle and strain:
+   - rattle: the standard deviation of 768 displacements is within 5 %
+     of sigma, with a mean near zero.
+   - strain: the volume is exact to 1e-13 for a volume change, with or
+     without shear, and equals det(I + eps) for an explicit epsilon.
+     Fractional coordinates are kept to 1e-13.
+6. CLI:
+   - `repeat: 3` to extxyz gives three frames with different Sn sites.
+     The JSON holds seeds offset by k, the chosen indices and the
+     composition.
+   - A rerun gives byte-identical output.
+   - POSCAR output gets `_000` to `_002`.
+   - An unknown step is refused.
+   - The template runs as shipped (`test_cli_templates`).
+
+The template's Vegard constant is an approximation, as its comment says.
+Whether, and by how much, GeSn deviates from Vegard's law was not checked
+here (UNCERTAIN).
+
+Full suite: 941 passed, 1 skipped (14.3 min).

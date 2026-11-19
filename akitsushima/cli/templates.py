@@ -1304,6 +1304,38 @@ dataset:
   output_dir:  ./training_set
 """
 
+_YAML_BUILD_DEFAULT = """\
+# akitsushima build -- write a structure (ADR-0035)
+# Usage: akitsushima build build.yaml
+#
+# Ge(1-x)Sn(x), x = 8/64 = 0.125, 64-atom cubic diamond cell.  Lattice
+# constant from Vegard's law between experimental a(Ge) = 5.658 A and
+# a(alpha-Sn) = 6.493 A: a = 0.875 * 5.658 + 0.125 * 6.493 = 5.7624 A
+# (Vegard's law is an approximation for GeSn; check against measured
+# lattice constants for the composition you build).
+
+build:
+  start:
+    bulk:
+      type:    diamond     # diamond | fcc | bcc | hcp | zincblende | wurtzite | rocksalt
+      species: [Ge]        # two for zincblende / wurtzite / rocksalt (first on the origin)
+      a:       5.7624      # A
+      cell:    conventional   # conventional | primitive (hcp / wurtzite: hexagonal)
+    # file: POSCAR         # or start from a file (POSCAR, extxyz, LAMMPS data, CIF)
+  steps:                   # applied in order
+    - supercell: [2, 2, 2]           # or a 3x3 matrix, or {min_width: 12.0}
+    - substitute: {from: Ge, to: {Sn: 8}, seed: 1}   # exact count (or a fraction 0.125)
+    # - vacancy:  {species: Ge, count: 1, seed: 3}   # or {indices: [0]}
+    # - rattle:   {sigma: 0.05, seed: 2}             # A, every coordinate
+    # - strain:   {volume: 0.03, shear: 0.02, seed: 4}   # or {epsilon: 3x3}
+    # - scale:    {factor: 1.01}                     # or {volume: A^3}
+    # - slab:     {miller: [1, 1, 1], layers: 3, vacuum: 15.0, termination: 0,
+    #              center: zero, orthogonal_ab: true}  # center zero: ESM's
+  output: POSCAR_GeSn      # POSCAR*, *.extxyz, *.data, *.cif; or give format:
+  repeat: 1                # n > 1: n structures, every seed + k (k = 0..n-1)
+"""
+
+
 _DUMP_MAP = {
     "relax":  _YAML_RELAX_DEFAULT,
     "md":     _YAML_MD_NVT_DEFAULT,
@@ -1326,6 +1358,7 @@ _DUMP_MAP = {
     "mlip":   _YAML_ELM_DEFAULT,
     "dataset": _YAML_DATASET_DEFAULT,
     "anneal": _YAML_ANNEAL_DEFAULT,
+    "build": _YAML_BUILD_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).
 }

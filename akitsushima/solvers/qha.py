@@ -30,16 +30,14 @@ __all__ = ["build_supercell", "relax_at_volume", "phonons_at",
 
 def build_supercell(lattice, positions, atom_types, supercell):
     """(lattice_sc, positions_sc, types_sc), cell-major: atom k of cell c
-    is index c * N + k, so the first N atoms are the primitive cell."""
-    S = [int(s) for s in np.broadcast_to(supercell, 3)]
-    lattice = np.asarray(lattice, dtype=float)
-    pos, types = [], []
-    for i in range(S[0]):
-        for j in range(S[1]):
-            for k in range(S[2]):
-                pos.append(np.asarray(positions) + np.array([i, j, k]) @ lattice)
-                types += list(atom_types)
-    return np.diag(S) @ lattice, np.vstack(pos), types
+    is index c * N + k, so the first N atoms are the primitive cell.
+    A thin wrapper of :func:`akitsushima.build.supercell` (ADR-0035)."""
+    from ..build import supercell as _supercell
+    from ..io.structure import structure_dict
+
+    s = _supercell(structure_dict(lattice, positions, atom_types),
+                   [int(x) for x in np.broadcast_to(supercell, 3)])
+    return s["lattice"], s["positions"], s["atom_types"]
 
 
 def relax_at_volume(lattice, positions, atom_types, force_fn, volume,
