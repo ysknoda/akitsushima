@@ -78,6 +78,9 @@ configurations in the training data.
 
 ## 2. In-plane barostat (NPT with ESM)
 
+*Done as ADR-0036 (0.2.0a26): `cell_dof: xy` (independent) and `xy_iso`
+(scaled together), both at P = 0 with ESM.*
+
 ADR-0008 refuses NPT with ESM because the only barostat is isotropic and
 would move the ESM boundaries (Lz).  Needed: a barostat acting on a_x and
 b_y only (rectangular in-plane cell, Lz and shear fixed), i.e. the

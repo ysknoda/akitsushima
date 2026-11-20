@@ -46,7 +46,7 @@ solver could use it.
    | solver | with ESM |
    |---|---|
    | relax | atoms free; `relax_cell` only for a_x and b_y (`lattice_constraints: '1 0 0 0 1 0 0 0 0'`): Lz places the boundaries, and ESMCalculator needs a rectangular in-plane cell, so shear is frozen too |
-   | md | NVE, NVT; NPT refused -- the barostat is isotropic and would move the boundaries (an in-plane barostat does not exist yet; the agreed table had "in-plane only", which needs one) |
+   | md | NVE, NVT; NPT only with `cell_dof: xy` or `xy_iso` at P = 0 (the in-plane barostat of ADR-0036; Lz and shear fixed) -- the other modes would move the boundaries |
    | neb, tsa | allowed |
    | phonon | supercell along z must be 1 |
    | gcmc | bc1 refuses inserting a charged species (it requires neutrality); bc2 / bc3 allow it (the electrode compensates) |

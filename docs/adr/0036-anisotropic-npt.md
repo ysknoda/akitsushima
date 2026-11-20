@@ -1,5 +1,5 @@
 ---
-status: proposed (2026-11-20)
+status: accepted (2026-11-20; implemented in 0.2.0a26 -- see Addendum and Result)
 ---
 
 # Anisotropic NPT: per-axis, full-cell and in-plane barostats
@@ -101,3 +101,108 @@ Q1-Q12).
     and accepted with the result.  ADR-0010 item 2, ADR-0008's table and
     ADR-0028 step 11 link here; README section.  The version goes to
     0.2.0a26.  0.2.0b1 is a separate commit, asked for afterwards.
+
+## Addendum (2026-11-20): Langevin piston option
+
+Validation item 10 showed that one Nose-Hoover chain on the barostat
+(decision 7) does not equipartition the strain degrees of freedom of a
+crystal (numbers in the Result).  The strain modes are nearly harmonic and
+exchange energy with each other and with the atoms only through weak
+anharmonic coupling; the chain fixes their total kinetic energy, not how
+it is shared.  Means are unaffected; fluctuations are wrong.  Agreed with
+the user (option C):
+
+- `baro_thermostat: nhc | langevin`, default `nhc` (decisions 2 and 7
+  unchanged; iso with nhc stays bit-identical).
+- `langevin` applies to every mode, iso included: each barostat momentum
+  gets the half-step Ornstein-Uhlenbeck update
+  p <- c p + sqrt((1 - c^2) W kT) xi, c = exp(-dt / (2 tau_baro)), in
+  place of the barostat chain (Langevin piston: Feller, Zhang, Pastor &
+  Brooks, J. Chem. Phys. 103, 4613 (1995); Quigley & Probert, J. Chem.
+  Phys. 120, 11432 (2004) for a flexible cell).  The particles keep their
+  Nose-Hoover chain.
+- The kinetic energy the noise adds is accumulated (`baro_heat`) and
+  subtracted from H_NPT, which therefore remains a drift diagnostic.
+- The noise uses the run's random generator, which a checkpoint already
+  restores, so restarts stay bit for bit; `baro_heat` is checkpointed and
+  `baro_thermostat` enters the checkpoint settings when it is not nhc.
+- CLI `md.baro_thermostat`, anneal md section; refused with
+  ensemble nvt.
+
+## Result (2026-11-20, 0.2.0a26)
+
+**Implementation** (`solvers/molecular_dynamics.py`).
+- `CELL_DOF_MODES` and `_cell_generators(mode)`.
+- `NPTSimulation(cell_dof=..., baro_thermostat=...)`:
+  - With iso the loop calls the former methods through `_baro_nhc`,
+    `_baro_half` and `_baro_scale`.  Results, thermo.log and XDATCAR of an
+    iso run were compared with the previous commit: identical bit for bit.
+  - Other modes: `_pressure_tensor`, `_barostat_half_step_g`,
+    `_nhc_baro_step_g` (target n_free kT), `_scale_step_g` (element-wise
+    exponential for a diagonal G, so an absent axis is multiplied by
+    exactly 1.0; eigen-decomposition otherwise) and `_npt_conserved_g`.
+  - `_baro_langevin` for the option of the addendum.
+- The base class gained `_ck_arrays()` (array state in a checkpoint:
+  `p_g`, `baro_heat`); empty for the other ensembles.
+- The NPT time-series plot used thermo_every * dt per entry although the
+  lists hold one entry per production step; its time axis was stretched
+  by thermo_every.  Fixed (plot only).
+- W: one mass (N_f + 3) kT tau_b^2 per generator, the iso mass.  LAMMPS
+  `fix nh` likewise uses one undivided mass per component
+  (`omega_mass[i] = nkt / (p_freq[i]^2)`, nkt = (natoms + 1) kT; read from
+  the LAMMPS source), so the UNCERTAIN /d of the grilling is not used.
+
+**Validation** (`tests/test_npt_aniso.py`, 30 tests; SW Si, 64 atoms).
+1. iso unchanged bit for bit (manual comparison with 0.2.0a25 above; the
+   existing NPT tests pass).  A generator E = I with the particle chain
+   off reproduces the iso integrator to 6e-12 A in the positions.
+2. tau_nhc = tau_baro = 1e8 reduces every mode, and the Langevin piston,
+   to NVE within 1e-8 A.
+3. H drift over 400 fs at 600 K, 1 GPa: 5-6 meV at dt = 1 fs; halving dt
+   divides it by 3.7-4.4 in every mode.  With the Langevin piston the
+   effective H (heat subtracted) drifts less than 20 meV and less at the
+   smaller dt (iso and tri); the Ornstein-Uhlenbeck step alone takes
+   10,000 momenta to N(0, W kT) and books its heat exactly.
+4. 300 K, 1 GPa, 8 ps after 1 ps: Pxx, Pyy, Pzz of aniso and tri at
+   1.000 +- 0.004 GPa, the tri shears at 0 within their errors; in xy and
+   z the free components reach 1 GPa while the fixed ones do not.  Fixed
+   components (Lz in xy / xy_iso, a and b in z, shears outside tri) stay
+   bit for bit, and a = b exactly in xy_iso.
+5. <V> of iso, aniso and tri: 1273.70 +- 0.03, 1273.75 +- 0.06 and
+   1273.70 +- 0.07 A^3; a = b = c within 0.002 A.
+6. tri from gamma = 86.7 degrees at 50 K, P = 0: gamma 90.001 degrees and
+   Pxy 0.005 GPa (from -6.2) over the last ps.
+7. z with Lx, Ly compressed 2 %: <c> 11.0844 A at 10 K against 11.0834 A
+   from relax with only c free (0.4 % of the 0.22 A Poisson expansion).
+8. ESM MgO(001) slab (Buckingham, bc1): Lz and the rectangular cell bit
+   for bit in xy and xy_iso; iso, aniso, tri and z refused, P != 0
+   refused.  relax with a_x, b_y free gives a = 16.0213 A; xy_iso at
+   10 K gives <a> = 16.0217 +- 0.0027 A and <Pxx>, <Pyy> within
+   5e-4 GPa of 0 (manual; the test starts at a = 16.02 and checks the
+   mean in-plane pressure).
+9. A tri run, with nhc and with the Langevin piston, killed after its
+   checkpoint continues bit for bit; a different `cell_dof` is refused.
+10. Fluctuations against `ElasticConstantsCalculator` at 0 K (relaxed ion:
+    C11 151.6, C12 76.6, C44 56.4, B 101.6 GPa; SW Si, 64 atoms, P = 0,
+    tau_baro 200 fs; iso 200 ps, tri 300 ps after 20 ps; errors from 10
+    blocks):
+
+    | barostat | T | B (iso, volume) | C11 | C12 | C44 (tri, strain) |
+    |---|---|---|---|---|---|
+    | nhc | 100 K | 139 +- 9 | -- | -- | -- |
+    | nhc | 300 K | 104 +- 5 | 146 +- 10 | 59 +- 10 | 85 +- 6 |
+    | langevin | 100 K | 103 +- 4 | 143 +- 4 | 71 +- 5 | 55.3 +- 2.4 |
+    | langevin | 300 K | 100 +- 5 | 147 +- 6 | 72 +- 5 | 54.9 +- 1.3 |
+
+    Diagnosis of the nhc rows (80 ps runs, tri, 300 K): per-component
+    <p_k^2 / W> / kT of 0.47, 0.47, 0.46, 1.97, 1.24, 0.90 at
+    tau_baro 1000 fs and 0.78-1.35 at 600 K, with each strain variance
+    tracking its own kinetic energy (so the stiffness each mode feels is
+    the relaxed-ion one); iso at 100 K had <p_eps^2 / W> = 0.63 kT.  One
+    chain per barostat momentum (length 3) equalised the kinetic energies
+    (0.97-1.03) but not the strain variances (0.64-1.20).  The Langevin
+    piston gives 0.94-1.18 in 70 ps and the table above.
+    Not resolved: C11 with the Langevin piston is 1-2 sigma below the 0 K
+    value at both temperatures (finite temperature, 64 atoms or
+    statistics).
+11. Full suite: 971 passed, 1 skipped.

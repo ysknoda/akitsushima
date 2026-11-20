@@ -251,6 +251,17 @@ class GlobalOptimiser:
             raise ValueError(
                 f"anneal md: ensemble must be nvt or npt, got {self.ensemble!r}"
             )
+        if self.ensemble == "nvt":  # NPT settings (ADR-0036)
+            dof = str(self.md_kw.pop("cell_dof", "iso")).lower()
+            if dof != "iso":
+                raise ValueError(
+                    f"anneal md: cell_dof {dof!r} needs ensemble npt"
+                )
+            bt = str(self.md_kw.pop("baro_thermostat", "nhc")).lower()
+            if bt != "nhc":
+                raise ValueError(
+                    f"anneal md: baro_thermostat {bt!r} needs ensemble npt"
+                )
         self.seed = int(seed)
         self.restart = bool(restart)
         self.max_fail = int(max_consecutive_failures)

@@ -57,6 +57,8 @@ _MD_KEYS = {
     "timestep",
     "tau_nhc",
     "tau_baro",
+    "cell_dof",
+    "baro_thermostat",
     "traj_every",
     "thermo_every",
     "skin_width",

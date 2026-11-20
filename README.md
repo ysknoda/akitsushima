@@ -137,6 +137,11 @@
 > alloys with exact counts, vacancies, (hkl) slabs with chosen
 > termination (ESM-ready cells), rattle, strain and scale; every random
 > step takes a seed and the choices are recorded in `<output>_build.json`.
+>
+> 0.2.0a26 (ADR-0036): NPT `cell_dof: iso | aniso | tri | xy | xy_iso | z`
+> -- per-axis, full-cell (with shear), in-plane and out-of-plane barostats
+> (MTTK fully flexible cell); `xy` / `xy_iso` run with ESM at P = 0;
+> `baro_thermostat: langevin` (Langevin piston) for strain fluctuations.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -188,7 +193,8 @@ potential:
 
 With ESM the slab is centred at fractional z = 0 (the medium starts at
 fractional z = 1/2), as in Quantum ESPRESSO.  relax may relax only a_x and
-b_y; NPT and kappa refuse ESM; phonon needs supercell [N, N, 1]; gcmc
+b_y; NPT only with `cell_dof: xy` or `xy_iso` at P = 0 (ADR-0036) and
+kappa refuses ESM; phonon needs supercell [N, N, 1]; gcmc
 inserts charged species only with bc2 / bc3.  The z-grid error is
 O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 
@@ -206,7 +212,7 @@ O(dz^2 q^2): ~20 meV per +-1 ion at dz = 0.125 A, 1.3 at dz = 0.031 A.
 |---|---|
 | `fit`   | Fit classical or ML potential parameters against DFT reference data (POSCAR geometry + CSV energy/force/stress). |
 | `relax` | Geometry optimisation: FIRE, L-BFGS, DIIS, RMM-DIIS, RFO — ionic or variable-cell, with transition-state refinement. |
-| `md`    | Molecular dynamics: NVE, NVT (Nosé-Hoover chain), NPT. |
+| `md`    | Molecular dynamics: NVE, NVT (Nosé-Hoover chain), NPT (isotropic, per-axis, full cell, in-plane or out-of-plane; ADR-0036). |
 | `anneal` | Global structure search: MD-quench annealing on a temperature schedule, or basin hopping (ADR-0022). |
 | `gcmc` / `osmc` | Grand-canonical (μVT) MC/MD: discrete insertion/deletion (`gcmc`) or a continuous fractional atom, CFCMC (`osmc`, ADR-0009). |
 | `elastic` | Elastic tensor (clamped- and relaxed-ion), B / G / E / ν as Voigt, Reuss and Hill averages, Born stability, sound velocities, Debye temperature, internal strain (ADR-0017). |
@@ -540,6 +546,42 @@ s = ak.build.substitute(ak.build.supercell(s, [2, 2, 2]), "Ge", {"Sn": 8}, seed=
 z = ak.build.slab(ak.build.bulk("wurtzite", ["Zn", "O"], 3.25), (0, 0, 0, 1),
                   layers=4, vacuum=15.0, orthogonal_ab=True)
 ```
+
+### Anisotropic NPT (ADR-0036)
+
+`md` with `ensemble: npt` takes `cell_dof` (also `NPTSimulation(cell_dof=)`
+and anneal's md section).  x, y, z are Cartesian; the target is the scalar
+`pressure`:
+
+| `cell_dof` | Cell degrees of freedom |
+|---|---|
+| `iso` (default) | volume only, shape kept (unchanged, bit for bit) |
+| `aniso` | Lx, Ly, Lz independently; no shear |
+| `tri` | all six strain components |
+| `xy` | Lx, Ly independently; Lz and shear fixed (ESM slabs) |
+| `xy_iso` | Lx, Ly scaled together (ESM slabs) |
+| `z` | Lz only (a film held at its substrate's in-plane cell) |
+
+The integrator is the MTTK fully flexible cell restricted to these strain
+generators: each has the iso barostat mass, one Nose-Hoover chain drives
+them all, and the conserved quantity H_NPT is reported as before.  Other
+modes add Pxx, Pyy, Pzz (kinetic part included) and a, b, c to thermo.log
+(`tri` also the shear components and the angles) and return the mean
+lattice, the mean pressure tensor and a, b, c with their spread.  With ESM
+only `xy` / `xy_iso` at `pressure: 0` are allowed: Lz, which places the
+boundaries, stays fixed.  Cells are not flipped; `tri` warns when an angle
+leaves [45, 135] degrees.
+
+`baro_thermostat: nhc` (default) thermostats the barostat with one
+Nose-Hoover chain and conserves H_NPT.  In a crystal the strain degrees of
+freedom barely exchange energy with each other or with the atoms, so one
+chain fixes only their total: means (pressure, volume, lattice) are right,
+but volume and strain FLUCTUATIONS are not (SW Si, 300 K: C44 from strain
+fluctuations 85 GPa against 56).  `baro_thermostat: langevin` (Langevin
+piston) puts an Ornstein-Uhlenbeck step with friction time `tau_baro` on
+every barostat momentum; use it for compressibility or elastic constants
+from fluctuations.  H_NPT then subtracts the heat the noise added, so it
+remains a drift check.
 
 ### Global structure search (ADR-0022)
 

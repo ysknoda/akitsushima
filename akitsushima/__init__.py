@@ -161,7 +161,7 @@ from .solvers import (
 )
 from .solvers.config_bridge import force_fn_from_config
 
-__version__ = "0.2.0a25"
+__version__ = "0.2.0a26"
 
 __all__ = [
     "__version__",

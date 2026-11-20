@@ -318,6 +318,11 @@ class _BaseMDSimulation:
     _CK_SCALARS: Tuple[str, ...] = ()
     _CK_ENSEMBLE = ""
 
+    def _ck_arrays(self) -> dict:
+        """Array-valued state a checkpoint carries (name -> array); the
+        anisotropic barostat momenta of ADR-0036.  Empty by default."""
+        return {}
+
     # ------------------------------------------------------------------ #
     #  Trajectory output (ADR-0034: xdatcar | extxyz | lammps-dump)
     # ------------------------------------------------------------------ #
@@ -354,6 +359,10 @@ class _BaseMDSimulation:
         }
         if self.traj_format != "xdatcar":  # absent for xdatcar: older checkpoints match
             out["traj_format"] = self.traj_format
+        if getattr(self, "cell_dof", "iso") != "iso":  # ADR-0036; absent for iso
+            out["cell_dof"] = self.cell_dof
+        if getattr(self, "baro_thermostat", "nhc") != "nhc":
+            out["baro_thermostat"] = self.baro_thermostat
         for name in ("temperature", "tau_nhc", "tau_baro", "pressure_gpa"):
             if hasattr(self, name):
                 out[name] = float(getattr(self, name))
@@ -383,6 +392,8 @@ class _BaseMDSimulation:
         self.lattice = arr["lattice"]
         for name in self._CK_SCALARS:
             setattr(self, name, float(meta["scalars"][name]))
+        for name in self._ck_arrays():
+            setattr(self, name, np.array(arr["state_" + name], dtype=float))
         self.rng = np.random.default_rng()
         self.rng.bit_generator.state = meta["rng"]
         truncate_outputs(outputs, meta["sizes"])
@@ -411,6 +422,8 @@ class _BaseMDSimulation:
         }
         arrays = {"positions": self.positions, "velocities": self.velocities,
                   "lattice": self.lattice}
+        for k, v in self._ck_arrays().items():
+            arrays["state_" + k] = np.asarray(v, dtype=float)
         for k, v in lists.items():
             arrays["list_" + k] = np.asarray(v, dtype=float)
         tlog = getattr(self, "_thermo_log", None)
@@ -1682,15 +1695,54 @@ class NVESimulation(_BaseMDSimulation):
 #  H_NPT = E_kin + E_pot + P_ext V + p_V^2/(2W) + NHC terms
 # ============================================================================
 
+#: Cell degrees of freedom of NPTSimulation (ADR-0036).
+CELL_DOF_MODES = ("iso", "aniso", "tri", "xy", "xy_iso", "z")
+
+
+def _cell_generators(mode: str) -> np.ndarray:
+    """Strain generators E_k (symmetric 3x3) of a ``cell_dof`` mode.
+
+    The cell moves as h_dot = G h with G = sum_k (p_k / W) E_k (Cartesian,
+    rows of the lattice transform as L -> L @ expm(G dt)).  A diagonal
+    unit lets one axis breathe, e_ab + e_ba is a shear, and the sum of
+    two diagonal units couples those axes (``xy_iso``)."""
+    def unit(a, b):
+        e = np.zeros((3, 3))
+        e[a, b] = 1.0
+        e[b, a] = 1.0
+        return e
+    xx, yy, zz = unit(0, 0), unit(1, 1), unit(2, 2)
+    table = {
+        "aniso": [xx, yy, zz],
+        "tri": [xx, yy, zz, unit(1, 2), unit(0, 2), unit(0, 1)],
+        "xy": [xx, yy],
+        "xy_iso": [xx + yy],
+        "z": [zz],
+    }
+    if mode not in table:
+        raise ValueError(f"cell_dof must be one of {' | '.join(CELL_DOF_MODES)}, "
+                         f"got {mode!r}.")
+    return np.array(table[mode])
+
+
 class NPTSimulation(_BaseMDSimulation):
     """
     NPT (isothermal-isobaric) MD: NHC thermostat + isotropic Andersen barostat.
 
     Reference: Martyna, Tuckerman, Tobias & Klein, Mol. Phys. 87, 1117 (1996).
 
-    Cell shape (angles) is preserved; only the volume fluctuates.
-    For full anisotropic cell dynamics the Parrinello-Rahman barostat
-    is needed (not implemented here).
+    With ``cell_dof="iso"`` (default) the cell shape (angles) is
+    preserved and only the volume fluctuates.  The other modes (ADR-0036)
+    use the MTTK fully flexible cell restricted to a set of strain
+    generators E_k (see :func:`_cell_generators`):
+
+        r_dot   = v + G r,                 G = sum_k (p_k / W) E_k
+        v_dot   = F/m - (G + Tr(G)/N_f) v - chain
+        p_k_dot = V Tr(E_k (P_int - P I)) + Tr(E_k) sum m v^2 / N_f - chain
+        H       = E_kin + E_pot + P V + sum_k p_k^2 / 2W + chains
+
+    with P_int = sum m v v^T / V + stress.  For E = I this is the
+    isotropic integrator.
 
     Unit notes
     ----------
@@ -1722,6 +1774,21 @@ class NPTSimulation(_BaseMDSimulation):
     tau_nhc      : NHC thermostat time constant [fs].  Default 100 fs.
     tau_baro     : barostat time constant [fs].  Default 1000 fs.
                    Should be >= 5--10 x tau_nhc for stability.
+    cell_dof     : "iso" (default, volume only) | "aniso" (Lx, Ly, Lz) |
+                   "tri" (all six strain components) | "xy" (Lx, Ly;
+                   Lz and shear fixed) | "xy_iso" (Lx, Ly together) |
+                   "z" (Lz only).  x, y, z are Cartesian.  With ESM only
+                   xy and xy_iso at pressure 0 (ADR-0036).
+    baro_thermostat : "nhc" (default) -- one 2-link Nose-Hoover chain on
+                   the barostat momenta, deterministic, H_NPT conserved --
+                   or "langevin" -- an Ornstein-Uhlenbeck step with
+                   friction time tau_baro on every barostat momentum
+                   (Langevin piston).  In a crystal the strain degrees of
+                   freedom barely exchange energy, and one chain sets only
+                   their total; use "langevin" when strain or volume
+                   FLUCTUATIONS matter (compressibility, elastic constants).
+                   H_NPT then subtracts the heat the noise put in, so it
+                   stays a drift diagnostic (ADR-0036).
     traj_every   : trajectory output interval [steps].
     traj_format  : "xdatcar" (default) | "extxyz" | "lammps-dump" (ADR-0034):
                    XDATCAR_<task>, traj_<task>.extxyz or traj_<task>.lammpstrj.
@@ -1785,12 +1852,37 @@ class NPTSimulation(_BaseMDSimulation):
                  flush_every_step : bool = True,
                  fsync_every_step : bool = False,
                  initial_velocities : Optional[np.ndarray] = None,
-                 save_plots     : bool = True):
-        from ..fitting.force_fn import check_esm_for_solver
-        check_esm_for_solver(
-            force_fn, "NPTSimulation",
-            refuse="its barostat is isotropic and would move the ESM boundaries "
-                   "(no in-plane barostat yet, ADR-0008)")
+                 save_plots     : bool = True,
+                 cell_dof       : str  = "iso",
+                 baro_thermostat: str  = "nhc"):
+        from ..fitting.force_fn import check_esm_for_solver, uses_esm
+        cell_dof = str(cell_dof).lower()
+        if cell_dof not in CELL_DOF_MODES:
+            raise ValueError(f"NPTSimulation: cell_dof must be one of "
+                             f"{' | '.join(CELL_DOF_MODES)}, got {cell_dof!r}.")
+        if cell_dof in ("xy", "xy_iso") and uses_esm(force_fn):
+            # The in-plane barostat keeps Lz (the ESM boundaries) and the
+            # rectangular in-plane cell ESM needs (ADR-0036 decision 5).
+            if float(pressure) != 0.0:
+                raise ValueError(
+                    "NPTSimulation: with ESM electrostatics only pressure 0 is "
+                    "allowed -- the pressure of a cell that includes vacuum "
+                    f"is ambiguous otherwise (got {pressure} GPa; ADR-0036).")
+        else:
+            check_esm_for_solver(
+                force_fn, "NPTSimulation",
+                refuse=f"cell_dof '{cell_dof}' would move the ESM boundaries; "
+                       "use cell_dof xy or xy_iso with pressure 0 (ADR-0036)")
+        self.cell_dof = cell_dof
+        self._iso = cell_dof == "iso"
+        self.baro_thermostat = str(baro_thermostat).lower()
+        if self.baro_thermostat not in ("nhc", "langevin"):
+            raise ValueError("NPTSimulation: baro_thermostat must be nhc | "
+                             f"langevin, got {baro_thermostat!r}.")
+        self._baro_lv = self.baro_thermostat == "langevin"
+        # Heat [eV] the Langevin piston put into the barostat momenta;
+        # subtracted from H_NPT (an array so a checkpoint carries it).
+        self.baro_heat = np.zeros(1)
 
         self.flush_every_step = bool(flush_every_step)
         self.fsync_every_step = bool(fsync_every_step)
@@ -1883,6 +1975,17 @@ class NPTSimulation(_BaseMDSimulation):
         self.xi1_b  = 0.0;  self.xi2_b  = 0.0
         self.vxi1_b = 0.0;  self.vxi2_b = 0.0
 
+        # Anisotropic barostat (ADR-0036): one momentum per generator,
+        # each with the iso mass W; one chain over all of them with the
+        # target n_free kT (Q1_b scaled by n_free, as Q1 is by n_dof).
+        if not self._iso:
+            self._gens = _cell_generators(cell_dof)
+            self._gen_tr = np.trace(self._gens, axis1=1, axis2=2)
+            self.n_baro = len(self._gens)
+            self.p_g = np.zeros(self.n_baro)
+            self.Q1_b = self.n_baro * K_B * temperature * tau_baro**2
+            self._angle_warned = False
+
         self._tc = TimingCollector(enabled=timing)
         self._nl        = neighbour_list_for(self._force_fn, self.r_cut, skin_width)
 
@@ -1912,6 +2015,8 @@ class NPTSimulation(_BaseMDSimulation):
               + NHC kinetic (0.5 Q1 vxi1^2 + 0.5 Q2 vxi2^2)   [already eV]
               + NHC potential (n_dof k_B T xi1 + k_B T xi2)
         """
+        if not self._iso:
+            return self._npt_conserved_g(e_pot)
         ek   = self._kinetic_energy()
         V    = self._volume()
         # barostat KE  [eV]
@@ -1931,7 +2036,7 @@ class NPTSimulation(_BaseMDSimulation):
                    + kT * self.xi1_b + kT * self.xi2_b)
 
         return (ek + e_pot + self.P_ext * V + h_baro
-                + h_nhc_k + h_nhc_p + h_bnhc)
+                + h_nhc_k + h_nhc_p + h_bnhc) - self.baro_heat[0]
 
     # ------------------------------------------------------------------
     #  Barostat integration  (isotropic Andersen-Hoover half-step)
@@ -2035,6 +2140,161 @@ class NPTSimulation(_BaseMDSimulation):
                                   * eps_dot * self.dt)
 
     # ------------------------------------------------------------------
+    #  Anisotropic barostat (ADR-0036)
+    # ------------------------------------------------------------------
+
+    def _ck_arrays(self) -> dict:
+        out = {} if self._iso else {"p_g": self.p_g}
+        if self._baro_lv:
+            out["baro_heat"] = self.baro_heat
+        return out
+
+    def _baro_nhc(self) -> None:
+        if self._baro_lv:
+            self._baro_langevin()
+        elif self._iso:
+            self._nhc_baro_step()
+        else:
+            self._nhc_baro_step_g()
+
+    def _baro_langevin(self) -> None:
+        """Half-step Ornstein-Uhlenbeck update of every barostat momentum
+        (Langevin piston; Feller, Zhang, Pastor & Brooks, J. Chem. Phys.
+        103, 4613 (1995); Quigley & Probert, J. Chem. Phys. 120, 11432
+        (2004) for a flexible cell):
+
+            p <- c p + sqrt((1 - c^2) W kT) xi,   c = exp(-dt / (2 tau_baro))
+
+        exact for the Gaussian marginal of p, so each strain degree of
+        freedom is thermalised on its own.  The kinetic energy it adds is
+        accumulated in ``baro_heat``."""
+        kT = K_B * self.temperature
+        c = np.exp(-0.5 * self.dt / self.tau_baro)
+        p = np.atleast_1d(self.p_eps if self._iso else self.p_g).astype(float)
+        new = c * p + np.sqrt((1.0 - c * c) * self.W * kT) * \
+            self.rng.standard_normal(p.shape)
+        self.baro_heat[0] += 0.5 * float(new @ new - p @ p) / self.W
+        if self._iso:
+            self.p_eps = float(new[0])
+        else:
+            self.p_g = new
+
+    def _baro_half(self, P_inst: float, stress: np.ndarray) -> None:
+        if self._iso:
+            self._barostat_half_step(P_inst)
+        else:
+            self._barostat_half_step_g(stress)
+
+    def _baro_scale(self) -> None:
+        if self._iso:
+            self._scale_step()
+        else:
+            self._scale_step_g()
+
+    def _pressure_tensor(self, stress: np.ndarray) -> np.ndarray:
+        """Instantaneous pressure tensor [eV/A^3]: sum m v v^T / V + stress
+        (symmetrised).  Its trace / 3 is :meth:`_pressure_inst`."""
+        v = self.velocities
+        kin = (v.T * self.masses) @ v / EV_ANG_TO_AMU_ANG_FS2   # [eV]
+        s = np.asarray(stress, dtype=float)
+        return kin / self._volume() + 0.5 * (s + s.T)
+
+    def _G(self) -> np.ndarray:
+        """Cell strain rate G = sum_k (p_k / W) E_k  [fs^-1]."""
+        return np.einsum("k,kab->ab", self.p_g / self.W, self._gens)
+
+    def _npt_conserved_g(self, e_pot: float) -> float:
+        kT = K_B * self.temperature
+        h_baro = 0.5 * float(np.sum(self.p_g ** 2)) / self.W
+        h_nhc = (0.5 * self.Q1 * self.vxi1**2 + 0.5 * self.Q2 * self.vxi2**2
+                 + self.n_dof * kT * self.xi1 + kT * self.xi2)
+        h_bnhc = (0.5 * self.Q1_b * self.vxi1_b**2
+                  + 0.5 * self.Q2_b * self.vxi2_b**2
+                  + self.n_baro * kT * self.xi1_b + kT * self.xi2_b)
+        return (self._kinetic_energy() + e_pot + self.P_ext * self._volume()
+                + h_baro + h_nhc + h_bnhc) - self.baro_heat[0]
+
+    def _nhc_baro_step_g(self) -> None:
+        """:meth:`_nhc_baro_step` for n_free barostat momenta: the chain
+        target is n_free kT and every p_k is scaled by the same factor."""
+        dt = self.dt
+        Q1, Q2 = self.Q1_b, self.Q2_b
+        kT = K_B * self.temperature
+        nkT = self.n_baro * kT
+
+        e_baro = 0.5 * float(np.sum(self.p_g ** 2)) / self.W
+        G1 = (2.0 * e_baro - nkT) / Q1
+        G2 = (Q1 * self.vxi1_b ** 2 - kT) / Q2
+
+        self.vxi2_b += G2 * (dt * 0.25)
+
+        s_arg = float(np.clip(-self.vxi2_b * dt * 0.125, -350.0, 350.0))
+        sc    = np.exp(s_arg)
+        self.vxi1_b = sc * (sc * self.vxi1_b + G1 * dt * 0.25)
+
+        p_arg = float(np.clip(-self.vxi1_b * dt * 0.5, -350.0, 350.0))
+        self.p_g = self.p_g * np.exp(p_arg)
+
+        self.xi1_b += self.vxi1_b * dt * 0.5
+        self.xi2_b += self.vxi2_b * dt * 0.5
+
+        e_baro = 0.5 * float(np.sum(self.p_g ** 2)) / self.W
+        G1 = (2.0 * e_baro - nkT) / Q1
+        self.vxi1_b = sc * (sc * self.vxi1_b + G1 * dt * 0.25)
+
+        G2 = (Q1 * self.vxi1_b ** 2 - kT) / Q2
+        self.vxi2_b += G2 * (dt * 0.25)
+
+    def _barostat_half_step_g(self, stress: np.ndarray) -> None:
+        """p_k += dt/2 [V Tr(E_k (P_int - P I)) + Tr(E_k) sum m v^2 / N_f]."""
+        V = self._volume()
+        D = self._pressure_tensor(stress) - self.P_ext * np.eye(3)
+        mv2 = 2.0 * self._kinetic_energy()
+        force = (V * np.einsum("kab,ab->k", self._gens, D)
+                 + self._gen_tr * mv2 / self.n_dof)                  # [eV]
+        self.p_g = self.p_g + 0.5 * self.dt * force
+
+    def _scale_step_g(self) -> None:
+        """Drift, then L -> L expm(G dt), r -> r expm(G dt) and
+        v -> v expm(-(G + Tr(G)/N_f) dt).
+
+        A diagonal G is exponentiated element-wise, so an axis whose
+        generator is absent is multiplied by exactly 1.0 and stays
+        bit-identical (Lz in xy mode)."""
+        G = self._G()
+        dt = self.dt
+        self.positions += dt * self.velocities
+        self.positions = wrap_positions_into_cell(self.positions, self.lattice)
+        a = np.trace(G) / self.n_dof
+        if not np.any(G - np.diag(np.diag(G))):
+            g = np.diag(G)
+            M = np.diag(np.exp(g * dt))
+            Mv = np.diag(np.exp(-(g + a) * dt))
+        else:
+            w, U = np.linalg.eigh(G)
+            M = (U * np.exp(w * dt)) @ U.T
+            Mv = (U * np.exp(-(w + a) * dt)) @ U.T
+        self.lattice = self.lattice @ M
+        self.positions = self.positions @ M
+        self.velocities = self.velocities @ Mv
+        if self.cell_dof == "tri" and not self._angle_warned:
+            ang = self._cell_angles()
+            if np.any(ang < 45.0) or np.any(ang > 135.0):
+                self._angle_warned = True
+                warnings.warn(
+                    "NPTSimulation (cell_dof tri): a cell angle left [45, 135] "
+                    f"degrees (alpha, beta, gamma = {ang.round(2).tolist()}); "
+                    "cells are not flipped (ADR-0036).", stacklevel=2)
+
+    def _cell_angles(self) -> np.ndarray:
+        """alpha, beta, gamma [deg] of the current lattice."""
+        a, b, c = self.lattice
+        def ang(u, w):
+            return np.degrees(np.arccos(np.clip(
+                u @ w / (np.linalg.norm(u) * np.linalg.norm(w)), -1.0, 1.0)))
+        return np.array([ang(b, c), ang(a, c), ang(a, b)])
+
+    # ------------------------------------------------------------------
     #  Force evaluation
     # ------------------------------------------------------------------
 
@@ -2123,17 +2383,24 @@ class NPTSimulation(_BaseMDSimulation):
                   f"{'E_kin(eV)':>12}  {'T_inst(K)':>10}  "
                   f"{'P_inst(GPa)':>12}  {'V(Ang3)':>12}  "
                   f"{'H_NPT(eV)':>14}")
+        if not self._iso:
+            header += "".join(f"  {c:>10}" for c in self._extra_cols())
         if self.verbose:
             print(f"\nNPT-MD: T={self.temperature} K  "
                   f"P={self.pressure_gpa} GPa  "
                   f"dt={self.dt} fs  steps={total_steps}  "
-                  f"(equil={self.equil_steps})")
+                  f"(equil={self.equil_steps})"
+                  + ("" if self._iso else f"  cell_dof={self.cell_dof}")
+                  + ("  barostat: Langevin piston" if self._baro_lv else ""))
             print(f"  V0 = {self._volume():.4f} A^3  "
                   f"H_NPT(ref) = {H_ref:.4f} eV")
             print(header + self._unc_header())
             print("  " + "-" * len(header))
 
         lists = {"T": [], "P": [], "V": []}
+        if not self._iso:
+            for k in self._extra_lists():
+                lists[k] = []
         if ck is not None:
             lists.update(ck["lists"])
         T_list, P_list, V_list = lists["T"], lists["P"], lists["V"]
@@ -2162,17 +2429,17 @@ class NPTSimulation(_BaseMDSimulation):
 
                 # ---- 1. NHC half-steps (particles, then barostat) -------
                 self._nhc_step()
-                self._nhc_baro_step()
+                self._baro_nhc()
 
                 # ---- 2. Barostat half-step (using current pressure) -----
-                self._barostat_half_step(P_inst)
+                self._baro_half(P_inst, stress)
 
                 # ---- 3. Velocity half-step: v += 0.5 dt F/m ------------
                 self.velocities += 0.5 * self.dt * acc
                 self.velocities *= ~self._fix_mask   # freeze constrained DoF
 
                 # ---- 4. Scale: cell + positions + velocity rescaling ----
-                self._scale_step()
+                self._baro_scale()
 
                 # ---- 5. Force evaluation at new positions ---------------
                 e_pot, forces, stress = self._compute_forces()
@@ -2184,10 +2451,10 @@ class NPTSimulation(_BaseMDSimulation):
 
                 # ---- 7. Barostat half-step (using new pressure) --------
                 P_inst_new = self._pressure_inst(stress)
-                self._barostat_half_step(P_inst_new)
+                self._baro_half(P_inst_new, stress)
 
                 # ---- 8. NHC half-steps (barostat, then particles) ------
-                self._nhc_baro_step()
+                self._baro_nhc()
                 self._nhc_step()
 
                 # ---- Optional velocity rescaling (early steps only) -----
@@ -2230,6 +2497,10 @@ class NPTSimulation(_BaseMDSimulation):
                     T_list.append(T_inst)
                     P_list.append(P_gpa)
                     V_list.append(V_inst)
+                    if not self._iso:
+                        xv = self._extra_values(stress)
+                        for k in self._extra_lists():
+                            lists[k].append(xv[k])
 
                 self._tc.lap("step")  # timing
                 if step % self.thermo_every == 0:
@@ -2237,6 +2508,10 @@ class NPTSimulation(_BaseMDSimulation):
                            f"{e_kin:12.6f}  {T_inst:10.2f}  "
                            f"{P_gpa:12.4f}  {V_inst:12.4f}  "
                            f"{H_NPT:14.6f}")
+                    if not self._iso:
+                        xv = self._extra_values(stress)
+                        row += "".join(f"  {xv[k]:10.4f}"
+                                       for k in self._extra_cols())
                     row += self._unc_cell()
                     thermo_fh.write(row + "\n")
                     if self.verbose:
@@ -2289,14 +2564,15 @@ class NPTSimulation(_BaseMDSimulation):
 
         if (self.save_plots and have_matplotlib() and len(T_list) > 1
                 and _mpi_rank == 0):
-            self._save_plots(T_list, P_list, V_list)
+            self._save_plots(T_list, P_list, V_list,
+                             extra=None if self._iso else lists)
 
         self._tc.stop("total")  # timing
         _timing = self._tc.summary()
         if _timing.get("enabled") and _mpi_rank == 0:
             self._tc.print_summary(label="NPTSimulation")
 
-        return {
+        out = {
             "positions"   : self.positions.copy(),
             "velocities"  : self.velocities.copy(),
             "lattice"     : self.lattice.copy(),
@@ -2306,12 +2582,61 @@ class NPTSimulation(_BaseMDSimulation):
             "H_npt_drift" : H_drift,
             "timing"     : _timing,
         }
+        if not self._iso:
+            out.update(self._extra_summary(lists))
+        return out
 
-    def _save_plots(self, T_list, P_list, V_list) -> None:
-        """Save T(t), P(t), V(t) time-series plots."""
-        times = np.arange(len(T_list)) * self.thermo_every * self.dt * 1e-3
+    # ---- anisotropic output (ADR-0036) ---------------------------------
+    _P_KEYS = ("Pxx", "Pyy", "Pzz", "Pyz", "Pxz", "Pxy")
+    _P_IDX = ((0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1))
 
-        fig, axes = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+    def _extra_cols(self):
+        """thermo.log columns added for cell_dof != iso."""
+        if self.cell_dof == "tri":
+            return (*self._P_KEYS, "a", "b", "c", "alpha", "beta", "gamma")
+        return ("Pxx", "Pyy", "Pzz", "a", "b", "c")
+
+    def _extra_lists(self):
+        return (*self._P_KEYS, "a", "b", "c", *(f"L{i}" for i in range(9)))
+
+    def _extra_values(self, stress) -> dict:
+        Pt = self._pressure_tensor(stress) * self._EV_ANG3_TO_GPA
+        out = {k: float(Pt[i, j]) for k, (i, j) in zip(self._P_KEYS, self._P_IDX)}
+        for k, x in zip("abc", np.linalg.norm(self.lattice, axis=1)):
+            out[k] = float(x)
+        for k, x in zip(("alpha", "beta", "gamma"), self._cell_angles()):
+            out[k] = float(x)
+        for i, x in enumerate(self.lattice.ravel()):
+            out[f"L{i}"] = float(x)
+        return out
+
+    def _extra_summary(self, lists) -> dict:
+        if not lists["a"]:
+            return {}
+        Pm = np.zeros((3, 3))
+        for k, (i, j) in zip(self._P_KEYS, self._P_IDX):
+            Pm[i, j] = Pm[j, i] = float(np.mean(lists[k]))
+        abc = np.array([lists["a"], lists["b"], lists["c"]])
+        return {
+            "cell_dof": self.cell_dof,
+            "lattice_mean": np.array(
+                [np.mean(lists[f"L{i}"]) for i in range(9)]).reshape(3, 3),
+            "P_tensor_mean_gpa": Pm,
+            "abc_mean": abc.mean(axis=1),
+            "abc_std": abc.std(axis=1),
+        }
+
+    def _save_plots(self, T_list, P_list, V_list, extra=None) -> None:
+        """Save T(t), P(t), V(t) time-series plots (plus Pxx/Pyy/Pzz and
+        a/b/c panels for cell_dof != iso).
+
+        The lists hold one entry per production step, so entry i is at
+        step equil_steps + i (this used thermo_every * dt per entry, which
+        stretched the time axis by thermo_every)."""
+        times = (self.equil_steps + np.arange(len(T_list))) * self.dt * 1e-3
+
+        n_ax = 3 if extra is None else 5
+        fig, axes = plt.subplots(n_ax, 1, figsize=(8, 3 * n_ax), sharex=True)
         axes[0].plot(times, T_list, lw=0.8)
         axes[0].axhline(self.temperature, color="r", ls="--", lw=1,
                         label=f"Target {self.temperature} K")
@@ -2326,7 +2651,18 @@ class NPTSimulation(_BaseMDSimulation):
 
         axes[2].plot(times, V_list, lw=0.8, color="darkorange")
         axes[2].set_ylabel("Volume (A^3)")
-        axes[2].set_xlabel("Time (ps)")
+        axes[-1].set_xlabel("Time (ps)")
+        if extra is not None:
+            t_x = times
+            for k in ("Pxx", "Pyy", "Pzz"):
+                axes[3].plot(t_x, extra[k], lw=0.6, label=k)
+            axes[3].axhline(self.pressure_gpa, color="r", ls="--", lw=1)
+            axes[3].set_ylabel("P_aa (GPa)")
+            axes[3].legend(fontsize=8)
+            for k in "abc":
+                axes[4].plot(t_x, extra[k], lw=0.8, label=k)
+            axes[4].set_ylabel("Length (A)")
+            axes[4].legend(fontsize=8)
 
         if self.equil_steps > 0:
             t_eq = self.equil_steps * self.dt * 1e-3

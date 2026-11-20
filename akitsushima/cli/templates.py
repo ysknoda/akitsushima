@@ -382,6 +382,19 @@ md:
   equil_steps: 2000
   tau_nhc:     100.0               # fs
   tau_baro:    200.0               # fs
+  cell_dof:    iso                 # ADR-0036; x, y, z are Cartesian:
+                                   #   iso    volume only (cell shape kept)
+                                   #   aniso  Lx, Ly, Lz independent, no shear
+                                   #   tri    all six strain components
+                                   #   xy     Lx, Ly; Lz and shear fixed (ESM)
+                                   #   xy_iso Lx, Ly scaled together (ESM)
+                                   #   z      Lz only (epitaxial film)
+                                   # With ESM only xy / xy_iso at pressure 0.
+  baro_thermostat: nhc             # nhc (deterministic, H_NPT conserved) |
+                                   # langevin (Langevin piston: each strain
+                                   # DOF thermalised; use it for volume /
+                                   # strain fluctuations, e.g. elastic
+                                   # constants or compressibility)
   velocity_rescale_steps: 2000
   traj_every:  10
   traj_format: xdatcar             # xdatcar | extxyz | lammps-dump
@@ -1249,6 +1262,8 @@ anneal:
     timestep:     1.0              # fs
     tau_nhc:      20.0             # fs
     tau_baro:     1000.0           # fs (npt)
+    cell_dof:     iso              # npt: iso | aniso | tri | xy | xy_iso | z
+    baro_thermostat: nhc           # npt: nhc | langevin
     traj_every:   50
     thermo_every: 50
     skin_width:   0.5

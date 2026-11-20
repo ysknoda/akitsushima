@@ -150,6 +150,8 @@ Three findings:
     barostat of ADR-0010 item 2 is part of this step (Q24).  It is last
     because its verification (conserved quantity, each pressure
     component) is the heaviest.
+    *Done as ADR-0036 (0.2.0a26): `cell_dof` iso, aniso, tri, xy, xy_iso,
+    z (MTTK fully flexible cell).*
 
 ### Tier B: after tier A
 

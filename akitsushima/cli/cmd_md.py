@@ -88,6 +88,8 @@ def cmd_md(args) -> int:
         if ens == "npt":
             print(f"  Tau baro     : {md_cfg.get('tau_baro', 1000.0)} fs")
             print(f"  Pressure     : {md_cfg.get('pressure', 0.0)} GPa")
+            print(f"  Cell DOF     : {md_cfg.get('cell_dof', 'iso')}")
+            print(f"  Baro thermo  : {md_cfg.get('baro_thermostat', 'nhc')}")
 
     output_dir = md_cfg.get("output_dir", f"./{ens}_output")
     os.makedirs(output_dir, exist_ok=True)
@@ -133,6 +135,8 @@ def cmd_md(args) -> int:
                             pressure   =md_cfg.get("pressure",   0.0),
                             tau_nhc    =md_cfg.get("tau_nhc",    100.0),
                             tau_baro   =md_cfg.get("tau_baro",   1000.0),
+                            cell_dof   =md_cfg.get("cell_dof",   "iso"),
+                            baro_thermostat=md_cfg.get("baro_thermostat", "nhc"),
                             velocity_rescale_steps=md_cfg.get(
                                 "velocity_rescale_steps", 0))
     elif thermostat == "langevin":
@@ -215,6 +219,14 @@ def cmd_md(args) -> int:
             print(f"  P_std       : {result.get('P_std_gpa', float('nan')):.4f} GPa")
         if result.get("V_mean") is not None:
             print(f"  V_mean      : {result['V_mean']:.3f} A^3")
+        if result.get("abc_mean") is not None:  # cell_dof != iso (ADR-0036)
+            m, s = result["abc_mean"], result["abc_std"]
+            print("  a, b, c     : " + ", ".join(
+                f"{x:.4f} +/- {e:.4f}" for x, e in zip(m, s)) + " A")
+            Pm = result["P_tensor_mean_gpa"]
+            print(f"  <P_ab>      : xx {Pm[0,0]:.4f}  yy {Pm[1,1]:.4f}  "
+                  f"zz {Pm[2,2]:.4f}  yz {Pm[1,2]:.4f}  xz {Pm[0,2]:.4f}  "
+                  f"xy {Pm[0,1]:.4f} GPa")
         for key, label in (("e_tot_drift", "E_tot drift "),
                            ("H_npt_drift", "H_NPT drift ")):
             if result.get(key) is not None:
