@@ -153,6 +153,8 @@ Three findings:
     *Done as ADR-0036 (0.2.0a26): `cell_dof` iso, aniso, tri, xy, xy_iso,
     z (MTTK fully flexible cell).*
 
+    *Tier A complete on 2026-11-20; 0.2.0b1 marks it (Q25).*
+
 ### Tier B: after tier A
 
 - A descriptor family whose angular part is linear in the number of

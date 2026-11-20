@@ -1,10 +1,10 @@
 # akitsushima
 
-> **Alpha release.** This project is under active development.
-> Interfaces, behavior, and output formats may change without notice
-> between releases, and it has not yet been broadly tested. Do not
-> rely on it for production use. Computed values are not comparable
-> across these pre-releases. 0.2.0a1 stopped halving Tersoff energies,
+> **Beta release.** This project is feature-complete for its intended
+> scope but still being validated; bugs may still be found and fixed
+> before a stable release. Use in production with caution, and pin the
+> exact version you tested against. Computed values are not comparable
+> across the 0.2.0 alpha pre-releases listed below. 0.2.0a1 stopped halving Tersoff energies,
 > forces and stresses, gave Buckingham and Born-Mayer the force-shifted
 > truncation their sibling pair potentials already had, and chose the
 > Ewald and PPPM cutoffs from the accuracy you ask for. 0.2.0a2 makes the
@@ -142,6 +142,9 @@
 > -- per-axis, full-cell (with shear), in-plane and out-of-plane barostats
 > (MTTK fully flexible cell); `xy` / `xy_iso` run with ESM at P = 0;
 > `baro_thermostat: langevin` (Langevin piston) for strain fluctuations.
+>
+> 0.2.0b1: first beta.  No code change from 0.2.0a26; tier A of the
+> ADR-0028 roadmap (steps 1-11, ADR-0030 to ADR-0036) is complete.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
