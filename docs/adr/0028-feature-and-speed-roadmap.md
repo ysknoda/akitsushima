@@ -623,3 +623,75 @@ NUMBA_DISABLE_JIT=1 pytest tests -q -m "not slow" --durations=25
 The last command shows module-fixture setups that have moved into the
 fast set.  A new test is marked `slow` by its author when it takes
 0.5 s or more.
+
+## Addendum 5: tier B plan (grilling 2026-11-20, after 0.2.0b1)
+
+Tier A was finished with 0.2.0b1 (ADR-0030 to ADR-0036).  The user then
+grilled tier B (Q1-Q12 of that session, all agreed as recommended).
+
+**Membership (Q1).**
+- Added to tier B: the deferred measurements of ADR-0025 (with the
+  idle baseline of step 1), and the Langevin thermostat in anneal's
+  `md_quench` (left open by ADR-0032).
+- Added to tier C: non-hydrostatic NPT targets (the reference-cell term
+  ADR-0036 left out) and reduced tilt factors in LAMMPS data output
+  (ADR-0034).
+- The re-run of ADR-0027 A1 with the ensemble stays outside the
+  roadmap, as a separate research decision.
+- Not made an item: C11 from the Langevin-piston strain fluctuations
+  lies 1-2 sigma below the 0 K value (ADR-0036 result).  It can be
+  looked at with the finite-temperature work of item 6.
+
+**Versions (Q2).**  0.2.0 stays at b1.  Tier B items are numbered
+0.3.0a1, a2, ... on main; a fix to 0.2.0 would be cut from a branch at
+v0.2.0b1.  Whether and when 0.2.0 becomes final is decided separately.
+
+**Order (Q3, Q6, Q7).**  By value to the primary target (GeSn and AlN
+MLIPs and large MD with them):
+1. Measurements (scope below).
+2. Active-learning command driven by the ensemble uncertainty (Q15).
+3. Descriptor family whose angular part is linear in the number of
+   neighbours (Q10); models are retrained.  If item 1 shows the ACSF
+   kernel still above 90 % of the MLIP force call, the user is asked
+   whether 2 and 3 swap.
+4. Thermostats: CSVR in `md` (Q14) and Langevin in anneal's
+   `md_quench`, one item.
+5. phonopy force constants and `FORCE_SETS`, spglib reduction of
+   displacements and strains, LAMMPS potential files (Q17).
+6. Lattice thermal conductivity from third-order force constants in the
+   relaxation-time approximation (Q16); after 5, which reduces its
+   displacements.
+7. Point-defect workflow: formation energy and migration barrier (Q16),
+   a separate item from 6 (Q7).
+8. EAM, PPPM and ESM speed-ups (Q12 and addendum 4).
+9. GPU, ADR-0016: still gated on access to the H100 (Q4).
+`pytest-xdist` is added only if the full suite exceeds 20 min (Q9).
+
+**Process (Q5).**  As in tier A: a grilling, an ADR committed as
+Proposed, the implementation, the ADR accepted with its result, one
+version step per item; local commits; every push and tag is asked for,
+and tags are put only at milestones.  The 1e-10 compatibility of the
+default path, the 1.5x speed gate and optional extras for new
+dependencies stay.
+
+**Test time (Q9).**
+- An item adds at most 60 s of `slow` tests in total.
+- Long validations (fluctuations, convergence, statistics) run under
+  nohup outside the suite, and their results go into the item's ADR,
+  as in ADR-0036.
+- Above 20 min for the full suite, xdist gets its own grilling.
+- Full suite at 0.2.0b1, alone on the machine (2026-11-20): 971 passed,
+  1 skipped in 17.9 min, 2.1 min under the xdist threshold.
+
+**Measurements (Q8, Q11).**  The size ladder of ADR-0025, the parallel
+matrix, the idle baseline and a profile of the MLIP force call; the
+durability runs (about 37 h) are left for a time the user chooses.  The
+user allowed the parts that run on one core to start at once; anything
+needing two or more cores waits for the user's word.
+- One core now: the MLIP profile, `bench_force.py --threads 1` (tagged
+  `loaded`: the user works on the machine meanwhile), and the size
+  ladder with one numba thread and one BLAS thread, one run at a time.
+- Held: the parallel matrix (numba 1 / 4 / 10 threads, `mpirun` 1 / 2 /
+  4) and the idle baseline at several threads.
+- Results go into ADR-0025 and this ADR.
+
