@@ -60,6 +60,7 @@ _MD_KEYS = {
     "cell_dof",
     "baro_thermostat",
     "traj_every",
+    "traj_format",
     "thermo_every",
     "skin_width",
     "masses",
@@ -67,6 +68,7 @@ _MD_KEYS = {
 }
 
 _ANNEAL_KEYS = {
+    "stop_sigma",
     "method",
     "output_dir",
     "seed",
@@ -199,6 +201,7 @@ def cmd_anneal(args) -> int:
             fix_atoms=pos_data.get("fix_atoms"),
             verbose=verbose,
             plot=an.get("plot", True),
+            stop_sigma=an.get("stop_sigma"),
             **bh_cfg,
         )
     except ValueError as err:

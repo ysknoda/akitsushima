@@ -309,7 +309,51 @@ class _BaseMDSimulation:
         if fn is None:
             return ""
         u = fn()
+        self._last_sigma = float(u["sigma_F_max"]) if u else float("nan")
         return f"  {u['sigma_F_max']:14.6f}" if u else f"  {'nan':>14}"
+
+    # ------------------------------------------------------------------ #
+    #  Stop on the ensemble uncertainty (ADR-0037)
+    # ------------------------------------------------------------------ #
+    _stop_cfg = None
+    _sig_run = 0
+    _last_sigma = float("nan")
+    stopped = None
+
+    def set_stop_sigma(self, threshold: float, consecutive: int = 3):
+        """Stop the run when sigma_F,max of the ensemble exceeds
+        ``threshold`` [eV/A] on ``consecutive`` logged steps in a row
+        (ADR-0037).  Only logged steps (``thermo_every``) are checked.
+        After a stop, ``self.stopped`` holds the step and the value, the
+        output files hold the run up to that step, and no final checkpoint
+        is written.  Needs an ensemble MLIP (ADR-0033)."""
+        if self._unc_fn() is None:
+            raise ValueError(
+                "stop_sigma needs an ensemble MLIP force field (ADR-0033): a "
+                "single model has no uncertainty.")
+        threshold, consecutive = float(threshold), int(consecutive)
+        if not threshold > 0.0 or consecutive < 1:
+            raise ValueError(
+                f"stop_sigma: threshold must be > 0 and consecutive >= 1, got "
+                f"{threshold} and {consecutive}.")
+        self._stop_cfg = (threshold, consecutive)
+        self._sig_run = 0
+        self.stopped = None
+        return self
+
+    def _sigma_check(self, step: int) -> None:
+        """Called on every logged step after :meth:`_unc_cell`."""
+        if self._stop_cfg is None:
+            return
+        thr, n = self._stop_cfg
+        s = self._last_sigma
+        self._sig_run = self._sig_run + 1 if s > thr else 0
+        if self._sig_run >= n:
+            self.stopped = {"step": int(step), "sigma_F_max": s,
+                            "threshold": thr, "consecutive": n}
+            if self.verbose:
+                print(f"  stop_sigma: sigma_F_max {s:.4f} eV/A above {thr:.4f} "
+                      f"on {n} logged steps in a row; stopping at step {step}")
 
     # ------------------------------------------------------------------ #
     #  Checkpoint and restart (ADR-0031)
@@ -924,6 +968,7 @@ class NVTSimulation(_BaseMDSimulation):
                            f"{T_inst:10.2f}  {H_nhc:14.6f}  "
                            f"{self._nl.rebuild_count:10d}")
                     row += self._unc_cell()
+                    self._sigma_check(step)
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)
@@ -945,12 +990,14 @@ class NVTSimulation(_BaseMDSimulation):
                     self._flush_outputs([thermo_fh, traj_fh],
                                         fsync=self.fsync_every_step)
 
+                if self.stopped is not None:
+                    break
                 if (checkpoint and checkpoint_every
                         and (step + 1) % checkpoint_every == 0):
                     self._ck_save(checkpoint, checkpoint_meta, step + 1,
                                   lists, {}, handles)
 
-            if checkpoint:
+            if checkpoint and self.stopped is None:
                 self._ck_save(checkpoint, checkpoint_meta, total_steps,
                               lists, {}, handles)
 
@@ -1219,6 +1266,7 @@ class LangevinSimulation(NVTSimulation):
                            f"{T_inst:10.2f}  {e_tot - Q:14.6f}  "
                            f"{self._nl.rebuild_count:10d}")
                     row += self._unc_cell()
+                    self._sigma_check(step)
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)
@@ -1235,11 +1283,13 @@ class LangevinSimulation(NVTSimulation):
                         or (is_prod and step % self.traj_every == 0)):
                     self._flush_outputs([thermo_fh, traj_fh],
                                         fsync=self.fsync_every_step)
+                if self.stopped is not None:
+                    break
                 if (checkpoint and checkpoint_every
                         and (step + 1) % checkpoint_every == 0):
                     self._ck_save(checkpoint, checkpoint_meta, step + 1,
                                   lists, {"Q": Q}, handles)
-            if checkpoint:
+            if checkpoint and self.stopped is None:
                 self._ck_save(checkpoint, checkpoint_meta, total_steps,
                               lists, {"Q": Q}, handles)
 
@@ -1596,6 +1646,7 @@ class NVESimulation(_BaseMDSimulation):
                            f"{e_kin:12.6f}  {e_tot:14.6f}  "
                            f"{T_inst:10.2f}  {P_gpa:12.4f}  {drift:14.6f}")
                     row += self._unc_cell()
+                    self._sigma_check(step)
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)
@@ -1611,12 +1662,14 @@ class NVESimulation(_BaseMDSimulation):
                     self._flush_outputs([thermo_fh, traj_fh],
                                         fsync=self.fsync_every_step)
 
+                if self.stopped is not None:
+                    break
                 if (checkpoint and checkpoint_every
                         and (step + 1) % checkpoint_every == 0):
                     self._ck_save(checkpoint, checkpoint_meta, step + 1, lists,
                                   {"e_tot_ref": float(e_tot_ref)}, handles)
 
-            if checkpoint:
+            if checkpoint and self.stopped is None:
                 self._ck_save(checkpoint, checkpoint_meta, total_steps, lists,
                               {"e_tot_ref": float(e_tot_ref)}, handles)
 
@@ -2513,6 +2566,7 @@ class NPTSimulation(_BaseMDSimulation):
                         row += "".join(f"  {xv[k]:10.4f}"
                                        for k in self._extra_cols())
                     row += self._unc_cell()
+                    self._sigma_check(step)
                     thermo_fh.write(row + "\n")
                     if self.verbose:
                         print("  " + row)
@@ -2528,12 +2582,14 @@ class NPTSimulation(_BaseMDSimulation):
                     self._flush_outputs([thermo_fh, traj_fh],
                                         fsync=self.fsync_every_step)
 
+                if self.stopped is not None:
+                    break
                 if (checkpoint and checkpoint_every
                         and (step + 1) % checkpoint_every == 0):
                     self._ck_save(checkpoint, checkpoint_meta, step + 1, lists,
                                   {"H_ref": float(H_ref)}, handles)
 
-            if checkpoint:
+            if checkpoint and self.stopped is None:
                 self._ck_save(checkpoint, checkpoint_meta, total_steps, lists,
                               {"H_ref": float(H_ref)}, handles)
 

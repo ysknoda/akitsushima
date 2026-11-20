@@ -205,3 +205,6 @@ members cost 2.25 times one.  The +40 % estimated in the starting point
 was for 400 hidden units.
 
 Full suite: 892 passed, 1 skipped (14.4 min).
+
+Follow-up: ADR-0037 (0.3.0a1) drives active learning with this
+spread (`akitsushima active`, trust window on sigma_F,max).

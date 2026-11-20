@@ -46,6 +46,7 @@ _COMMAND = {
     "dataset": "dataset",
     "anneal": "anneal",
     "build": "build",
+    "active": "active",
 }
 
 # Only step/cycle counts are overridden (section -> {key: value}).
@@ -71,6 +72,10 @@ _SHRINK = {
     "mlip": {},
     "dataset": {},
     "build": {},
+    "active": {"active": {"rounds": 1,
+                          "explore": [{"md": {"n_steps": 20}},
+                                      {"anneal": {"segment_steps": 20,
+                                                  "quench_every": 10}}]}},
     "anneal": {"anneal": {"segment_steps": 20, "quench_every": 10,
                           "schedule": {"n_segments": 2},
                           "md": {"traj_every": 5, "thermo_every": 5}}},
@@ -217,12 +222,47 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
                       make_frames([("Si", 4 + r)], n_steps=2, seed=r))
     elif key == "build":
         pass  # starts from bulk: no input file
+    elif key == "active":
+        _write_active_inputs(tmp_path, cfg["active"])
     else:  # pragma: no cover - guarded by test_every_template_key_is_covered
         raise KeyError(key)
 
 
+def _write_active_inputs(tmp_path, a):
+    """Fit-layout train / test sets of 8-atom Ge7Sn1 cells (arbitrary
+    labels), the start structures and the INCAR template."""
+    from akitsushima import build as B
+    from akitsushima.io.dataset import _write_split
+
+    base = B.substitute(B.bulk("diamond", "Ge", 5.76), from_="Ge", to={"Sn": 1}, seed=0)
+    rng = np.random.default_rng(0)
+
+    def items(n, seed):
+        out = []
+        for k in range(n):
+            s = B.rattle(base, 0.05, seed=seed + k)
+            out.append({"frame": {"lattice": s["lattice"], "positions": s["positions"],
+                                  "atom_types": s["atom_types"],
+                                  "forces": 0.1 * rng.normal(size=(8, 3)),
+                                  "stress": 1e-3 * np.eye(3)},
+                        "target": -4.0 + 0.01 * rng.normal(), "run": "t", "step": k})
+        return out
+
+    _write_split(str(tmp_path / a["model"]["train_dir"]), items(8, 0))
+    _write_split(str(tmp_path / a["model"]["test_dir"]), items(3, 100))
+    (tmp_path / "start").mkdir()
+    write_poscar(str(tmp_path / "start" / "POSCAR_a"), base["lattice"],
+                 base["positions"], base["atom_types"])
+    (tmp_path / a["label"]["incar"]).write_text("ENCUT = 500\nNSW = 0\n")
+
+
 def _merge(dst: dict, src: dict) -> None:
     for k, v in src.items():
+        if isinstance(v, list):  # a list of sections, merged item by item
+            assert isinstance(dst.get(k), list) and len(dst[k]) >= len(v), k
+            for d_item, s_item in zip(dst[k], v):
+                _merge(d_item, s_item)
+            continue
         if isinstance(v, dict):
             assert isinstance(dst.get(k), dict), (
                 f"shrink key {k!r} is not a section in the template"
@@ -247,7 +287,9 @@ def test_template_runs_as_shipped(key, tmp_path, monkeypatch):
     yaml_path.write_text(yaml.safe_dump(cfg))
 
     rc = _DISPATCH[_COMMAND[key]](_ns(yaml_path))
-    assert rc == 0, f"template {key!r} returned {rc}"
+    # active ships with label mode vasp_inputs: it stops, waiting for VASP
+    expected = 2 if key == "active" else 0
+    assert rc == expected, f"template {key!r} returned {rc}"
 
     section = cfg.get(_COMMAND[key], {})
     out_dir = tmp_path / section.get("output_dir", "")

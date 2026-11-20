@@ -145,6 +145,12 @@
 >
 > 0.2.0b1: first beta.  No code change from 0.2.0a26; tier A of the
 > ADR-0028 roadmap (steps 1-11, ADR-0030 to ADR-0036) is complete.
+>
+> 0.3.0a1 (ADR-0037): `akitsushima active` -- active learning driven by
+> the ensemble uncertainty: md / anneal exploration, a trust window on
+> sigma_F,max with farthest-point thinning, VASP inputs or an external
+> code as labeller, retraining; resumable.  md and anneal take
+> `stop_sigma`.  First alpha of tier B (ADR-0028 addendum 5).
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
@@ -385,6 +391,7 @@ print(result["energy"] / 64, "eV/atom after relaxation")
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
 | `fit`    | Fit a classical potential (LJ / Mie / Morse / Born-Mayer / Yukawa / Buckingham / Stillinger-Weber / Tersoff / EAM) |
 | `dataset` | `fit` / `mlip` training set from VASP runs (vasprun.xml / OUTCAR), split by run |
+| `active` | Active learning: explore with an ensemble MLIP, select uncertain structures, label (VASP inputs / external code), retrain |
 
 ### Elastic constants (ADR-0017)
 
@@ -854,6 +861,35 @@ form instead, E = sum_i eps_s(G_i) on each atom's own ACSF vector G_i
 a sum of local terms, so a model trained on one cell size runs on others;
 the model file (`atomic_<model>_model.npz` / `.pt`) records the form and
 is used with the same `potential: {type: MLIP, model: ...}` entry.
+
+### Active learning (ADR-0037)
+
+`akitsushima active active.yaml` (`ak.active(...)` in Python) runs rounds
+of explore -> select -> label -> train with an atom-centred ELM / QELM
+ensemble (ADR-0033); `akitsushima --dump-default active` writes a
+commented input.
+
+- **explore**: md and / or anneal sections with start structures, run
+  with the current model in cells DFT can label; a trajectory stops when
+  sigma_F,max stays above hi (`stop_sigma`, also usable in `md` and
+  `anneal` on their own).
+- **select**: every saved frame is re-evaluated.  sigma_F,max < lo:
+  accurate; above hi: failed; in between: candidate, thinned to `k` by
+  farthest-point sampling.  lo and hi default to the 99th percentile of
+  sigma_F,max on the training structures and 10 times it.  Frames with
+  atoms closer than 0.75 times the training set's shortest distance are
+  never labelled.
+- **label**: `mode: vasp_inputs` writes POSCAR / INCAR / KPOINTS /
+  `make_potcar.sh` per structure and exits with code 2; run VASP and
+  rerun the command to read `vasprun.xml`.  `mode: external` runs an
+  ADR-0011 external potential for each structure.
+- **train**: the ensemble is refitted on the start data plus every label
+  so far; added structures stay out of the validation split.
+
+Everything is recorded in `active_ledger.jsonl`; rerunning resumes.  On a
+synthetic GeSn oracle (SW as "DFT", six start sets) the selection gave a
+lower force RMSE than random picks from the same explorers on every start
+set (0.02-0.22 eV/A), not a lower energy RMSE; see ADR-0037, Result.
 
 ### External codes (ADR-0011)
 

@@ -154,6 +154,21 @@ def cmd_md(args) -> int:
                             velocity_rescale_steps=md_cfg.get(
                                 "velocity_rescale_steps", 0))
 
+    # Stop on the ensemble uncertainty (ADR-0037): stop_sigma: {threshold,
+    # consecutive}
+    stop_cfg = md_cfg.get("stop_sigma")
+    if stop_cfg:
+        bad = set(stop_cfg) - {"threshold", "consecutive"}
+        if bad or "threshold" not in stop_cfg:
+            print(f"[ERROR] md.stop_sigma: give {{threshold, consecutive}}, got "
+                  f"{sorted(stop_cfg)}")
+            return 1
+        try:
+            sim.set_stop_sigma(**stop_cfg)
+        except ValueError as err:
+            print(f"[ERROR] md: {err}")
+            return 1
+
     # Checkpoint and restart (ADR-0031): an existing checkpoint is
     # continued unless `restart: false`.
     ck_path, ck_every, ck_meta = _checkpoint_setup(
@@ -233,6 +248,11 @@ def cmd_md(args) -> int:
                 print(f"  {label}: {result[key]:.4e} eV  "
                       f"({result[key]/N:.4e} eV/atom)")
 
+    if sim.stopped is not None:
+        st = sim.stopped
+        print(f"\n[stop_sigma]  stopped at step {st['step']}: sigma_F_max "
+              f"{st['sigma_F_max']:.4f} eV/A above {st['threshold']:.4f} on "
+              f"{st['consecutive']} logged steps in a row")
     _print_output_files(output_dir)
 
     td = result.get("timing", {})

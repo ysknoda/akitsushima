@@ -125,12 +125,28 @@ def _prepare(model, structures, descriptor, weight_csv, val_fraction, val_seed):
         else np.ones(len(y))
     )
     w_row = _row_weights(model, lab, w_unit, w_user)
-    idx_tr, idx_val = structure_grouped_split(
-        lab,
-        val_fraction=val_fraction,
-        val_seed=val_seed,
-        caller=type(model).__name__ + ".fit",
-    )
+    # Structures flagged ``train_only`` (added by active learning,
+    # ADR-0037 decision 12) never enter the validation split: the split
+    # is drawn over the other structures alone, so it is the one those
+    # structures get without the additions.
+    only = np.array([bool(s.get("train_only")) for s in data.structures])
+    if only.any():
+        keep = np.flatnonzero(~only[sid])
+        i_tr, i_val = structure_grouped_split(
+            lab[keep],
+            val_fraction=val_fraction,
+            val_seed=val_seed,
+            caller=type(model).__name__ + ".fit",
+        )
+        idx_val = keep[i_val]
+        idx_tr = np.setdiff1d(np.arange(len(lab)), idx_val)
+    else:
+        idx_tr, idx_val = structure_grouped_split(
+            lab,
+            val_fraction=val_fraction,
+            val_seed=val_seed,
+            caller=type(model).__name__ + ".fit",
+        )
     tr = np.unique(sid[idx_tr])
     val = np.unique(sid[idx_val])
     n_sp = len(desc.species)

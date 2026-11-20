@@ -3,6 +3,7 @@ import argparse
 
 from ..fitting import registry
 from ..fitting.driver import LOCAL_METHOD_OPTIONS
+from .cmd_active import cmd_active
 from .cmd_anneal import cmd_anneal
 from .cmd_build import cmd_build
 from .cmd_dataset import cmd_dataset
@@ -54,6 +55,7 @@ _DISPATCH = {
     "dataset": cmd_dataset,
     "anneal":  cmd_anneal,
     "build":   cmd_build,
+    "active":  cmd_active,
 }
 
 
@@ -99,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip | dataset | anneal | build"))
+              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip | dataset | anneal | build | active"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -130,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("dataset", "Training set (fit / mlip layout) from VASP vasprun.xml / OUTCAR")
     _add("anneal", "Global structure search: MD-quench annealing or basin hopping")
     _add("build",  "Build a structure: bulk / supercell / alloy / vacancy / slab (ADR-0035)")
+    _add("active", "Active learning driven by the ensemble uncertainty (ADR-0037)")
 
     p_fit = sub.add_parser(
         "fit", help="Fit a classical potential "

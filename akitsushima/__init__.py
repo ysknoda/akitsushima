@@ -160,8 +160,9 @@ from .solvers import (
     fit_equation_of_state,
 )
 from .solvers.config_bridge import force_fn_from_config
+from .active import active  # noqa: E402  (ADR-0037)
 
-__version__ = "0.2.0b1"
+__version__ = "0.3.0a1"
 
 __all__ = [
     "__version__",
@@ -194,6 +195,8 @@ __all__ = [
     "DiffusionAnalyzer", "force_fn_from_config",
     # io
     "parse_poscar", "write_poscar", "read_structure", "write_structure", "build",
+    # active learning (ADR-0037)
+    "active",
     # AkitsushimaCalculator, to_ase_atoms, from_ase_atoms (ADR-0034) are
     # lazy attributes, not in __all__: `import *` must not need ase.
 ]

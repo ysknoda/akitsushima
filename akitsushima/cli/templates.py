@@ -1319,6 +1319,76 @@ dataset:
   output_dir:  ./training_set
 """
 
+_YAML_ACTIVE_DEFAULT = """\
+# akitsushima active -- active learning driven by the ensemble uncertainty
+# (ADR-0037).  Usage: akitsushima active active.yaml
+# Running it again resumes from output_dir/active_ledger.jsonl.  With
+# label mode vasp_inputs it stops (exit code 2) until the VASP runs of the
+# round are done, then continues.
+
+active:
+  output_dir: ./active_output
+  rounds: 5                       # label-and-retrain rounds at most
+  seed: 42
+  model:
+    train_dir: training_set/train  # fit layout (structures.csv + <k>/POSCAR)
+    test_dir:  training_set/test   # optional; RMSE per round
+    # file: mlip_output/atomic_elm_model.npz   # an ensemble; else trained here
+  train:                          # the mlip settings of the ensemble (ADR-0033)
+    model: elm
+    form: atom_centred
+    ensemble: 5
+    n_hidden: 400
+    descriptor:                   # the GeSn ACSF of the CLI tests (ADR-0021)
+      type: acsf
+      r_cut: 5.0
+      g2: {eta: [12.5], rs: [2.0, 2.4, 2.8, 3.2, 3.6, 4.0, 4.4, 4.8]}
+      g5: {eta: [0.0, 0.05], zeta: [1, 2, 4], lambda: [-1, 1]}
+    # isolated_atom_energy / baseline / reg_search / ...: as in mlip
+  explore:                        # in cells DFT can label (<= 64 atoms)
+    - name: md900
+      kind: md
+      structures: [start/POSCAR_*]
+      md: {ensemble: nvt, temperature: 900.0, timestep: 1.0, n_steps: 2000,
+           traj_every: 50, thermo_every: 10}
+    - name: anneal
+      kind: anneal
+      structures: [start/POSCAR_*]
+      anneal:
+        method: md_quench
+        schedule: {type: geometric, n_segments: 4, T_start: 1500.0, T_end: 300.0}
+        segment_steps: 1000
+        quench_every: 500
+        md: {ensemble: nvt, traj_every: 50, thermo_every: 10}
+        relax: {method: fire, fmax: 0.05, max_steps: 500}
+  select:
+    percentile: 99.0              # lo = this percentile of sigma_F,max on the
+    hi_factor: 10.0               #   training structures; hi = hi_factor * lo
+    # lo: 0.05                    # absolute values [eV/A] override them
+    # hi: 0.5
+    k: 10                         # structures per round (farthest-point sampling)
+    strategy: uncertainty         # uncertainty | random (baseline)
+    stop_sigma: true              # stop explorer trajectories above hi ...
+    stop_consecutive: 3           # ... on this many logged steps in a row
+    min_distance_factor: 0.75     # frames with atoms closer than this times the
+    # min_distance: 1.7           #   training set's shortest distance are never
+                                  #   labelled (absolute [A] overrides)
+  label:
+    mode: vasp_inputs             # vasp_inputs | external
+    incar: INCAR                  # template, copied into every directory
+    potcar: {Ge: /path/to/potpaw/Ge_d/POTCAR, Sn: /path/to/potpaw/Sn_d/POTCAR}
+    kpoint_density: 44.0          # A: k_i = ceil(K / L_i), Gamma-centred
+    energy: wo_entropy            # wo_entropy | free | sigma0
+    # isolated_atom_energy: {Ge: -0.78, Sn: -0.65}   # eV, as in dataset
+    # mode: external              # ADR-0011, e.g. a reference potential:
+    # potential: {type: external, cmd: "python -m akitsushima.tools.akitsushima_efs /abs/ref.yaml",
+    #             input_file: POSCAR, output_file: result.efs}
+    # n_jobs: 1
+  converge:
+    accurate_fraction: 0.99       # stop when this share is below lo and none above hi
+"""
+
+
 _YAML_BUILD_DEFAULT = """\
 # akitsushima build -- write a structure (ADR-0035)
 # Usage: akitsushima build build.yaml
@@ -1374,6 +1444,7 @@ _DUMP_MAP = {
     "dataset": _YAML_DATASET_DEFAULT,
     "anneal": _YAML_ANNEAL_DEFAULT,
     "build": _YAML_BUILD_DEFAULT,
+    "active": _YAML_ACTIVE_DEFAULT,
     # No "fitpot" entry: the fitpot sub-command has been removed and
     # consolidated into "fit" (see cmd_fit.py's module docstring).
 }

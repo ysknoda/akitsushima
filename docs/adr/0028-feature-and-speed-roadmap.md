@@ -650,6 +650,7 @@ v0.2.0b1.  Whether and when 0.2.0 becomes final is decided separately.
 MLIPs and large MD with them):
 1. Measurements (scope below).
 2. Active-learning command driven by the ensemble uncertainty (Q15).
+   Done: ADR-0037 (0.3.0a1, `akitsushima active`).
 3. Descriptor family whose angular part is linear in the number of
    neighbours (Q10); models are retrained.  If item 1 shows the ACSF
    kernel still above 90 % of the MLIP force call, the user is asked

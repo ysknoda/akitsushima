@@ -191,6 +191,11 @@ class GlobalOptimiser:
     keep_best, dedup_energy, dedup_volume : distinct minima written as
         POSCAR_rank01.. (energy tolerance eV/atom, relative volume).
     fix_atoms : (N, 3) bool, frozen components (also not perturbed).
+    stop_sigma : md_quench with an ensemble MLIP only --
+        ``{threshold, consecutive}``: an MD chunk whose sigma_F,max exceeds
+        ``threshold`` [eV/A] on ``consecutive`` logged steps in a row
+        (default 3) stops, and the cycle fails at stage md as any other
+        failed chunk (ADR-0037).
     """
 
     def __init__(
@@ -226,6 +231,7 @@ class GlobalOptimiser:
         fix_atoms: np.ndarray | None = None,
         verbose: bool = True,
         plot: bool = True,
+        stop_sigma: dict | None = None,
     ):
         self.method = str(method).lower()
         if self.method not in ("md_quench", "basin_hopping"):
@@ -246,6 +252,16 @@ class GlobalOptimiser:
         self.output_dir = output_dir
         self.relax_kw = dict(relax or {})
         self.md_kw = dict(md or {})
+        self.stop_sigma = dict(stop_sigma) if stop_sigma else None
+        if self.stop_sigma is not None:
+            bad = set(self.stop_sigma) - {"threshold", "consecutive"}
+            if bad or "threshold" not in self.stop_sigma:
+                raise ValueError(
+                    "anneal stop_sigma: give {threshold, consecutive}, got "
+                    f"{sorted(self.stop_sigma)}")
+            if self._unc_fn is None:
+                raise ValueError(
+                    "anneal stop_sigma needs an ensemble MLIP force field (ADR-0033)")
         self.ensemble = str(self.md_kw.pop("ensemble", "nvt")).lower()
         if self.ensemble not in ("nvt", "npt"):
             raise ValueError(
@@ -440,7 +456,14 @@ class GlobalOptimiser:
             sim = NPTSimulation(**common, pressure=self.pressure, **kw)
         else:
             sim = NVTSimulation(**common, **kw)
+        if self.stop_sigma is not None:
+            sim.set_stop_sigma(**self.stop_sigma)
         res = sim.run()
+        if sim.stopped is not None:
+            st = sim.stopped
+            raise _CycleFailed(
+                f"stop_sigma: sigma_F_max {st['sigma_F_max']:.4f} eV/A above "
+                f"{st['threshold']:.4f} at MD step {st['step']}")
         for key in ("positions", "velocities", "lattice"):
             if not np.all(np.isfinite(res[key])):
                 raise _CycleFailed(f"non-finite MD {key}")
