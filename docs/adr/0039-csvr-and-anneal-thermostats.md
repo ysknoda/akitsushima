@@ -228,16 +228,16 @@ uses 10 blocks of 300 fs.
   MLIP.
 - The `slow` tests added by this item take about 32 s in all.
 
-**Found on the way, not fixed (outside this item): numba caches freeze
-the thread count.**
-- Four parallel kernels size their per-thread buffers with
+**Found on the way, fixed in 0.3.0a3 at the user's request: numba
+caches froze the thread count.**
+- Four parallel kernels sized their per-thread buffers with
   `numba.config.NUMBA_NUM_THREADS` read inside the jitted function:
   `_pair_kernels._pair_body_numpy_par` (all pair potentials), the SW
   2-body and 3-body kernels and the Tersoff 3-body kernel.  With
-  `cache=True` the value is frozen when the cache is built.  A cache
+  `cache=True` the value was frozen when the cache was built.  A cache
   built by a process with NUMBA_NUM_THREADS=1 (the size ladder,
   `bench_force.py --threads 1`, any one-thread run) and loaded by a
-  process with 10 threads gets thread ids 0-9 for a buffer of one row:
+  process with 10 threads got thread ids 0-9 for a buffer of one row:
   out-of-bounds writes.
 - Shown on the Tersoff kernel (64-atom Si, 400 calls): cache built at
   10 threads, then 10 threads: fine twice.  Cache built at 1 thread, then
@@ -245,12 +245,18 @@ the thread count.**
   in the abort handler.  The first full-suite run of this item died the
   same way in `test_template_runs_as_shipped` (elastic, Tersoff), after a
   one-thread timing run in the worktree had built the Tersoff cache.
-- The same out-of-bounds writes could change results without crashing.
-  The fix (pass the thread count at call time, or size from
-  `get_num_threads()` in the caller) touches four kernels and needs its
-  own tests; it is left for a separate decision.  Deleting the
-  `__pycache__/*.nbi|*.nbc` files and letting a run with the full thread
-  count rebuild them avoids it meanwhile.
+- The same out-of-bounds writes could change results without crashing:
+  the extra threads' rows were never summed.
+- Fix: the four kernels take `n_threads` as an argument.  Thin wrappers
+  (`_pair_body_jit`, `_sw_2body_jit`, `_sw_3body_jit`,
+  `_te_3body_force_jit`) pass `utils.jit._max_threads()`, which reads
+  `numba.config.NUMBA_NUM_THREADS` in Python at call time.  Call sites and
+  the serial fallbacks are unchanged.  E, F and S of LJ, SW and Tersoff Si
+  at 10 threads are bit for bit the same as before the fix (fresh caches).
+- `tests/test_numba_thread_cache.py`: a subprocess builds the caches with
+  NUMBA_NUM_THREADS=1 (the test checks that the four kernels' caches
+  exist), a second loads them with 4 threads; E, F and S must agree.
+  Before the fix the second process died with a segmentation fault.
 
 **Full suite.**  1059 passed, 1 skipped and 21 errors in 17.8 min; the
 errors were all of `test_mpi_cli.py`, whose `mpirun python -m akitsushima`
@@ -258,3 +264,6 @@ subprocesses imported the editable install of the main checkout
 (0.3.0a2, without csvr) instead of this worktree.  With `PYTHONPATH` set
 to the worktree, `test_mpi_cli.py` gives 23 passed: 1080 passed,
 1 skipped in all.
+After the numba fix, with `PYTHONPATH` set to the worktree for the whole
+run: 1081 passed, 1 skipped in 19.7 min, 0.3 min under the 20 min
+threshold at which xdist gets its own grilling (ADR-0028 addendum 5).

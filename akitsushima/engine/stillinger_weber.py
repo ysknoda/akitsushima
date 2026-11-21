@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from ..utils.jit import _HAS_NUMBA, _numba, _numba_njit, _numba_par
+from ..utils.jit import _HAS_NUMBA, _max_threads, _numba, _numba_njit, _numba_par
 from ..utils.mpi import (
     _HAS_MPI,
     _mpi_allreduce_sum,
@@ -208,16 +208,20 @@ def _sw_3body_numpy(n_start, n_end,
 
 
 def _sw_2body_numpy_par(idx_i, idx_j, rij_arr, r_arr, forces, stress,
-                         eps, sig, A_sw, B_sw, pp, qq, a_sw):
+                         eps, sig, A_sw, B_sw, pp, qq, a_sw, n_threads):
     """
     Parallel version of _sw_2body_numpy. See _pair_kernels._pair_body_numpy_par
     for the per-thread accumulator pattern used to avoid the write-write
     race on forces[ii]/forces[jj], and for the bug-fix note on why the
     buffer is sized from numba.config.NUMBA_NUM_THREADS rather than
     numba.get_num_threads() (a segfault-causing memory-safety fix).
+
+    ``n_threads`` sizes the buffers and must bound ``get_thread_id()``: the
+    caller passes ``utils.jit._max_threads()``, read at call time.  It is an
+    argument because a global read in here would be frozen in the numba
+    cache (a one-thread cache overran its buffers with more threads).
     """
     N = forces.shape[0]
-    n_threads = _numba.config.NUMBA_NUM_THREADS
     forces_t = np.zeros((n_threads, N, 3))
     stress_t = np.zeros((n_threads, 3, 3))
     energy = 0.0
@@ -255,7 +259,7 @@ def _sw_2body_numpy_par(idx_i, idx_j, rij_arr, r_arr, forces, stress,
 def _sw_3body_numpy_par(n_start, n_end,
                          nb_start, nb_idx, nb_rij, nb_r,
                          forces, stress,
-                         eps, sig, a_sw, gam, lam, costh0):
+                         eps, sig, a_sw, gam, lam, costh0, n_threads):
     """
     Parallel version of _sw_3body_numpy, parallelizing over the central
     atom index i, using per-thread force/stress accumulator buffers
@@ -263,9 +267,13 @@ def _sw_3body_numpy_par(n_start, n_end,
     different central atoms handled by different threads).  See
     _pair_kernels._pair_body_numpy_par for why the buffer is sized from
     numba.config.NUMBA_NUM_THREADS rather than numba.get_num_threads().
+
+    ``n_threads`` sizes the buffers and must bound ``get_thread_id()``: the
+    caller passes ``utils.jit._max_threads()``, read at call time.  It is an
+    argument because a global read in here would be frozen in the numba
+    cache (a one-thread cache overran its buffers with more threads).
     """
     N = forces.shape[0]
-    n_threads = _numba.config.NUMBA_NUM_THREADS
     forces_t = np.zeros((n_threads, N, 3))
     stress_t = np.zeros((n_threads, 3, 3))
     energy = 0.0
@@ -543,8 +551,16 @@ if _HAS_NUMBA:
     # (njit) callable at the time _sw_3body_numpy_par itself gets compiled,
     # so _sw_h3_scalar must be JIT-compiled and reassigned FIRST.
     _sw_h3_scalar = _numba_njit(_sw_h3_scalar)  # noqa: F811
-    _sw_2body_jit = _numba_par(_sw_2body_numpy_par)
-    _sw_3body_jit = _numba_par(_sw_3body_numpy_par)
+    _sw_2body_kernel = _numba_par(_sw_2body_numpy_par)
+    _sw_3body_kernel = _numba_par(_sw_3body_numpy_par)
+
+    def _sw_2body_jit(*args):
+        """_sw_2body_numpy_par with this process's thread bound."""
+        return _sw_2body_kernel(*args, _max_threads())
+
+    def _sw_3body_jit(*args):
+        """_sw_3body_numpy_par with this process's thread bound."""
+        return _sw_3body_kernel(*args, _max_threads())
 
     _sw_h3_scalar_multi = _numba_njit(_sw_h3_scalar_multi)  # noqa: F811
     _sw_multi_2body_jit = _numba_njit(_sw_multi_2body_numpy)

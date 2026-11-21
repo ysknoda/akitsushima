@@ -7,7 +7,7 @@ subclass.
 """
 import numpy as np
 
-from ..utils.jit import _HAS_NUMBA, _numba, _numba_par
+from ..utils.jit import _HAS_NUMBA, _max_threads, _numba, _numba_par
 
 
 def _pair_body_numpy(idx_i, idx_j, rij_arr, r_arr, forces, stress,
@@ -35,7 +35,7 @@ def _pair_body_numpy(idx_i, idx_j, rij_arr, r_arr, forces, stress,
 
 
 def _pair_body_numpy_par(idx_i, idx_j, rij_arr, r_arr, forces, stress,
-                          V_arr, dVdr_arr):
+                          V_arr, dVdr_arr, n_threads):
     """
     Parallel version of _pair_body_numpy using per-thread accumulator
     buffers to avoid the write-write race on forces[ii]/forces[jj] (two
@@ -64,9 +64,13 @@ def _pair_body_numpy_par(idx_i, idx_j, rij_arr, r_arr, forces, stress,
     NUMBA_NUM_THREADS in utils/jit.py -- which get_thread_id() *is*
     contractually bounded by) removes that window entirely, at the cost of
     a few unused rows when fewer threads are active.
+
+    ``n_threads`` sizes the buffers and must bound ``get_thread_id()``: the
+    caller passes ``utils.jit._max_threads()``, read at call time.  It is an
+    argument because a global read in here would be frozen in the numba
+    cache (a one-thread cache overran its buffers with more threads).
     """
     N = forces.shape[0]
-    n_threads = _numba.config.NUMBA_NUM_THREADS
     forces_t = np.zeros((n_threads, N, 3))
     stress_t = np.zeros((n_threads, 3, 3))
     energy = 0.0
@@ -92,4 +96,11 @@ def _pair_body_numpy_par(idx_i, idx_j, rij_arr, r_arr, forces, stress,
     return energy
 
 
-_pair_body_jit = _numba_par(_pair_body_numpy_par) if _HAS_NUMBA else _pair_body_numpy
+if _HAS_NUMBA:
+    _pair_body_kernel = _numba_par(_pair_body_numpy_par)
+
+    def _pair_body_jit(*args):
+        """_pair_body_numpy_par with this process's thread bound."""
+        return _pair_body_kernel(*args, _max_threads())
+else:
+    _pair_body_jit = _pair_body_numpy

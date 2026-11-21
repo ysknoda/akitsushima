@@ -34,7 +34,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from ..utils.jit import _HAS_NUMBA, _numba, _numba_njit, _numba_par
+from ..utils.jit import _HAS_NUMBA, _max_threads, _numba, _numba_njit, _numba_par
 from ..utils.mpi import (
     _HAS_MPI,
     _mpi_allreduce_sum,
@@ -330,16 +330,20 @@ def _te_3body_force_numpy_par(p_start, p_end,
                                fc_arr, fa_arr, dbij_ij, dbij_ji,
                                nb_start, nb_idx, nb_rij, nb_r,
                                forces, stress,
-                               R, D, c_t, d_t, h_t, l3, m):
+                               R, D, c_t, d_t, h_t, l3, m, n_threads):
     """
     Parallel version of _te_3body_force_numpy, using per-thread
     accumulator buffers (force contributions to neighbour atoms j/k can
     collide across different central pairs handled by different threads).
     See _pair_kernels._pair_body_numpy_par for why the buffer is sized
     from numba.config.NUMBA_NUM_THREADS rather than numba.get_num_threads().
+
+    ``n_threads`` sizes the buffers and must bound ``get_thread_id()``: the
+    caller passes ``utils.jit._max_threads()``, read at call time.  It is an
+    argument because a global read in here would be frozen in the numba
+    cache (a one-thread cache overran its buffers with more threads).
     """
     N = forces.shape[0]
-    n_threads = _numba.config.NUMBA_NUM_THREADS
     forces_t = np.zeros((n_threads, N, 3))
     stress_t = np.zeros((n_threads, 3, 3))
 
@@ -782,7 +786,11 @@ def _te_multi_pass3_numpy(p_start, p_end,
 
 if _HAS_NUMBA:
     _te_zeta_jit = _numba_par(_te_zeta_numpy_par)
-    _te_3body_force_jit = _numba_par(_te_3body_force_numpy_par)
+    _te_3body_force_kernel = _numba_par(_te_3body_force_numpy_par)
+
+    def _te_3body_force_jit(*args):
+        """_te_3body_force_numpy_par with this process's thread bound."""
+        return _te_3body_force_kernel(*args, _max_threads())
 
     _te_multi_zeta_jit = _numba_njit(_te_multi_zeta_numpy)
     _te_multi_pass3_jit = _numba_njit(_te_multi_pass3_numpy)

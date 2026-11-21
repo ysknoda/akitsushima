@@ -78,6 +78,20 @@ else:
     _numba_par = _numba_njit
 
 
+def _max_threads() -> int:
+    """Upper bound of ``numba.get_thread_id()`` in this process, read at
+    call time.
+
+    Kernels with per-thread accumulator buffers take it as an argument.
+    Read inside a ``cache=True`` kernel, ``numba.config.NUMBA_NUM_THREADS``
+    is a global frozen when the cache is built: a cache built by a
+    one-thread process (NUMBA_NUM_THREADS=1) and loaded by a process with
+    more threads overran its buffers -- lost contributions, heap
+    corruption, segfaults (found with ADR-0039).
+    """
+    return int(_numba.config.NUMBA_NUM_THREADS) if _HAS_NUMBA else 1
+
+
 if _HAS_NUMBA:
 
     @_numba.njit(cache=True, parallel=True)

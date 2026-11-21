@@ -163,7 +163,9 @@
 > csvr`, Bussi, Donadio and Parrinello 2007), and `anneal` md_quench gets
 > `thermostat: nhc | langevin | csvr` with the mean MD temperature of
 > every chunk (`T_md`) in its ledger.  The anneal template's md_quench no
-> longer fails every MD chunk on its NPT-only `tau_baro`.
+> longer fails every MD chunk on its NPT-only `tau_baro`.  The parallel
+> pair, SW and Tersoff kernels no longer overrun their per-thread buffers
+> when a numba cache built with one thread is loaded with more.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,
