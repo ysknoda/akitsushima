@@ -1,5 +1,5 @@
 ---
-status: accepted (plan only, 2026-10-29)
+status: accepted (plan 2026-10-29; size ladder done 2026-11-21; parallel matrix and durability runs pending)
 ---
 
 # Large-scale GeSn test of relax and md: scaling and durability
@@ -180,3 +180,117 @@ ladder re-measures):
 | 1701 | 8.3 s, 2.5 GB | 0.78 s |
 | 4032 | ~47 s, ~14 GB (estimate) | 2.0 s, 0.41 GB |
 | 32256 | out of memory | 16 s, 1.65 GB |
+
+### Size ladder (decisions 7, 9, 10, 13; 2026-11-20 to 2026-11-21)
+
+Run as ADR-0028 addendum 5 allowed: one core, numba and BLAS limited to
+one thread, one CLI run at a time, tagged `loaded` (the user worked on
+the machine, and the ADR-0038 benchmarks used a second core for part of
+the time).  Script `example/GeSn/large/ladder.py`, ledger
+`ladder_ledger.jsonl` (41 units), figure `ladder.png` (md time per step
+and peak RSS against N, relax steps against N; checked as PNG).  Wall
+time 24.1 h (2026-11-20 18:50 to 2026-11-21 18:56), mostly the L-BFGS
+runs that did not converge.  The code was main at 546d2a9 (0.2.0b1)
+until 2026-11-21 02:06 and a8c83e5 (0.3.0a1) after it, from
+`relax/fit_sw/n24/fire` on; ADR-0037 does not touch the force or
+integrator paths of these runs.  The ledger's `akitsushima` field is the
+version the driver imported at the start.  ADR-0038 (moment-tensor G5)
+is not in these numbers.
+
+**Replicas (63-atom test cell, n = 1, 2, 4): PASS** for all three
+models.  Largest differences against n = 1: E 1.8e-13 eV/atom, forces
+4.5e-10 eV/A (SW; 3.5e-13 for Tersoff and the MLIP), stress 3.5e-11
+relative.
+
+**md, NVT 300 K, 1 fs, 200 steps from the FIRE-relaxed cell**
+
+| Model | N | time per step | per atom | peak RSS | d_min end |
+|---|---|---|---|---|---|
+| SW (`fit_sw`) | 504 | 32 ms | 64 us | 0.24 GB | 2.39 A |
+| | 4032 | 0.26 s | 64 us | 0.37 GB | 2.37 A |
+| | 13608 | 0.93 s | 68 us | 0.58 GB | 2.31 A |
+| | 32256 | 2.16 s | 67 us | 0.83 GB | 2.34 A |
+| | 108864 | 6.99 s | 64 us | 1.25 GB | 2.33 A |
+| Tersoff (`fit_tersoff`) | 504 | 1.9 ms | 3.7 us | 0.22 GB | 2.31 A |
+| | 4032 | 13 ms | 3.3 us | 0.26 GB | 2.29 A |
+| | 13608 | 45 ms | 3.3 us | 0.37 GB | 2.25 A |
+| | 32256 | 0.11 s | 3.3 us | 0.63 GB | 2.29 A |
+| | 108864 | 0.40 s | 3.7 us | 1.12 GB | 2.29 A |
+| MLIP (`ac_elm_iso_r2`) | 504 | 52 ms | 104 us | 0.32 GB | 2.38 A |
+| | 4032 | 0.44 s | 109 us | 0.57 GB | 2.36 A |
+| | 13608 | 1.43 s | 105 us | 1.27 GB | 2.32 A |
+
+Peak RSS is the largest of the three runs of a rung (FIRE, L-BFGS, md).
+Log-log slope of md time per step against N: SW 1.00, Tersoff 1.00,
+MLIP 1.01 (0.97 for N >= 4032).  The decision 7 estimates were 0.4 s
+(SW) and 4 s (MLIP) per step at 4032 atoms; the MLIP is 9 times faster
+than estimated after the cell list, `prange` and tier A.  The drift of
+the NHC conserved quantity is 0.03 (MLIP) to 0.07 (Tersoff) meV/atom/ps
+and does not grow with N.
+
+**relax, `relax_cell`, fmax 0.01 eV/A, pmax 0.1 GPa, 2000 steps**
+
+| Model | N | FIRE steps | FIRE time | L-BFGS steps | L-BFGS time |
+|---|---|---|---|---|---|
+| SW | 504 | 192 | 9.9 s | 92 | 6.5 s |
+| | 4032 | 353 | 103 s | 1540 | 1877 s |
+| | 13608 | 854 | 788 s | not converged | 3644 s |
+| | 32256 | 1644 | 3822 s | not converged | 11942 s |
+| | 108864 | not converged | 15192 s | not converged | 31632 s |
+| Tersoff | 504 | 68 | 3.3 s | 25 | 2.8 s |
+| | 4032 | 72 | 4.6 s | 54 | 4.8 s |
+| | 13608 | 107 | 11 s | 234 | 32 s |
+| | 32256 | 90 | 21 s | 1749 | 1337 s |
+| | 108864 | 128 | 84 s | 386 | 388 s |
+| MLIP | 504 | 102 | 8.8 s | 40 | 5.6 s |
+| | 4032 | 489 | 227 s | not converged | 1843 s |
+| | 13608 | 501 | 804 s | not converged | 8778 s |
+
+**Pass criteria (decision 13), judged again.**  The ledger marks all 13
+md runs and 6 relax runs as failed.  The md flags come from the
+script's own check, not from the runs:
+- It asked for a mean T within 6 K of 300 K.  A 200-step run that starts
+  at a minimum with 300 K velocities shares the kinetic energy with the
+  potential energy and settles near 150 K (T_mean 153-162 K, T_inst
+  oscillating between about 80 and 300 K), and `tau_nhc` 100 fs cannot
+  restore 300 K within 200 fs.  The 2 % criterion of decision 13 is meant
+  for the durability runs; it does not apply to these scaling runs.
+- It asked for the last thermo row at step 200.  Rows are labelled 0 to
+  `n_steps - thermo_every` (finding 3 below).
+
+With those two checks replaced by "20 thermo rows, 2 frames, d_min above
+2.0 A", the results are:
+- exit 0 and finite values: all 41 runs, PASS;
+- 20 thermo rows and 2 XDATCAR frames in every md run: PASS;
+- md MLIP not collapsed: d_min 2.32-2.38 A, and the lowest E_pot per atom
+  stays 0.1 meV above the relaxed value (allowed: 50 meV below): PASS;
+- scaling, slope at most 1.15: PASS for all three models;
+- memory under 20 GB: PASS (largest 1.27 GB);
+- relax converged within `max_steps`: FIRE fails only for SW at 108864
+  atoms; L-BFGS fails for SW from 13608 atoms and for the MLIP from 4032
+  atoms: FAIL (findings 1 and 2).
+
+`ladder.py` now uses the replaced md checks; the ledger is kept as run.
+
+**Findings (decision 12: design limits are decided in a separate
+grilling).**
+1. L-BFGS with `relax_cell` stalls on large cells.  The MLIP runs stop
+   moving: E changes by less than 1e-5 eV over the last steps, with fmax 0.45
+   and 0.66 eV/A and pmax 0.49 and 0.22 GPa.  SW at 13608-108864 atoms
+   ends with fmax 0.17-0.30 eV/A.  L-BFGS steps cost 1.3 to 4.2 times a
+   FIRE step (line-search calls), and where they stop the energy lies up
+   to 5.6 meV/atom above FIRE's (MLIP, 4032 atoms).  Tersoff converges with both.
+2. FIRE on SW at 108864 atoms stalls at fmax 0.121 eV/A (time step down
+   to 0.02 fs, E changing by about 1e-4 eV per step); its step count grows with N (192,
+   353, 854, 1644 steps), as decision 9 expected for a maximum over
+   atoms.  Tersoff (68-128 steps) and the MLIP (102-501) grow much less.
+3. The md thermo log labels the row written after step k+1 as step k at
+   time k dt (`step` is the 0-based loop index), so the first row (step
+   0, time 0) is the state after one step and the last row is
+   `n_steps - thermo_every`.  The same holds for all four integrators.
+   Not a crash; changing it changes every thermo file.
+4. The multi-species SW kernel (`_compute_multi_species`, serial
+   `njit`) takes 0.24 s for 4032 GeSn atoms, against 0.011 s for the
+   multi-species Tersoff and 0.018 s for single-species SW Si at 4096
+   atoms (`bench_force`, one thread): 64 us per atom in md, 17 times
+   Tersoff.  A candidate for tier B item 8 (speed-ups).

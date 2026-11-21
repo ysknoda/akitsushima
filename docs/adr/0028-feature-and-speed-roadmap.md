@@ -696,3 +696,20 @@ needing two or more cores waits for the user's word.
   4) and the idle baseline at several threads.
 - Results go into ADR-0025 and this ADR.
 
+**Measurement results (2026-11-21).**
+- `bench_force.py --threads 1` after tier A: `benchmarks/after_tierA.jsonl`
+  (0.2.0b1, 546d2a9, `loaded`).  The MLIP force call is 2.5 times
+  faster than the baseline (`ac_elm_iso_r2`, 4096 atoms: 1.23 -> 0.50 s);
+  the ACSF kernel takes 72-83 % of it, under the 90 % of the item 3
+  condition, so items 2 and 3 kept their order.
+- Size ladder: done, results in ADR-0025 (24 h on one core).  Every run
+  exits cleanly; md time per step grows linearly with N for SW,
+  Tersoff and the MLIP (slopes 1.00-1.01, up to 108864 atoms for SW and
+  Tersoff, 13608 for the MLIP); peak RSS at most 1.27 GB.  Findings: L-BFGS
+  with `relax_cell` stalls on large cells, FIRE on SW needs more steps as
+  N grows and does not converge at 108864 atoms, the md thermo rows are
+  labelled one step early, and the multi-species SW kernel is 17 times
+  slower per atom than Tersoff.  They wait for a separate grilling.
+- Still held: the parallel matrix, the idle baseline and the durability
+  runs.
+
