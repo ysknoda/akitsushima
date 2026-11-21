@@ -555,3 +555,125 @@ def test_md_collapse_below_the_energy_floor_rewinds_the_trajectory(tmp_path, mon
     # Chunk 3 restarts from chunk 1's end state with fresh velocities.
     assert calls[2][1] is True
     np.testing.assert_array_equal(calls[2][2], calls[1][2])
+
+
+# ------------------------------------------- thermostat choice (ADR-0039)
+def _mq_thermostat(tmp_path, name, thermostat, restart=False, **kw):
+    fn, rc = _sw_si()
+    lat, pos = _diamond_si(jitter=0.05)
+    md = {"ensemble": "nvt", "thermostat": thermostat, "traj_every": 10,
+          "thermo_every": 10}
+    if thermostat != "nhc":
+        md["damping"] = 50.0
+    opts = {
+        "method": "md_quench",
+        "output_dir": str(tmp_path / name),
+        "relax": {"method": "fire", "fmax": 0.05},
+        "md": md,
+        "schedule": {"type": "linear", "n_segments": 2, "T_start": 900.0, "T_end": 600.0},
+        "segment_steps": 60,
+        "quench_every": 30,
+        "seed": 4,
+        "restart": restart,
+        "verbose": False,
+        "plot": False,
+    }
+    opts.update(kw)
+    return GlobalOptimiser(lat, pos, ["Si"] * 64, fn, rc, **opts)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("thermostat", ["langevin", "csvr"])
+def test_md_quench_with_a_stochastic_thermostat_records_t_md(tmp_path, thermostat):
+    import numba
+
+    n = numba.get_num_threads()
+    numba.set_num_threads(1)  # 64 atoms: threads only add overhead
+    try:
+        opt = _mq_thermostat(tmp_path, "mq", thermostat)
+        assert opt.thermostat == thermostat
+        opt.run()
+    finally:
+        numba.set_num_threads(n)
+    led = _ledger(tmp_path / "mq")
+    quench = [r for r in led if r["kind"] == "quench"]
+    assert [r["status"] for r in quench] == ["ok"] * 4
+    for r in quench:  # a positive chunk temperature of the right size
+        assert 0.3 * r["T"] < r["T_md"] < 2.0 * r["T"], r
+    # the chunk thermo.log carries E-Q, the stochastic thermostats' column
+    head = (tmp_path / "mq" / "cycles" / "c00001" / "md" / "thermo.log").read_text()
+    assert "E-Q(eV)" in head.splitlines()[0]
+
+
+class _Interrupted(BaseException):
+    """Escapes the cycle's `except Exception`, like the end of a job."""
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("thermostat", ["langevin", "csvr"])
+def test_md_quench_restart_with_a_stochastic_thermostat_is_bitwise(
+    tmp_path, monkeypatch, thermostat
+):
+    import numba
+
+    n = numba.get_num_threads()
+    numba.set_num_threads(1)
+    try:
+        _mq_thermostat(tmp_path, "ref", thermostat).run()
+        real = GlobalOptimiser._md_chunk
+
+        def dying(self, lat_, pos_, vel, T, cycle, out_dir):
+            if cycle == 3:
+                raise _Interrupted
+            return real(self, lat_, pos_, vel, T, cycle, out_dir)
+
+        monkeypatch.setattr(GlobalOptimiser, "_md_chunk", dying)
+        with pytest.raises(_Interrupted):
+            _mq_thermostat(tmp_path, "split", thermostat).run()
+        monkeypatch.setattr(GlobalOptimiser, "_md_chunk", real)
+        _mq_thermostat(tmp_path, "split", thermostat, restart=True).run()
+    finally:
+        numba.set_num_threads(n)
+    ref, split = _ledger(tmp_path / "ref"), _ledger(tmp_path / "split")
+    assert len(ref) == len(split) == 5
+    for a, b in zip(ref, split, strict=True):
+        assert a.get("E") == b.get("E") and a.get("T_md") == b.get("T_md"), (a, b)
+
+
+def test_thermostat_settings_are_refused():
+    fn, rc = _lj_unshifted()
+    lat, pos = _lj13_start()
+    args = (lat, pos, ["X"] * 13, fn, rc)
+    with pytest.raises(ValueError, match="thermostat must be"):
+        GlobalOptimiser(*args, md={"thermostat": "berendsen"})
+    with pytest.raises(ValueError, match="needs ensemble nvt"):
+        GlobalOptimiser(*args, md={"ensemble": "npt", "thermostat": "langevin"})
+    with pytest.raises(ValueError, match="needs ensemble nvt"):
+        GlobalOptimiser(*args, md={"ensemble": "npt", "thermostat": "csvr"})
+    with pytest.raises(ValueError, match="damping needs"):
+        GlobalOptimiser(*args, md={"damping": 50.0})
+    assert GlobalOptimiser(*args).thermostat == "nhc"
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("thermostat", ["nhc", "langevin"])
+def test_cli_md_quench_from_the_template(tmp_path, thermostat):
+    """The template as shipped: every MD chunk must run.  Its NPT-only
+    tau_baro used to reach NVTSimulation and fail every cycle while the
+    run still ended with exit 0."""
+    from test_cli_smoke import _ns
+
+    from akitsushima.cli.parser import _DISPATCH
+
+    path, cfg = _cli_cfg(tmp_path, "md_quench", segment_steps=40, quench_every=20)
+    assert cfg["anneal"]["md"]["thermostat"] == "nhc"  # the template's default
+    assert "tau_baro" in cfg["anneal"]["md"]
+    if thermostat != "nhc":
+        cfg["anneal"]["md"].update(thermostat=thermostat, damping=50.0)
+    cfg["anneal"]["schedule"]["n_segments"] = 1
+    path.write_text(yaml.safe_dump(cfg))
+    assert _DISPATCH["anneal"](_ns(path)) == 0
+    led = _ledger(tmp_path / "out")
+    assert [(r["kind"], r["status"]) for r in led] == [
+        ("initial", "ok"), ("quench", "ok"), ("quench", "ok")]
+    assert all(r["T_md"] > 0 for r in led[1:])

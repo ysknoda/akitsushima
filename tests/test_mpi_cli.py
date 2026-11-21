@@ -90,6 +90,22 @@ _CASES = {
         },
         "si",
     ),
+    # CSVR (ADR-0039): one Gaussian and one chi-squared draw per half-step,
+    # the same on every rank
+    "csvr": (
+        "nvt",
+        "md",
+        "md",
+        {
+            "n_steps": 50,
+            "equil_steps": 10,
+            "velocity_rescale_steps": 0,
+            "thermo_every": 5,
+            "thermostat": "csvr",
+            "damping": 50.0,
+        },
+        "si",
+    ),
     "gcmc": ("gcmc", "gcmc", "gcmc", {"n_cycles": 10}, "ar"),
     "osmc": ("osmc", "osmc", "osmc", {"n_cycles": 10, "equil_cycles": 2}, "ar"),
 }
@@ -99,6 +115,7 @@ _FILES = {
     "relax": (["relax.log"], ["POSCAR_relaxed"]),
     "nvt": (["thermo.log"], ["POSCAR_final_MD"]),
     "langevin": (["thermo.log"], ["POSCAR_final_MD"]),
+    "csvr": (["thermo.log"], ["POSCAR_final_MD"]),
     "npt": (["thermo.log"], ["POSCAR_final_NPT"]),
     "gcmc": (["N_vs_cycle.dat", "gcmc_md_thermo.log"], ["POSCAR_gcmc_final"]),
     "osmc": (["N_vs_cycle.dat", "lambda_vs_cycle.dat"], ["POSCAR_gcmc_final"]),

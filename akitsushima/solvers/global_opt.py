@@ -61,7 +61,12 @@ import numpy as np
 from ..constants import EV_ANG3_TO_GPA, K_B
 from ..utils.mpi import _mpi_rank
 from .geometry_optimiser import GeometryOptimiser, _accepts_neigh_list
-from .molecular_dynamics import NPTSimulation, NVTSimulation
+from .molecular_dynamics import (
+    CSVRSimulation,
+    LangevinSimulation,
+    NPTSimulation,
+    NVTSimulation,
+)
 
 __all__ = ["GlobalOptimiser", "enthalpy_force_fn", "temperature_schedule"]
 
@@ -174,9 +179,11 @@ class GlobalOptimiser:
     output_dir : everything is written below it.
     relax : keyword arguments for GeometryOptimiser (method, relax_cell,
         fmax, max_steps, ...); output_dir / verbose are set here.
-    md : md_quench only -- ``ensemble`` (nvt | npt) plus keyword
-        arguments for NVTSimulation / NPTSimulation (timestep, tau_nhc,
-        tau_baro, traj_every, thermo_every, masses, ...).
+    md : md_quench only -- ``ensemble`` (nvt | npt), ``thermostat``
+        (nhc | langevin | csvr, nvt only; ADR-0039) plus keyword arguments
+        for NVTSimulation / LangevinSimulation / CSVRSimulation /
+        NPTSimulation (timestep, tau_nhc, damping, tau_baro, traj_every,
+        thermo_every, masses, ...).
     schedule : md_quench only -- dict for :func:`temperature_schedule`
         (type, n_segments, T_start, T_end, temperatures).
     segment_steps, quench_every : md_quench only -- MD steps per segment
@@ -268,6 +275,10 @@ class GlobalOptimiser:
                 f"anneal md: ensemble must be nvt or npt, got {self.ensemble!r}"
             )
         if self.ensemble == "nvt":  # NPT settings (ADR-0036)
+            # tau_baro is NPT-only (the template marks it "npt"); handed to
+            # NVTSimulation it failed every MD chunk of a template md_quench
+            # run, which still ended with exit 0 (found with ADR-0039).
+            self.md_kw.pop("tau_baro", None)
             dof = str(self.md_kw.pop("cell_dof", "iso")).lower()
             if dof != "iso":
                 raise ValueError(
@@ -278,6 +289,25 @@ class GlobalOptimiser:
                 raise ValueError(
                     f"anneal md: baro_thermostat {bt!r} needs ensemble npt"
                 )
+        # Particle thermostat of the MD chunks (ADR-0039).  NPT keeps the
+        # Nose-Hoover chain on the particles; baro_thermostat sets the cell.
+        self.thermostat = str(self.md_kw.pop("thermostat", "nhc")).lower()
+        if self.thermostat not in ("nhc", "langevin", "csvr"):
+            raise ValueError(
+                "anneal md: thermostat must be nhc, langevin or csvr, got "
+                f"{self.thermostat!r}"
+            )
+        if self.thermostat != "nhc" and self.ensemble != "nvt":
+            raise ValueError(
+                f"anneal md: thermostat {self.thermostat} needs ensemble nvt; "
+                "npt keeps the Nose-Hoover chain on the particles "
+                "(baro_thermostat sets the cell)"
+            )
+        if self.thermostat == "nhc" and "damping" in self.md_kw:
+            raise ValueError(
+                "anneal md: damping needs thermostat langevin or csvr "
+                "(nhc uses tau_nhc)"
+            )
         self.seed = int(seed)
         self.restart = bool(restart)
         self.max_fail = int(max_consecutive_failures)
@@ -454,6 +484,10 @@ class GlobalOptimiser:
         )
         if self.ensemble == "npt":
             sim = NPTSimulation(**common, pressure=self.pressure, **kw)
+        elif self.thermostat == "langevin":
+            sim = LangevinSimulation(**common, **kw)
+        elif self.thermostat == "csvr":
+            sim = CSVRSimulation(**common, **kw)
         else:
             sim = NVTSimulation(**common, **kw)
         if self.stop_sigma is not None:
@@ -474,7 +508,7 @@ class GlobalOptimiser:
         e_end = float(self.raw_force_fn(res["lattice"], res["positions"],
                                         self.atom_types)[0])
         self._check_energy(e_end)
-        return res["lattice"], res["positions"], res["velocities"]
+        return res["lattice"], res["positions"], res["velocities"], res["T_mean"]
 
     # ------------------------------------------------------------ minima
     def _add_minimum(self, cycle, q):
@@ -605,13 +639,14 @@ class GlobalOptimiser:
             rec = dict(cycle=c, kind="quench", T=T)
             try:
                 try:
-                    lat_md, pos_md, vel_md = self._md_chunk(
+                    lat_md, pos_md, vel_md, T_md = self._md_chunk(
                         lat, pos, vel, T, c, os.path.join(cdir, "md")
                     )
                 except Exception as err:
                     rec["stage"] = "md"
                     raise _CycleFailed(str(err)) from err
                 lat, pos, vel = lat_md, pos_md, vel_md
+                rec["T_md"] = float(T_md)  # mean T of the chunk (ADR-0039)
                 try:
                     q = self._quench(lat, pos, os.path.join(cdir, "relax"))
                 except Exception as err:

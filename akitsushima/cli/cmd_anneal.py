@@ -54,6 +54,8 @@ _RELAX_DEFAULTS = {"method": "fire", "fmax": 0.05, "max_steps": 2000}
 # output_dir, seed and velocities come from the driver.
 _MD_KEYS = {
     "ensemble",
+    "thermostat",
+    "damping",
     "timestep",
     "tau_nhc",
     "tau_baro",

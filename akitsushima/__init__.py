@@ -152,6 +152,7 @@ from .solvers import (
     NVESimulation,
     NVTSimulation,
     LangevinSimulation,
+    CSVRSimulation,
     PhononCalculator,
     RadialDistributionFunction,
     ThermalConductivityCalculator,
@@ -162,7 +163,7 @@ from .solvers import (
 from .solvers.config_bridge import force_fn_from_config
 from .active import active  # noqa: E402  (ADR-0037)
 
-__version__ = "0.3.0a2"
+__version__ = "0.3.0a3"
 
 __all__ = [
     "__version__",
@@ -186,7 +187,7 @@ __all__ = [
     "ELMModel", "QuantizedELMModel", "LinearModel", "NNModel",
     "AtomicELMModel", "AtomicQELMModel", "AtomicNNModel", "AtomicELMEnsemble",
     # solvers
-    "GeometryOptimiser", "NVTSimulation", "LangevinSimulation", "NVESimulation", "NPTSimulation",
+    "GeometryOptimiser", "NVTSimulation", "LangevinSimulation", "CSVRSimulation", "NVESimulation", "NPTSimulation",
     "GCMCMDSimulation", "CFCMCSimulation",
     "NEBChain", "NEBOptimiser", "TransitionStateAnalyser",
     "PhononCalculator", "ThermalConductivityCalculator",
