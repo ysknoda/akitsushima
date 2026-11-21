@@ -1,5 +1,5 @@
 ---
-status: proposed (2026-11-21)
+status: accepted (2026-11-21; implemented in 0.3.0a2 -- see Result)
 ---
 
 # G5 from Cartesian moment tensors: an angular kernel linear in the neighbours
@@ -175,6 +175,112 @@ G4 does not factorise: fc(r_jk) and exp(-eta r_jk^2) depend on the pair
 - G4 keeps the quadratic cost.  A model that needs G4 for speed would
   need a different descriptor (tier C).
 
+## Implementation notes
+
+- `fitting/descriptors/acsf.py`: `_g5_moments` prepares, per call, the
+  distinct etas, the coefficients 2^(1-zeta) C(zeta, n) lambda^n of every
+  tensor term and the symmetric components (`_moment_components`);
+  `_g5_moments_impl` (numba, `prange` over atoms like the pair kernel)
+  accumulates T_n^b per atom, contracts it into D_n^{bc} and G, and adds
+  the derivative of decision 2 to `dGdv`.  A term of zeta z uses ranks
+  n <= z only.
+- `_acsf_kernel` keeps its former positional signature and takes an
+  optional `moments` mask; `ACSF._run` passes it only when a term is on
+  the tensors, so the pre-ADR-0030 reference kernel can still stand in
+  for it in `tests/test_acsf_kernel_reference.py` (its fixture switches
+  the descriptor to `pairs` meanwhile).
+- **Cap on zeta (decision 2 applied).**  Measured on 4096 GeSn atoms
+  (15 % Sn, rattled diamond), G2 grid of `ac_elm_iso_r2`, G5 with eta 0
+  and 0.05, zeta 1 and z_max, lambda +-1, one thread, G and dGdv:
+
+  | z_max | r_c 5 A: pairs | tensors | r_c 7 A: pairs | tensors |
+  |---|---|---|---|---|
+  | 4 | 0.313 s | 0.202 s | 0.785 s | 0.316 s |
+  | 6 | 0.308 s | 0.281 s | 0.805 s | 0.484 s |
+  | 8 | 0.300 s | 0.441 s | 0.800 s | 0.764 s |
+  | 10 | 0.314 s | 0.672 s | 0.800 s | 1.128 s |
+  | 12 | 0.305 s | 1.024 s | 0.793 s | 1.698 s |
+  | 16 | 0.344 s | 2.122 s | - | - |
+
+  The tensors win up to zeta 6 and lose from zeta 8 at r_c 5 A, and
+  break even at 8 at r_c 7 A.  `auto` therefore puts G5 terms with
+  integer zeta <= 6 (`MOMENT_ZETA_MAX`) on the tensors and leaves larger
+  zeta to the pair loop; `moments` keeps every integer zeta on the
+  tensors.  A grid mixing zeta 1, 2, 4 and 16 under `auto` (the zeta-16
+  terms on the pair loop) still takes 0.372 s against 0.510 s with
+  `pairs`.
+
 ## Result
 
-To be written when the implementation is measured.
+Accepted on 2026-11-21.  Measured on the second core next to the size
+ladder (tag `loaded`, load average 6-8), one numba thread, best of
+three; ledgers `benchmarks/adr0038.jsonl` (gate) and
+`benchmarks/adr0038_extra.jsonl` (the rest).  The gate run records
+version 0.3.0a1 and commit a0ede27 because it ran on the uncommitted
+working tree of this ADR.
+
+**Gate (decision 5): passed.**  Whole force call, against
+`benchmarks/after_tierA.jsonl` (0.3.0a1):
+
+| case | atoms | 0.3.0a1 | 0.3.0a2 | old / new |
+|---|---|---|---|---|
+| `mlip_file_ac_elm_iso_r2` (gate) | 4096 | 496 ms | 284 ms | **1.74** |
+| `mlip_file_ac_elm_iso_r2` | 512 | 58 ms | 31 ms | 1.90 |
+| `acsf27_elm400_si` | 4096 | 441 ms | 180 ms | 2.45 |
+| `acsf27_elm400_si` | 512 | 55 ms | 25 ms | 2.24 |
+
+The energies per atom are unchanged (-2.50928 and -2.56008 eV/atom for
+the GeSn model).  In the gate case the self time is now 42 % in
+`_g5_moments`, 27 % in `_acsf_kernel` (now G2 only), 8 % in
+`_neighbours` and the rest in the ELM.
+
+**Growth with the cutoff.**  Descriptor with derivatives, 4096 GeSn
+atoms, `ac_elm_iso_r2` grid with r_c changed:
+
+| r_c | neighbours per atom | pairs | tensors | pairs / tensors |
+|---|---|---|---|---|
+| 5 A | 27.2 | 0.427 s | 0.228 s | 1.87 |
+| 6 A | 33.5 | 0.616 s | 0.270 s | 2.28 |
+| 7 A | 46.0 | 1.061 s | 0.377 s | 2.82 |
+
+From 5 to 7 A the neighbours grow 1.69 times; the tensor path grows
+1.65 times (linear), the pair loop 2.49 times.
+
+**Fitting.**  An atom-centred ELM (400 hidden units) on 40 rattled
+64-atom GeSn cells: 1.90 s with `pairs`, 1.54 s with `auto` (1.24
+times); at this size the ELM solve and the Python overhead weigh more
+than the descriptor.
+
+**Equality (decision 4).**  Largest difference between `auto` (or
+`moments`) and `pairs`, over Si and GeSn and cubic, triclinic, 15 %
+compressed, 15 % stretched and 8-atom cells, as a fraction of each
+column's largest value:
+
+| grid | G | dGdv |
+|---|---|---|
+| `ac_elm_iso_r2` G5 (zeta 1, 2, 4) | 4.5e-15 | 8.4e-15 |
+| the same with `inner_cutoff` | 4.2e-15 | 5.6e-15 |
+| G4 and G5 together | 4.5e-15 | 8.4e-15 |
+| zeta 2 and 2.5 (one term each way) | 3.0e-15 | 9.7e-16 |
+| zeta 1 and 16 on the tensors (`moments`) | 1.1e-13 | 1.1e-13 |
+
+The worst case is always the stretched cell, where the alternating sum
+over n cancels most; even at zeta 16 it stays three orders below the
+1e-10 rule.  Forces and stress of E = sum_i c_i . G_i agree with central
+differences (1e-6 eV/A, 1e-7 in the stress) and the forces sum to zero
+to 1e-10 for the zeta-16, G4 + G5, mixed-zeta and `inner_cutoff` grids.
+The existing tests of the reference kernel now run with both `auto` and
+`pairs`, and the finite-difference tests of `test_mlip_chain_rule.py` and
+`test_mlip_atom_centred.py` (three species, G4 and G5 with integer zeta)
+exercise the mixed path.
+
+**Tests.**  `tests/test_acsf_moments.py`: 60 comparisons, 4
+finite-difference checks and the validation of `angular_kernel`; about
+17 s of `slow` tests, most of it the first numba compilation.
+
+**What is left.**
+- The G2 loop (27 % of the call) and the tensor derivative pass are the
+  largest parts now; neither is planned.
+- Multi-thread scaling of the tensor kernel waits for the parallel
+  matrix of addendum 5.
+- The new descriptor family stays in tier C (decision 1).

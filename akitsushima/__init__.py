@@ -162,7 +162,7 @@ from .solvers import (
 from .solvers.config_bridge import force_fn_from_config
 from .active import active  # noqa: E402  (ADR-0037)
 
-__version__ = "0.3.0a1"
+__version__ = "0.3.0a2"
 
 __all__ = [
     "__version__",

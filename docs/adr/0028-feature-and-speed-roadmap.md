@@ -659,12 +659,14 @@ MLIPs and large MD with them):
    neighbours (Q10); models are retrained.  If item 1 shows the ACSF
    kernel still above 90 % of the MLIP force call, the user is asked
    whether 2 and 3 swap.
-   Re-scoped on 2026-11-21 (ADR-0038, proposed): G5 with integer zeta
+   Re-scoped on 2026-11-21 (ADR-0038): G5 with integer zeta
    is computed exactly from Cartesian moment tensors, linear in the
    neighbours, with the same descriptor and models (no retraining).
    The new descriptor family moves to tier C.  The kernel measured
    72-83 % of the force call at 0.3.0a1, below the 90 % of the swap
    question.
+   Done: ADR-0038 (0.3.0a2): GeSn ELM force call 1.74 times faster on
+   one thread (4096 atoms), zeta <= 6 on the tensors under `auto`.
 4. Thermostats: CSVR in `md` (Q14) and Langevin in anneal's
    `md_quench`, one item.
 5. phonopy force constants and `FORCE_SETS`, spglib reduction of
