@@ -186,8 +186,13 @@ def test_atomic_elm_rows_equal_its_engine_and_engine_is_conservative(cls, kw, tm
         m._design(J) @ coef, m2._predict_structure(J), atol=1e-10
     )
     # default PCA whitening keeps near-null directions (gain up to
-    # 1/sqrt(pca_eps)): strongly curved energy, fourth-order difference
-    _fd4_check(ff, s["lattice"], s["positions"], s["atom_types"], 3e-5)
+    # 1/sqrt(pca_eps)): strongly curved energy, fourth-order difference.
+    # Position step 1e-4: at 3e-5 the round-off in E left a margin of only
+    # 2.5x to tol_f (3.7e-8 alone, 1.06e-7 once in the full suite); at
+    # 1e-4 the error is 1.6-2.7e-8.  The strain step stays 3e-5.
+    _fd4_check(
+        ff, s["lattice"], s["positions"], s["atom_types"], 1e-4, h_strain=3e-5
+    )
 
 
 @pytest.mark.slow
