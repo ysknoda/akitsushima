@@ -151,6 +151,13 @@
 > sigma_F,max with farthest-point thinning, VASP inputs or an external
 > code as labeller, retraining; resumable.  md and anneal take
 > `stop_sigma`.  First alpha of tier B (ADR-0028 addendum 5).
+>
+> 0.3.0a2 (ADR-0038): G5 terms with integer zeta up to 6 are computed
+> from Cartesian moment tensors, at a cost linear in the number of
+> neighbours.  Same descriptor and models (no retraining; equal to the
+> pair loop to 1e-13 of each column).  The GeSn atom-centred ELM force
+> call is 1.7-1.9 times faster on one thread, and the gain grows with
+> r_cut.  `ACSF(..., angular_kernel="pairs")` keeps the former kernel.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

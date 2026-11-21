@@ -74,25 +74,32 @@ def _rel(a, b):
 
 @pytest.fixture
 def with_reference(monkeypatch):
-    """Run ``fn`` with the 0.2.0a19 kernel in place of the package one."""
+    """Run ``fn`` with the 0.2.0a19 kernel in place of the package one;
+    the descriptors ``descs`` are switched to the pair loop meanwhile,
+    since the reference computes every angular term by pairs (ADR-0038)."""
 
-    def run(fn):
+    def run(fn, *descs):
         with monkeypatch.context() as m:
             m.setattr(acsf_mod, "_acsf_kernel", ref._acsf_kernel)
+            for d in descs:
+                m.setattr(d, "angular_kernel", "pairs")
             return fn()
 
     return run
 
 
+@pytest.mark.parametrize("kernel", ["auto", "pairs"])
 @pytest.mark.parametrize("triclinic", [False, True], ids=["cubic", "triclinic"])
 @pytest.mark.parametrize("grid", sorted(GRIDS))
 @pytest.mark.parametrize("name", ["Si", "GeSn"])
 @pytest.mark.slow
-def test_g_and_dgdv_match_the_reference(with_reference, name, grid, triclinic):
-    d = ACSF.from_grid(_species(name), 5.0, **GRIDS[grid])
+def test_g_and_dgdv_match_the_reference(with_reference, name, grid, triclinic, kernel):
+    """``auto`` puts the G5 terms with integer zeta on the moment tensors
+    of ADR-0038; ``pairs`` is the pair loop of ADR-0030."""
+    d = ACSF.from_grid(_species(name), 5.0, **GRIDS[grid], angular_kernel=kernel)
     lat, pos, types = _cell(name, triclinic)
     new = d._run(lat, pos, types, True)
-    old = with_reference(lambda: d._run(lat, pos, types, True))
+    old = with_reference(lambda: d._run(lat, pos, types, True), d)
     G, dGdv = new[4], new[5]
     assert np.all(np.isfinite(G)) and np.abs(G).max() > 0
     assert _rel(G, old[4]) < RTOL, f"G: {_rel(G, old[4]):.2e}"
@@ -125,7 +132,7 @@ def test_elm_energy_forces_stress_match_the_reference(with_reference, grid):
     ff = MLIPForceField(model)
     lat, pos, types = _cell("GeSn", True, seed=99)
     new = ff(lat, pos, types)
-    old = with_reference(lambda: ff(lat, pos, types))
+    old = with_reference(lambda: ff(lat, pos, types), ff.descriptor)
     for a, b, what in zip(new, old, ("E", "F", "S")):
         assert _rel(a, b) < RTOL, f"{what}: {_rel(a, b):.2e}"
 

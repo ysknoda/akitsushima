@@ -1,0 +1,16 @@
+{"what": "r_cut", "r_cut": 5.0, "n_atoms": 4096, "pairs_s": 0.4266897499328479, "auto_s": 0.22837770800106227, "neighbours_per_atom": 27.2109375}
+{"what": "r_cut", "r_cut": 6.0, "n_atoms": 4096, "pairs_s": 0.6163934170035645, "auto_s": 0.27038891694974154, "neighbours_per_atom": 33.51806640625}
+{"what": "r_cut", "r_cut": 7.0, "n_atoms": 4096, "pairs_s": 1.0612840419635177, "auto_s": 0.37684358295518905, "neighbours_per_atom": 46.015625}
+{"what": "zeta16", "r_cut": 5.0, "n_atoms": 4096, "pairs_s": 0.3444464170606807, "auto_s": 2.122090124990791}
+{"what": "fit_elm", "structures": 40, "atoms_each": 64, "n_hidden": 400, "pairs_s": 1.9028814159100875, "auto_s": 1.5357811250723898}
+{"what": "zeta_break", "r_cut": 5.0, "zeta_max": 4, "pairs_s": 0.3132, "auto_s": 0.2016}
+{"what": "zeta_break", "r_cut": 5.0, "zeta_max": 6, "pairs_s": 0.3083, "auto_s": 0.2809}
+{"what": "zeta_break", "r_cut": 5.0, "zeta_max": 8, "pairs_s": 0.3001, "auto_s": 0.4406}
+{"what": "zeta_break", "r_cut": 5.0, "zeta_max": 10, "pairs_s": 0.3143, "auto_s": 0.6718}
+{"what": "zeta_break", "r_cut": 5.0, "zeta_max": 12, "pairs_s": 0.3052, "auto_s": 1.0241}
+{"what": "zeta_break", "r_cut": 7.0, "zeta_max": 4, "pairs_s": 0.7851, "auto_s": 0.3157}
+{"what": "zeta_break", "r_cut": 7.0, "zeta_max": 6, "pairs_s": 0.8049, "auto_s": 0.4844}
+{"what": "zeta_break", "r_cut": 7.0, "zeta_max": 8, "pairs_s": 0.7996, "auto_s": 0.7643}
+{"what": "zeta_break", "r_cut": 7.0, "zeta_max": 10, "pairs_s": 0.7996, "auto_s": 1.1277}
+{"what": "zeta_break", "r_cut": 7.0, "zeta_max": 12, "pairs_s": 0.7928, "auto_s": 1.698}
+{"what": "mixed_zeta_1_2_4_16", "r_cut": 5.0, "pairs_s": 0.5104, "auto_s": 0.3724}

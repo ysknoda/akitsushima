@@ -55,6 +55,13 @@ from ...utils.jit import _HAS_NUMBA, _numba, _numba_njit, _numba_par
 
 __all__ = ["ACSF", "ATOMIC_NUMBER", "AtomicJacobian", "sort_species"]
 
+# Largest zeta that angular_kernel="auto" puts on the moment tensors
+# (ADR-0038): the tensors of rank n have (n+1)(n+2)/2 components, so their
+# cost grows with zeta while the pair loop's does not.  Measured on 4096
+# GeSn atoms, one thread: tensors up to zeta 6 are faster than the pair
+# loop at r_c 5 and 7 A, zeta 8 is slower at r_c 5 A and even at 7 A.
+MOMENT_ZETA_MAX = 6
+
 # ATOMIC_MASS is listed H, He, Li, ... in atomic-number order (Z = 1..86).
 ATOMIC_NUMBER = {el: z for z, el in enumerate(ATOMIC_MASS, start=1)}
 assert (
@@ -242,6 +249,7 @@ def _acsf_kernel(
     want_deriv,
     r_off,
     r_on,
+    moments=None,
 ):
     """
     Returns G (N, Dc) and dGdv (M, 3, Dc): for neighbour entry m of atom
@@ -254,14 +262,27 @@ def _acsf_kernel(
     and the work is done by :func:`_acsf_kernel_impl` (ADR-0030): one
     exponential per distinct (eta, G4/G5) pair, 2^(1-zeta) once per term,
     and integer zeta raised by multiplication.
+
+    ``moments`` (optional, bool per angular term): the terms marked True
+    -- G5 with integer zeta -- are computed from Cartesian moment tensors
+    by :func:`_g5_moments_impl` (ADR-0038) and skipped by the pair loop,
+    which is not entered at all when no term is left for it.  Without
+    it every angular term goes through the pair loop, as before.
     """
     g4_eta = np.asarray(g4_eta, dtype=np.float64)
     g4_zeta = np.asarray(g4_zeta, dtype=np.float64)
     g4_jk = np.asarray(g4_jk, dtype=np.float64)
     n4 = g4_eta.shape[0]
+    if moments is None:
+        mom = np.zeros(n4, dtype=np.bool_)
+    else:
+        mom = np.asarray(moments, dtype=np.bool_).reshape(n4)
+    g4_do = ~mom
     combos = []
     g4_e = np.zeros(n4, dtype=np.int64)
     for q in range(n4):
+        if not g4_do[q]:
+            continue
         key = (float(g4_eta[q]), bool(g4_jk[q] > 0.5))
         if key not in combos:
             combos.append(key)
@@ -273,12 +294,224 @@ def _acsf_kernel(
     # ACSF), else -1: the general power is kept for such terms
     integral = g4_zeta == np.round(g4_zeta)
     g4_zm1 = np.where(integral, np.round(g4_zeta) - 1.0, -1.0).astype(np.int64)
-    has_g4 = bool(np.any(g4_jk > 0.5))
-    return _acsf_kernel_impl(
+    has_g4 = bool(np.any((g4_jk > 0.5) & g4_do))
+    g4_lam = np.asarray(g4_lam, dtype=np.float64)
+    G, dGdv = _acsf_kernel_impl(
         ptr, nbj, vec, sp, n_sp, r_cut, g2_eta, g2_rs, g4_zeta,
-        np.asarray(g4_lam, dtype=np.float64), g4_jk, g4_e, g4_K, g4_zm1,
-        exp_eta, exp_jk, has_g4, pair_index, Dc, want_deriv, r_off, r_on,
+        g4_lam, g4_jk, g4_e, g4_K, g4_zm1,
+        exp_eta, exp_jk, has_g4, g4_do, bool(np.any(g4_do)), pair_index,
+        Dc, want_deriv, r_off, r_on,
     )
+    if np.any(mom):
+        _g5_moments(ptr, nbj, vec, sp, n_sp, r_cut, g4_eta, g4_zeta, g4_lam,
+                    mom, pair_index, n_sp * g2_eta.shape[0], G, dGdv,
+                    want_deriv, r_off, r_on)
+    return G, dGdv
+
+
+def _moment_components(L):
+    """Symmetric components of the Cartesian tensors of rank 0..L.
+
+    Rank n has (n+1)(n+2)/2 components u_x^a u_y^b u_z^c, a+b+c = n,
+    each standing for n!/(a! b! c!) equal entries of the full tensor;
+    components of rank n are rows rank_ptr[n]:rank_ptr[n+1].
+    """
+    ca, cb, cc, mult, rank_ptr = [], [], [], [], [0]
+    for n in range(L + 1):
+        for a in range(n, -1, -1):
+            for b in range(n - a, -1, -1):
+                c = n - a - b
+                ca.append(a)
+                cb.append(b)
+                cc.append(c)
+                mult.append(math.factorial(n)
+                            // (math.factorial(a) * math.factorial(b)
+                                * math.factorial(c)))
+        rank_ptr.append(len(ca))
+    as_int = lambda x: np.array(x, dtype=np.int64)
+    return (as_int(ca), as_int(cb), as_int(cc),
+            np.array(mult, dtype=np.float64), as_int(rank_ptr))
+
+
+def _g5_moments(ptr, nbj, vec, sp, n_sp, r_cut, g4_eta, g4_zeta, g4_lam,
+                mom, pair_index, off4, G, dGdv, want_deriv, r_off, r_on):
+    """Add the G5 terms marked in ``mom`` (integer zeta) to G and dGdv,
+    computed from moment tensors (ADR-0038).
+
+    With w_j = exp(-eta r_j^2) fc(r_j) and T_n^b = sum_{j of species b}
+    w_j u_j^(x)n, a G5 term is 2^(1-zeta) sum_n C(zeta, n) lambda^n
+    D_n^{bc}, with D_n^{bc} = T_n^b : T_n^c for b != c and
+    (T_n^b : T_n^b - sum_{j of b} w_j^2) / 2 for b = c -- the pair sum
+    of the pair loop, regrouped so that the cost is linear in the number
+    of neighbours.
+    """
+    q_idx = np.nonzero(mom)[0]
+    zetas = np.round(g4_zeta[q_idx]).astype(np.int64)
+    L = int(zetas.max())
+    etas = sorted({float(g4_eta[q]) for q in q_idx})
+    m_eta = np.array(etas, dtype=np.float64)
+    t_e = np.array([etas.index(float(g4_eta[q])) for q in q_idx], dtype=np.int64)
+    t_coef = np.zeros((q_idx.shape[0], L + 1))
+    for t, q in enumerate(q_idx):
+        z = int(zetas[t])
+        for n in range(z + 1):
+            t_coef[t, n] = 2.0 ** (1 - z) * math.comb(z, n) * g4_lam[q] ** n
+    ca, cb, cc, mult, rank_ptr = _moment_components(L)
+    _g5_moments_impl(ptr, nbj, vec, sp, n_sp, r_cut, r_off, r_on, m_eta,
+                     q_idx.astype(np.int64), t_e, zetas, t_coef,
+                     t_coef.sum(axis=1), ca, cb, cc, mult, rank_ptr, L,
+                     pair_index, g4_eta.shape[0], off4, G, dGdv, want_deriv)
+
+
+@_numba_par
+def _g5_moments_impl(ptr, nbj, vec, sp, n_sp, r_cut, r_off, r_on, m_eta,
+                     t_q, t_e, t_z, t_coef, t_csum, ca, cb, cc, mult,
+                     rank_ptr, L, pair_index, n4, off4, G, dGdv, want_deriv):
+    """The kernel of :func:`_g5_moments`.  Per atom: accumulate T_n^b for
+    every distinct eta and neighbour species, contract them into D_n^{bc}
+    and G; then, per neighbour entry m of species s, the derivative
+
+        d(T_n^s : T_n^y)/dv_m = w' t u + (w / r)(grad_u t - n t u)
+
+    with t = u^(x)n : T_n^y, grad_u t its gradient in u at fixed T, and
+    w' = dw/dr; for y = s the j = k term adds - w w' u.  A term of
+    zeta z uses the ranks n <= z only (its coefficients above are 0)."""
+    N = ptr.shape[0] - 1
+    n_e = m_eta.shape[0]
+    C = ca.shape[0]
+    n_t = t_q.shape[0]
+    n_pairs = (n_sp * (n_sp + 1)) // 2
+    pi_rc = math.pi / r_cut
+    for i in _prange(N):
+        s0 = ptr[i]
+        s1 = ptr[i + 1]
+        T = np.zeros((n_e, n_sp, C))
+        S2 = np.zeros((n_e, n_sp))
+        px = np.empty(L + 1)
+        py = np.empty(L + 1)
+        pz = np.empty(L + 1)
+        mono = np.empty(C)
+        for m in range(s0, s1):
+            vx = vec[m, 0]
+            vy = vec[m, 1]
+            vz = vec[m, 2]
+            r = math.sqrt(vx * vx + vy * vy + vz * vz)
+            fc, dfc = _fcut(r, pi_rc, r_off, r_on)
+            if fc == 0.0:
+                continue
+            ux = vx / r
+            uy = vy / r
+            uz = vz / r
+            px[0] = 1.0
+            py[0] = 1.0
+            pz[0] = 1.0
+            for k in range(1, L + 1):
+                px[k] = px[k - 1] * ux
+                py[k] = py[k - 1] * uy
+                pz[k] = pz[k - 1] * uz
+            for k in range(C):
+                mono[k] = px[ca[k]] * py[cb[k]] * pz[cc[k]]
+            s = sp[nbj[m]]
+            for e in range(n_e):
+                w = math.exp(-m_eta[e] * r * r) * fc
+                S2[e, s] += w * w
+                for k in range(C):
+                    T[e, s, k] += w * mono[k]
+        # D[e, p, n] for every species pair p = (b <= c)
+        D = np.zeros((n_e, n_pairs, L + 1))
+        for e in range(n_e):
+            for b in range(n_sp):
+                for c in range(b, n_sp):
+                    p = pair_index[b, c]
+                    for n in range(L + 1):
+                        acc = 0.0
+                        for k in range(rank_ptr[n], rank_ptr[n + 1]):
+                            acc += mult[k] * T[e, b, k] * T[e, c, k]
+                        if b == c:
+                            acc = 0.5 * (acc - S2[e, b])
+                        D[e, p, n] = acc
+        for t in range(n_t):
+            e = t_e[t]
+            for p in range(n_pairs):
+                val = 0.0
+                for n in range(t_z[t] + 1):
+                    val += t_coef[t, n] * D[e, p, n]
+                G[i, off4 + p * n4 + t_q[t]] += val
+        if not want_deriv:
+            continue
+        dmx = np.empty(C)
+        dmy = np.empty(C)
+        dmz = np.empty(C)
+        A = np.empty((n_sp, L + 1, 3))
+        for m in range(s0, s1):
+            vx = vec[m, 0]
+            vy = vec[m, 1]
+            vz = vec[m, 2]
+            r = math.sqrt(vx * vx + vy * vy + vz * vz)
+            fc, dfc = _fcut(r, pi_rc, r_off, r_on)
+            if fc == 0.0 and dfc == 0.0:
+                continue
+            ux = vx / r
+            uy = vy / r
+            uz = vz / r
+            px[0] = 1.0
+            py[0] = 1.0
+            pz[0] = 1.0
+            for k in range(1, L + 1):
+                px[k] = px[k - 1] * ux
+                py[k] = py[k - 1] * uy
+                pz[k] = pz[k - 1] * uz
+            for k in range(C):
+                a = ca[k]
+                b = cb[k]
+                c = cc[k]
+                mono[k] = px[a] * py[b] * pz[c]
+                dmx[k] = a * px[a - 1] * py[b] * pz[c] if a > 0 else 0.0
+                dmy[k] = b * px[a] * py[b - 1] * pz[c] if b > 0 else 0.0
+                dmz[k] = c * px[a] * py[b] * pz[c - 1] if c > 0 else 0.0
+            s = sp[nbj[m]]
+            for e in range(n_e):
+                ex = math.exp(-m_eta[e] * r * r)
+                w = ex * fc
+                wp = ex * (dfc - 2.0 * m_eta[e] * r * fc)
+                wr = w / r
+                for y in range(n_sp):
+                    for n in range(L + 1):
+                        tv = 0.0
+                        gx = 0.0
+                        gy = 0.0
+                        gz = 0.0
+                        for k in range(rank_ptr[n], rank_ptr[n + 1]):
+                            cT = mult[k] * T[e, y, k]
+                            tv += cT * mono[k]
+                            gx += cT * dmx[k]
+                            gy += cT * dmy[k]
+                            gz += cT * dmz[k]
+                        A[y, n, 0] = wp * tv * ux + wr * (gx - n * tv * ux)
+                        A[y, n, 1] = wp * tv * uy + wr * (gy - n * tv * uy)
+                        A[y, n, 2] = wp * tv * uz + wr * (gz - n * tv * uz)
+                wwp = w * wp
+                for t in range(n_t):
+                    if t_e[t] != e:
+                        continue
+                    csum = t_csum[t]
+                    for y in range(n_sp):
+                        ch = off4 + pair_index[s, y] * n4 + t_q[t]
+                        dx = 0.0
+                        dy = 0.0
+                        dz = 0.0
+                        for n in range(t_z[t] + 1):
+                            cf = t_coef[t, n]
+                            dx += cf * A[y, n, 0]
+                            dy += cf * A[y, n, 1]
+                            dz += cf * A[y, n, 2]
+                        if y == s:
+                            dx -= csum * wwp * ux
+                            dy -= csum * wwp * uy
+                            dz -= csum * wwp * uz
+                        dGdv[m, 0, ch] += dx
+                        dGdv[m, 1, ch] += dy
+                        dGdv[m, 2, ch] += dz
 
 
 @_numba_njit
@@ -312,6 +545,8 @@ def _acsf_kernel_impl(
     exp_eta,
     exp_jk,
     has_g4,
+    g4_do,
+    any_pair,
     pair_index,
     Dc,
     want_deriv,
@@ -363,7 +598,8 @@ def _acsf_kernel_impl(
                     dGdv[m, 1, ch] += dgdr * vy / r
                     dGdv[m, 2, ch] += dgdr * vz / r
         # ---- angular: G4 (jk = 1) and G5 (jk = 0) ----
-        if n4 == 0:
+        # (terms with g4_do False are computed by _g5_moments_impl)
+        if not any_pair:
             continue
         for m in range(s0, s1):
             j = nbj[m]
@@ -415,6 +651,8 @@ def _acsf_kernel_impl(
                 F4 = fa * fb * fcc
                 F5 = fa * fb
                 for q in range(n4):
+                    if not g4_do[q]:
+                        continue
                     jk = g4_jk[q]
                     if jk > 0.5:
                         # G4: fc(r_ij) fc(r_ik) fc(r_jk), c = b - a
@@ -580,6 +818,16 @@ class ACSF:
               for r >= r_on, so closer pairs (and triplets containing
               them) do not enter G.  A pair baseline (fitting.physics)
               then describes the short range alone (ADR-0014).
+    angular_kernel : how the angular terms are computed (ADR-0038); the
+              descriptor is the same to rounding, and the choice is not
+              part of :meth:`config`.
+              ``"auto"`` (default): G5 terms with integer zeta up to
+              ``MOMENT_ZETA_MAX`` (6) from Cartesian moment tensors (cost
+              linear in the neighbours), G4, larger and non-integer zeta
+              by the pair loop;
+              ``"pairs"``: every angular term by the pair loop (ADR-0030);
+              ``"moments"``: every angular term from the tensors, with no
+              cap on zeta; G4 or a non-integer zeta raise.
 
     Feature layout of one atom (Dc columns): G2 blocks for each neighbour
     species (Z order) x each (eta, r_s); then angular blocks for each
@@ -587,7 +835,8 @@ class ACSF:
     G5 (eta, zeta, lambda).
     """
 
-    def __init__(self, species, r_cut, g2=(), g4=(), g5=(), inner_cutoff=None):
+    def __init__(self, species, r_cut, g2=(), g4=(), g5=(), inner_cutoff=None,
+                 angular_kernel="auto"):
         self.species = sort_species(species)
         self.r_cut = float(r_cut)
         # (r_off, r_on): pairs closer than r_off do not enter G (ADR-0014)
@@ -607,6 +856,8 @@ class ACSF:
                 raise ValueError("ACSF: G4/G5 need zeta >= 1 and lambda = +/-1.")
         if not (self.g2 or self.g4 or self.g5):
             raise ValueError("ACSF: give at least one G2, G4 or G5 function.")
+        self.angular_kernel = angular_kernel
+        self._moment_terms()  # validates angular_kernel
         n = len(self.species)
         self._pairs = [(b, c) for b in range(n) for c in range(b, n)]
         self._pair_index = np.zeros((n, n), dtype=np.int64)
@@ -615,7 +866,8 @@ class ACSF:
 
     # ------------------------------------------------------------------
     @classmethod
-    def from_grid(cls, species, r_cut, g2=None, g4=None, g5=None, inner_cutoff=None):
+    def from_grid(cls, species, r_cut, g2=None, g4=None, g5=None, inner_cutoff=None,
+                  angular_kernel="auto"):
         """
         Build from YAML-style grids: ``g2 = {eta: [...], rs: [...]}`` and
         ``g4`` / ``g5 = {eta: [...], zeta: [...], lambda: [...]}``
@@ -633,7 +885,8 @@ class ACSF:
                 for l in g.get("lambda", [-1, 1])
             ]
 
-        return cls(species, r_cut, g2l, _ang(g4), _ang(g5), inner_cutoff)
+        return cls(species, r_cut, g2l, _ang(g4), _ang(g5), inner_cutoff,
+                   angular_kernel)
 
     def config(self) -> dict:
         return {
@@ -650,7 +903,7 @@ class ACSF:
         return json.dumps(self.config())
 
     @classmethod
-    def from_config(cls, cfg):
+    def from_config(cls, cfg, angular_kernel="auto"):
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         if cfg.get("type", "acsf") != "acsf":
@@ -662,7 +915,30 @@ class ACSF:
             cfg["g4"],
             cfg.get("g5", []),
             cfg.get("inner_cutoff"),
+            angular_kernel,
         )
+
+    def _moment_terms(self) -> np.ndarray:
+        """Bool per angular term (order of :attr:`_angular`): True where
+        the term is computed from moment tensors (ADR-0038)."""
+        mode = self.angular_kernel
+        if mode not in ("auto", "pairs", "moments"):
+            raise ValueError(
+                f"ACSF: angular_kernel must be 'auto', 'pairs' or 'moments', "
+                f"got {mode!r}.")
+        ok = np.array([jk < 0.5 and z == round(z)
+                       for _, z, _, jk in self._angular], dtype=bool)
+        if mode == "auto":
+            ok &= np.array([z <= MOMENT_ZETA_MAX for _, z, _, _ in self._angular],
+                           dtype=bool)
+        if mode == "moments" and not ok.all():
+            raise ValueError(
+                "ACSF: angular_kernel='moments' needs every angular term to "
+                "be G5 with integer zeta; use 'auto' for G4 or non-integer "
+                "zeta.")
+        if mode == "pairs":
+            return np.zeros(len(ok), dtype=bool)
+        return ok
 
     @property
     def _angular(self):
@@ -728,6 +1004,7 @@ class ACSF:
         vec = np.ascontiguousarray(vec)
         g2 = np.array(self.g2, dtype=np.float64).reshape(-1, 2)
         g4 = np.array(self._angular, dtype=np.float64).reshape(-1, 4)
+        mom = self._moment_terms()
         G, dGdv = _acsf_kernel(
             ptr,
             nbj,
@@ -745,6 +1022,9 @@ class ACSF:
             self.n_per_atom,
             want_deriv,
             *(self.inner_cutoff or (0.0, 0.0)),
+            # passed only when used, so that a kernel with the former
+            # signature (tests/acsf_reference_kernel.py) can stand in
+            **({"moments": mom} if mom.any() else {}),
         )
         return sp, ptr, nbj, vec, G, dGdv
 
