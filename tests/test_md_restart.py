@@ -16,9 +16,10 @@ from conftest import diamond_si_dict
 
 import akitsushima as ak
 from akitsushima.solvers.molecular_dynamics import (
+    CSVRSimulation,
+    LangevinSimulation,
     NPTSimulation,
     NVESimulation,
-    LangevinSimulation,
     NVTSimulation,
 )
 
@@ -44,6 +45,7 @@ CLASSES = {
     "nve": NVESimulation,
     "npt": NPTSimulation,
     "langevin": LangevinSimulation,  # ADR-0032: the RNG state is restored
+    "csvr": CSVRSimulation,  # ADR-0039: likewise
 }
 EQUIL, PROD, EVERY = 20, 60, 25
 STOP_AT = 37  # force call at which the "job" dies: past the step-25 checkpoint
@@ -77,7 +79,7 @@ def _make(ens, out, n_steps=PROD, **over):
     )
     if ens in ("nvt", "npt"):
         kw.update(tau_nhc=50.0, velocity_rescale_steps=10, save_plots=False)
-    if ens == "langevin":
+    if ens in ("langevin", "csvr"):
         kw.update(damping=40.0, save_plots=False)
     if ens == "npt":
         kw.update(pressure=1.0, tau_baro=300.0)
@@ -100,9 +102,9 @@ def _kill_after(sim, n_calls):
 
 def _files(out, ens):
     thermo = open(os.path.join(out, "thermo.log")).read().splitlines()
-    if ens in ("nvt", "langevin"):  # drop NL_builds, the last column
+    if ens in ("nvt", "langevin", "csvr"):  # drop NL_builds, the last column
         thermo = [line.rsplit(None, 1)[0] for line in thermo]
-    name = "nvt" if ens == "langevin" else ens
+    name = "nvt" if ens in ("langevin", "csvr") else ens
     traj = open(os.path.join(out, f"XDATCAR_{name}"), "rb").read()
     return thermo, traj
 
@@ -135,7 +137,7 @@ def test_interrupted_run_continues_bit_for_bit(tmp_path, ens):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("ens", ["nvt", "npt", "langevin"])
+@pytest.mark.parametrize("ens", ["nvt", "npt", "langevin", "csvr"])
 def test_finished_run_is_extended_by_raising_n_steps(tmp_path, ens):
     ref = _make(ens, tmp_path / "ref").run()
     out = tmp_path / "ext"

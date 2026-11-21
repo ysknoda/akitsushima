@@ -669,6 +669,9 @@ MLIPs and large MD with them):
    one thread (4096 atoms), zeta <= 6 on the tensors under `auto`.
 4. Thermostats: CSVR in `md` (Q14) and Langevin in anneal's
    `md_quench`, one item.
+   Done: ADR-0039 (0.3.0a3): `thermostat: csvr` in `md` NVT, and
+   `thermostat: nhc | langevin | csvr` in anneal md_quench with `T_md`
+   in its ledger; the template md_quench no longer fails on `tau_baro`.
 5. phonopy force constants and `FORCE_SETS`, spglib reduction of
    displacements and strains, LAMMPS potential files (Q17).
 6. Lattice thermal conductivity from third-order force constants in the

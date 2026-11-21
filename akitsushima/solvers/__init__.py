@@ -4,6 +4,7 @@ from .gcmc import CFCMCSimulation, GCMCMDSimulation
 from .geometry_optimiser import GeometryOptimiser
 from .global_opt import GlobalOptimiser
 from .molecular_dynamics import (
+    CSVRSimulation,
     LangevinSimulation,
     NPTSimulation,
     NVESimulation,
@@ -20,6 +21,7 @@ __all__ = [
     "GlobalOptimiser",
     "NVTSimulation",
     "LangevinSimulation",
+    "CSVRSimulation",
     "NVESimulation",
     "NPTSimulation",
     "GCMCMDSimulation",

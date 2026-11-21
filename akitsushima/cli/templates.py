@@ -243,10 +243,12 @@ potential:
 md:
   ensemble:     nvt
   thermostat:   nhc                # nhc (Nose-Hoover chain) | langevin (BAOAB,
-                                   # ADR-0032).  langevin uses damping (fs,
-                                   # 1/gamma) instead of tau_nhc, and needs
+                                   # ADR-0032) | csvr (Bussi velocity rescaling,
+                                   # ADR-0039).  langevin and csvr use damping
+                                   # (fs) instead of tau_nhc, and need
                                    # velocity_rescale_steps: 0
-  # damping:    100.0              # fs, langevin only
+  # damping:    100.0              # fs, langevin (1/gamma; K relaxes in
+                                   # damping/2) and csvr (K relaxes in damping)
   output_dir:   ./nvt_output
   temperature:  300.0              # K
   timestep:     1.0                # fs
@@ -1259,6 +1261,8 @@ anneal:
   quench_every:  500               # MD steps between quenches
   md:
     ensemble:     nvt              # nvt | npt (npt uses `pressure`)
+    thermostat:   nhc              # nhc | langevin | csvr (nvt only; ADR-0039)
+    # damping:    100.0            # fs, langevin / csvr (instead of tau_nhc)
     timestep:     1.0              # fs
     tau_nhc:      20.0             # fs
     tau_baro:     1000.0           # fs (npt)

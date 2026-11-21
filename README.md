@@ -158,6 +158,14 @@
 > pair loop to 1e-13 of each column).  The GeSn atom-centred ELM force
 > call is 1.7-1.9 times faster on one thread, and the gain grows with
 > r_cut.  `ACSF(..., angular_kernel="pairs")` keeps the former kernel.
+>
+> 0.3.0a3 (ADR-0039): `md` NVT gets the CSVR thermostat (`thermostat:
+> csvr`, Bussi, Donadio and Parrinello 2007), and `anneal` md_quench gets
+> `thermostat: nhc | langevin | csvr` with the mean MD temperature of
+> every chunk (`T_md`) in its ledger.  The anneal template's md_quench no
+> longer fails every MD chunk on its NPT-only `tau_baro`.  The parallel
+> pair, SW and Tersoff kernels no longer overrun their per-thread buffers
+> when a numba cache built with one thread is loaded with more.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

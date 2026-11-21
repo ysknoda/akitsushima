@@ -27,7 +27,8 @@ from ..utils.timing import TimingCollector
 from ._checkpoint import (check_settings, load_checkpoint, output_sizes,
                           save_checkpoint, truncate_outputs)
 
-__all__ = ["NVTSimulation", "LangevinSimulation", "NVESimulation", "NPTSimulation"]
+__all__ = ["NVTSimulation", "LangevinSimulation", "CSVRSimulation", "NVESimulation",
+           "NPTSimulation"]
 
 
 class _BaseMDSimulation:
@@ -1056,7 +1057,7 @@ class NVTSimulation(_BaseMDSimulation):
         times  = [r["time_ps"] for r in self._thermo_log]
         T_list = [r["T_inst"] for r in self._thermo_log]
         E_list = [r["e_tot"]  for r in self._thermo_log]
-        # NHC: the chain's conserved quantity; Langevin: E_tot - Q
+        # NHC: the chain's conserved quantity; Langevin / CSVR: E_tot - Q
         h_key = "H_nhc" if "H_nhc" in self._thermo_log[0] else "e_minus_q"
         H_list = [r[h_key] for r in self._thermo_log]
 
@@ -1103,53 +1104,41 @@ class NVTSimulation(_BaseMDSimulation):
 #               2013, 34; J. Chem. Phys. 138, 174102 (2013).  ADR-0032.
 # ============================================================================
 
-class LangevinSimulation(NVTSimulation):
+class _StochasticNVTSimulation(NVTSimulation):
     """
-    NVT molecular dynamics with a Langevin thermostat on every atom,
-    integrated with BAOAB (ADR-0032).
-
-    One step:  B  v += dt/2 F/m
-               A  r += dt/2 v
-               O  v  = c v + sqrt(1 - c^2) sqrt(kT/m) xi,  c = exp(-dt/damping)
-               A  r += dt/2 v
-                  F = F(r)
-               B  v += dt/2 F/m
-
-    BAOAB samples configurations with a small time-step error; for a
-    harmonic potential <x^2> = kT/k exactly at any stable dt.  After
-    each O step the centre-of-mass velocity is removed (unless atoms are
-    fixed), so the crystal does not random-walk; the number of degrees
-    of freedom is that of NVTSimulation (3N - 3 without fixed atoms).
+    Shared driver of the stochastic NVT thermostats (Langevin, ADR-0032;
+    CSVR, ADR-0039).  A subclass supplies one integration step
+    (:meth:`_step`), which returns the new forces and the kinetic energy
+    the thermostat added; the loop, output files, the heat Q in
+    ``thermo.log`` (column ``E-Q(eV)``), the checkpoint (Q and the
+    random-number state) and the result dict are common.
 
     Parameters
     ----------
     As :class:`NVTSimulation`, with
-    damping : Langevin relaxation time 1/gamma [fs] (default 100).
+    damping : thermostat time constant [fs] (default 100).
     ``tau_nhc`` is not used, and ``velocity_rescale_steps`` must be 0:
     the thermostat itself relaxes to the target in a few damping times.
-
-    Output files
-    ------------
-    As NVTSimulation (XDATCAR_nvt, thermo.log, POSCAR_final_MD).  The
-    thermo.log column ``E-Q(eV)`` is E_tot minus the heat Q the
-    thermostat has added (O steps and centre-of-mass removal); its drift
-    measures the integration error, as H_NHC does for the chain.
     """
 
-    _CK_ENSEMBLE = "langevin"
     _CK_SCALARS: Tuple[str, ...] = ()
+    _TITLE = ""        # e.g. "Langevin NVT-MD (BAOAB)"
+    _TRAJ_COMMENT = ""  # comment line of the trajectory header
+    _POSCAR_TITLE = ""  # title of POSCAR_final_MD
 
     def __init__(self, *args, damping: float = 100.0,
                  velocity_rescale_steps: int = 0, **kwargs):
+        name = type(self).__name__
         if int(velocity_rescale_steps) != 0:
             raise ValueError(
-                "LangevinSimulation: velocity_rescale_steps must be 0, got "
-                f"{velocity_rescale_steps}.  The Langevin thermostat relaxes "
-                "to the target temperature within a few damping times by "
-                "itself; rescaling is a Nose-Hoover-chain aid (ADR-0032).")
+                f"{name}: velocity_rescale_steps must be 0, got "
+                f"{velocity_rescale_steps}.  The {self._KIND} thermostat "
+                "relaxes to the target temperature within a few damping "
+                "times by itself; rescaling is a Nose-Hoover-chain aid "
+                f"({self._ADR}).")
         if not (damping > 0.0):
             raise ValueError(
-                f"LangevinSimulation: damping must be > 0 fs, got {damping}.")
+                f"{name}: damping must be > 0 fs, got {damping}.")
         super().__init__(*args, velocity_rescale_steps=0, **kwargs)
         self.damping = float(damping)
 
@@ -1159,34 +1148,27 @@ class LangevinSimulation(NVTSimulation):
         out["damping"] = float(self.damping)
         return out
 
-    def _o_step(self, c: float) -> float:
-        """Ornstein-Uhlenbeck step over dt, then removal of the
-        centre-of-mass velocity; returns the kinetic energy added [eV]."""
-        before = self._kinetic_energy()
-        sig = np.sqrt((1.0 - c * c) * K_B * self.temperature
-                      * EV_ANG_TO_AMU_ANG_FS2 / self.masses)
-        self.velocities = (c * self.velocities
-                           + sig[:, None] * self.rng.standard_normal((self.N, 3)))
-        if np.any(self._fix_mask):
-            self.velocities *= ~self._fix_mask
-        else:
-            self.velocities -= (np.sum(self.masses[:, None] * self.velocities, axis=0)
-                                / self.masses.sum())
-        return self._kinetic_energy() - before
-
     def _wrap(self) -> None:
         frac = self.positions @ np.linalg.inv(self.lattice)
         frac -= np.floor(frac)
         frac[frac >= 1.0] = 0.0
         self.positions = frac @ self.lattice
 
+    def _prepare(self) -> None:
+        """Set per-run constants before the first step."""
+
+    def _step(self, acc: np.ndarray):
+        """One step from the current state with accelerations ``acc``;
+        returns (e_pot, forces, stress, acc, dQ)."""
+        raise NotImplementedError
+
     def run(self, checkpoint: Optional[str] = None, checkpoint_every: int = 0,
             checkpoint_meta: Optional[dict] = None) -> dict:
         """
-        Execute the Langevin (BAOAB) NVT run.  ``checkpoint``,
-        ``checkpoint_every`` and ``checkpoint_meta`` as in
-        :meth:`NVTSimulation.run`; the checkpoint also holds the heat Q
-        and the random-number state, so a restart continues bit for bit.
+        Execute the NVT run.  ``checkpoint``, ``checkpoint_every`` and
+        ``checkpoint_meta`` as in :meth:`NVTSimulation.run`; the
+        checkpoint also holds the heat Q and the random-number state, so
+        a restart continues bit for bit.
         """
         self._tc.start("total")  # timing
         self._ensure_output_dir(self.output_dir)
@@ -1198,7 +1180,7 @@ class LangevinSimulation(NVTSimulation):
         e_pot, forces, stress = self._compute_forces()
         acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
         Q = float(ck["extra"]["Q"]) if ck is not None else 0.0
-        c = float(np.exp(-self.dt / self.damping))
+        self._prepare()
 
         total_steps = self.equil_steps + self.n_steps
         header = (f"{'Step':>8}  {'Time(ps)':>10}  {'E_pot(eV)':>14}  "
@@ -1206,7 +1188,7 @@ class LangevinSimulation(NVTSimulation):
                   f"{'T_inst(K)':>10}  {'E-Q(eV)':>14}  "
                   f"{'NL_builds':>10}")
         if self.verbose:
-            print(f"\nLangevin NVT-MD (BAOAB): T={self.temperature} K  "
+            print(f"\n{self._TITLE}: T={self.temperature} K  "
                   f"damping={self.damping} fs  dt={self.dt} fs  "
                   f"steps={total_steps}  (equil={self.equil_steps})")
             print(header + self._unc_header())
@@ -1225,7 +1207,7 @@ class LangevinSimulation(NVTSimulation):
                 thermo_fh.write(header + self._unc_header() + "\n")
                 self._traj_header(
                     traj_fh, self.lattice, self.atom_types,
-                    comment=f"akitsushima.py Langevin NVT-MD  T={self.temperature}K")
+                    comment=f"{self._TRAJ_COMMENT}  T={self.temperature}K")
                 self._xdatcar_frame_idx = 1
             else:
                 self._xdatcar_frame_idx = ck["frame"]
@@ -1234,21 +1216,8 @@ class LangevinSimulation(NVTSimulation):
             for step in range(start, total_steps):
                 self._tc.start("step")  # timing
                 t_ps = step * self.dt * 1e-3
-                # B
-                self.velocities += 0.5 * self.dt * acc
-                self.velocities *= ~self._fix_mask
-                # A
-                self.positions += 0.5 * self.dt * self.velocities
-                # O
-                Q += self._o_step(c)
-                # A
-                self.positions += 0.5 * self.dt * self.velocities
-                self._wrap()
-                # force, B
-                e_pot, forces, stress = self._compute_forces()
-                acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
-                self.velocities += 0.5 * self.dt * acc
-                self.velocities *= ~self._fix_mask
+                e_pot, forces, stress, acc, dQ = self._step(acc)
+                Q += dQ
 
                 e_kin  = self._kinetic_energy()
                 e_tot  = e_pot + e_kin
@@ -1297,13 +1266,13 @@ class LangevinSimulation(NVTSimulation):
         if _mpi_rank == 0:
             write_poscar(out_poscar, self.lattice, self.positions,
                          self.atom_types,
-                         title=f"Langevin MD final frame  T={self.temperature}K")
+                         title=f"{self._POSCAR_TITLE}  T={self.temperature}K")
         T_arr = np.array(lists["T"])
         T_mean = float(T_arr.mean()) if len(T_arr) else 0.0
         T_std = float(T_arr.std()) if len(T_arr) else 0.0
         Ep_mean = float(np.mean(lists["e_pot"])) if lists["e_pot"] else 0.0
         if self.verbose:
-            print(f"\n  Langevin NVT-MD finished.")
+            print(f"\n  {self._TITLE.split(' (')[0]} finished.")
             print(f"  <T>      = {T_mean:.2f} +/- {T_std:.2f} K  "
                   f"(target {self.temperature} K)")
             print(f"  <E_pot>  = {Ep_mean:.6f} eV")
@@ -1317,7 +1286,7 @@ class LangevinSimulation(NVTSimulation):
         self._tc.stop("total")  # timing
         _timing = self._tc.summary()
         if _timing.get("enabled") and _mpi_rank == 0:
-            self._tc.print_summary(label="LangevinSimulation")
+            self._tc.print_summary(label=type(self).__name__)
         return {
             "positions"  : self.positions.copy(),
             "velocities" : self.velocities.copy(),
@@ -1329,6 +1298,178 @@ class LangevinSimulation(NVTSimulation):
             "thermo_log" : self._thermo_log,
             "timing"     : _timing,
         }
+
+
+class LangevinSimulation(_StochasticNVTSimulation):
+    """
+    NVT molecular dynamics with a Langevin thermostat on every atom,
+    integrated with BAOAB (ADR-0032).
+
+    One step:  B  v += dt/2 F/m
+               A  r += dt/2 v
+               O  v  = c v + sqrt(1 - c^2) sqrt(kT/m) xi,  c = exp(-dt/damping)
+               A  r += dt/2 v
+                  F = F(r)
+               B  v += dt/2 F/m
+
+    BAOAB samples configurations with a small time-step error; for a
+    harmonic potential <x^2> = kT/k exactly at any stable dt.  After
+    each O step the centre-of-mass velocity is removed (unless atoms are
+    fixed), so the crystal does not random-walk; the number of degrees
+    of freedom is that of NVTSimulation (3N - 3 without fixed atoms).
+
+    Parameters
+    ----------
+    As :class:`NVTSimulation`, with
+    damping : Langevin relaxation time 1/gamma [fs] (default 100).  The
+        kinetic energy relaxes with time constant damping / 2.
+    ``tau_nhc`` is not used, and ``velocity_rescale_steps`` must be 0:
+    the thermostat itself relaxes to the target in a few damping times.
+
+    Output files
+    ------------
+    As NVTSimulation (XDATCAR_nvt, thermo.log, POSCAR_final_MD).  The
+    thermo.log column ``E-Q(eV)`` is E_tot minus the heat Q the
+    thermostat has added (O steps and centre-of-mass removal); its drift
+    measures the integration error, as H_NHC does for the chain.
+    """
+
+    _CK_ENSEMBLE = "langevin"
+    _KIND = "Langevin"
+    _ADR = "ADR-0032"
+    _TITLE = "Langevin NVT-MD (BAOAB)"
+    _TRAJ_COMMENT = "akitsushima.py Langevin NVT-MD"
+    _POSCAR_TITLE = "Langevin MD final frame"
+
+    def _o_step(self, c: float) -> float:
+        """Ornstein-Uhlenbeck step over dt, then removal of the
+        centre-of-mass velocity; returns the kinetic energy added [eV]."""
+        before = self._kinetic_energy()
+        sig = np.sqrt((1.0 - c * c) * K_B * self.temperature
+                      * EV_ANG_TO_AMU_ANG_FS2 / self.masses)
+        self.velocities = (c * self.velocities
+                           + sig[:, None] * self.rng.standard_normal((self.N, 3)))
+        if np.any(self._fix_mask):
+            self.velocities *= ~self._fix_mask
+        else:
+            self.velocities -= (np.sum(self.masses[:, None] * self.velocities, axis=0)
+                                / self.masses.sum())
+        return self._kinetic_energy() - before
+
+    def _prepare(self) -> None:
+        self._c = float(np.exp(-self.dt / self.damping))
+
+    def _step(self, acc: np.ndarray):
+        # B
+        self.velocities += 0.5 * self.dt * acc
+        self.velocities *= ~self._fix_mask
+        # A
+        self.positions += 0.5 * self.dt * self.velocities
+        # O
+        dQ = self._o_step(self._c)
+        # A
+        self.positions += 0.5 * self.dt * self.velocities
+        self._wrap()
+        # force, B
+        e_pot, forces, stress = self._compute_forces()
+        acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
+        self.velocities += 0.5 * self.dt * acc
+        self.velocities *= ~self._fix_mask
+        return e_pot, forces, stress, acc, dQ
+
+
+class CSVRSimulation(_StochasticNVTSimulation):
+    """
+    NVT molecular dynamics with the canonical-sampling velocity-rescaling
+    thermostat (CSVR) of Bussi, Donadio and Parrinello, J. Chem. Phys.
+    126, 014101 (2007) (ADR-0039).
+
+    One step:  R  rescale every velocity by alpha over dt/2
+               B  v += dt/2 F/m
+               A  r += dt v
+                  F = F(r)
+               B  v += dt/2 F/m
+               R  rescale every velocity by alpha over dt/2
+
+    R propagates the kinetic energy K exactly by the stochastic process
+    of the paper (its appendix): with c = exp(-h/damping), the target
+    K_t = N_f kT/2, one Gaussian number R_1 and S, a chi-squared number
+    with N_f - 1 degrees of freedom,
+
+        K' = c K + (1 - c) K_t (R_1^2 + S) / N_f
+             + 2 R_1 sqrt(c (1 - c) K K_t / N_f),
+
+    and alpha = sqrt(K'/K) with the sign of
+    R_1 + sqrt(c N_f K / ((1 - c) K_t)).  All atoms share alpha, so the
+    total momentum is conserved and fixed components stay zero; N_f is
+    that of NVTSimulation (3N - 3 without fixed atoms).  CSVR samples the
+    canonical ensemble when the Hamiltonian dynamics itself is ergodic;
+    it cannot make independent harmonic oscillators so.
+
+    Parameters
+    ----------
+    As :class:`NVTSimulation`, with
+    damping : time constant tau of the kinetic energy [fs] (default
+        100).  The same value is a weaker coupling than Langevin's
+        damping, under which K relaxes with damping / 2.
+    ``tau_nhc`` is not used, and ``velocity_rescale_steps`` must be 0.
+
+    Output files
+    ------------
+    As NVTSimulation (XDATCAR_nvt, thermo.log, POSCAR_final_MD).  The
+    thermo.log column ``E-Q(eV)`` is E_tot minus the energy Q the
+    rescalings have added -- the effective energy of the paper, whose
+    drift measures the integration error.
+    """
+
+    _CK_ENSEMBLE = "csvr"
+    _KIND = "CSVR"
+    _ADR = "ADR-0039"
+    _TITLE = "CSVR NVT-MD (Bussi velocity rescaling)"
+    _TRAJ_COMMENT = "akitsushima.py CSVR NVT-MD"
+    _POSCAR_TITLE = "CSVR MD final frame"
+
+    # Testing hook: 0 replaces the noise by its mean-free limit
+    # (deterministic Berendsen-like rescaling), which must fail the
+    # canonical variance of K (ADR-0039 decision 6).
+    _noise_scale = 1.0
+
+    def _prepare(self) -> None:
+        self._c_half = float(np.exp(-0.5 * self.dt / self.damping))
+
+    def _rescale(self) -> float:
+        """Exact CSVR propagation of K over dt/2; returns K' - K [eV]."""
+        K = self._kinetic_energy()
+        nf = int(self.n_dof)
+        if K <= 0.0 or nf < 1:
+            return 0.0
+        c = self._c_half
+        Kt = 0.5 * nf * K_B * self.temperature
+        r1 = float(self.rng.standard_normal())
+        s = float(self.rng.chisquare(nf - 1)) if nf > 1 else 0.0
+        if self._noise_scale != 1.0:  # testing only
+            r1 *= self._noise_scale
+            s = (nf - 1) + self._noise_scale * (s - (nf - 1))
+        K_new = (c * K + (1.0 - c) * Kt * (r1 * r1 + s) / nf
+                 + 2.0 * r1 * np.sqrt(c * (1.0 - c) * K * Kt / nf))
+        alpha = np.sqrt(max(K_new, 0.0) / K)
+        if r1 + np.sqrt(c * nf * K / ((1.0 - c) * Kt)) < 0.0:
+            alpha = -alpha
+        self.velocities *= alpha
+        return alpha * alpha * K - K
+
+    def _step(self, acc: np.ndarray):
+        dQ = self._rescale()
+        self.velocities += 0.5 * self.dt * acc
+        self.velocities *= ~self._fix_mask
+        self.positions += self.dt * self.velocities
+        self._wrap()
+        e_pot, forces, stress = self._compute_forces()
+        acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
+        self.velocities += 0.5 * self.dt * acc
+        self.velocities *= ~self._fix_mask
+        dQ += self._rescale()
+        return e_pot, forces, stress, acc, dQ
 
 
 # ============================================================================
