@@ -44,6 +44,7 @@ _RELAX_KEYS = {
     "dt_max",
     "cell_update_scheme",
     "lattice_constraints",
+    "cell_coordinates",
     "memory",
     "fix_volume",
     "timing",

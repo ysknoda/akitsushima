@@ -121,6 +121,14 @@ class GeometryOptimiser:
             fix = np.zeros((N, 3), dtype=bool); fix[0] = True
 
     fix_cell  : (3, 3) bool array -- True = frozen (relax_cell=True only).
+
+    Cell coordinates (relax_cell=True, ADR-0041)
+    ---------------------------------------------
+    cell_coordinates='strain' (default): the cell moves by a deformation
+        gradient F relative to the starting cell, so a symmetric crystal
+        keeps its space group whatever lattice vectors describe it.
+    cell_coordinates='lattice': the 9 raw lattice components (before
+        0.3.0a5); reproduces older results bit for bit.
     fix_volume: relax_cell=True only -- keep the cell volume at its
                 starting value and relax shape and ions (ADR-0018).  The
                 cell force is projected orthogonal to dV/dh (prop. to
@@ -202,6 +210,7 @@ class GeometryOptimiser:
         # -- cell relaxation control (relax_cell=True only) ----
         cell_update_scheme: str = "generalized_force",
         lattice_constraints: object | None = None,
+        cell_coordinates: str = "strain",
         # -- real-time output control ---------------------------
         flush_every_step: bool = True,
         fsync_every_step: bool = False,
@@ -304,14 +313,21 @@ class GeometryOptimiser:
         #   asymmetries into large cell-shape changes for strongly
         #   non-orthogonal (e.g. hexagonal, monoclinic) cells, since h^-T
         #   depends sensitively on the current cell shape.
-        # 'vasp': VASP-style direct update, f_cell = stress @ lattice
-        #   (no lattice-inverse factor). This mirrors the update formula
-        #   used in VASP's dyna.F (A_new = A_old + step*(stress @ A_old)),
-        #   which tends to be numerically gentler / less prone to
-        #   amplifying stress-tensor noise into large cell distortions,
-        #   at the cost of no longer being an exact energy gradient (it
-        #   is an empirically well-behaved update rule rather than a
-        #   strict dE/dh).
+        # 'vasp': VASP-style direct update, f_cell = lattice @ stress
+        #   (no lattice-inverse factor). VASP's dyna.F updates
+        #   A_new = A_old + step*(stress @ A_old) with the lattice
+        #   vectors as the COLUMNS of A; with rows (this class) that is
+        #   lattice @ stress.  Until ADR-0041 the code used
+        #   stress @ lattice, which is symmetric only for an isotropic
+        #   stress (AlN wurtzite + L-BFGS relaxed to Cmc2_1).  Not an
+        #   exact energy gradient.
+        #
+        # Both schemes act only with cell_coordinates='lattice'.  With
+        # the default strain coordinates (ADR-0041) the cell force is
+        # the exact gradient in those coordinates and the scheme has no
+        # effect; 'vasp' then warns (deprecated, removed at the next
+        # minor release).  The corrected 'vasp' step points, at F = I,
+        # the same way as the strain-coordinate gradient.
         cell_update_scheme = str(cell_update_scheme).lower()
         if cell_update_scheme not in ("generalized_force", "vasp"):
             raise ValueError(
@@ -319,6 +335,38 @@ class GeometryOptimiser:
                 f"'{cell_update_scheme}'. Choose 'generalized_force' or 'vasp'."
             )
         self.cell_update_scheme = cell_update_scheme
+
+        # -- Cell coordinates (relax_cell=True only, ADR-0041) -----------
+        # 'strain' (default): the cell is described by the deformation
+        #   gradient F relative to the cell at the start of the run, h0:
+        #   h = h0 F^T, ions r = r0 F^T, coordinates
+        #   x = [r0, s (F - I)] with s = |det h0|^(1/3).  The gradient
+        #   [-f F, -V sigma F^-T / s] is exact, and because sigma and F
+        #   are both invariant under the crystal's point group, a
+        #   symmetric cell stays symmetric for every optimiser.
+        # 'lattice': the 9 raw lattice components h are the coordinates
+        #   (the code before ADR-0041).  A step in raw-h space depends on
+        #   the basis: for a non-orthogonal cell an isotropic stress gives
+        #   an anisotropic step (fcc primitive 60 -> 67.8 deg in one test
+        #   step), and relaxed crystals keep ~1e-5 A of symmetry-breaking
+        #   strain inside pmax.
+        cell_coordinates = str(cell_coordinates).lower()
+        if cell_coordinates not in ("strain", "lattice"):
+            raise ValueError(
+                f"GeometryOptimiser: unknown cell_coordinates "
+                f"'{cell_coordinates}'. Choose 'strain' or 'lattice'."
+            )
+        self.cell_coordinates = cell_coordinates
+        if relax_cell and cell_coordinates == "strain" and cell_update_scheme == "vasp":
+            warnings.warn(
+                "GeometryOptimiser: cell_update_scheme='vasp' has no effect with "
+                "cell_coordinates='strain' (the default since ADR-0041) and is "
+                "deprecated; it will be removed at the next minor release.  Its "
+                "corrected step points the same way as the strain-coordinate "
+                "gradient.  Set cell_coordinates='lattice' to keep using it.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         # -- Lattice component constraints (QE cell_dofree-style, but ---
         # -- generalized to all 9 raw lattice-matrix components) --------
@@ -365,6 +413,12 @@ class GeometryOptimiser:
         # h_new h_old^-1, is 0.0083 deg (fire), 0.0027 deg (lbfgs) and
         # 0.0061 deg (sd), so the risk was overstated as well as
         # misattributed.
+        #
+        # With cell_coordinates='strain' (ADR-0041) the mask keeps this
+        # meaning: a frozen h[a, b] becomes the linear constraint
+        # sum_c h0[a, c] dF[b, c] = 0 on the deformation gradient, applied
+        # by projection, and the frozen entries are reset to their
+        # starting values after every update (bit for bit unchanged).
         self._lattice_constraints_mask = self._parse_lattice_constraints(
             lattice_constraints
         )
@@ -520,6 +574,9 @@ class GeometryOptimiser:
 
         # Rebuild generalised free-DoF mask whenever relax_cell changes
         self._rebuild_free_mask()
+        # Reference cell of the strain coordinates (ADR-0041); set again
+        # at the start of run() and on a checkpoint restart.
+        self._set_reference()
 
         # ADR-0008: with ESM electrostatics Lz places the vacuum / electrode
         # boundaries and the in-plane cell must stay rectangular, so only
@@ -567,11 +624,110 @@ class GeometryOptimiser:
     def _rebuild_free_mask(self) -> None:
         """Rebuild the flat free-DoF mask from fix_ions / fix_cell_mask."""
         if self.relax_cell:
-            self._free_mask = np.concatenate(
-                [~self._fix_ions, ~self._fix_cell_mask]
-            )  # (3N+9,)
+            # Strain coordinates handle the frozen cell components by
+            # projection (_strain_project), not by zeroing x entries:
+            # a frozen raw h component is not a single entry of F.
+            cell_free = (
+                ~self._fix_cell_mask
+                if self.cell_coordinates == "lattice"
+                else np.ones(9, dtype=bool)
+            )
+            self._free_mask = np.concatenate([~self._fix_ions, cell_free])  # (3N+9,)
         else:
             self._free_mask = ~self._fix_ions
+
+    # ------------------------------------------------------------------ #
+    #  Strain coordinates (ADR-0041)                                       #
+    # ------------------------------------------------------------------ #
+
+    def _set_reference(self) -> None:
+        """Make the current cell the reference h0 of the strain
+        coordinates (F = I) and build the constraint projector.
+
+        A frozen raw component h[a, b] (lattice_constraints / fix_cell)
+        is, with h = h0 F^T, the linear constraint
+        sum_c h0[a, c] dF[b, c] = 0 on vec(F) (row-major).  The rows
+        are constant for the run, so the projector P onto their null
+        space is fixed and consistent with L-BFGS / DIIS histories.
+        """
+        if not (self.relax_cell and self.cell_coordinates == "strain"):
+            return
+        self._h0 = self.lattice.copy()
+        self._h0_inv = np.linalg.inv(self._h0)
+        self._s_cell = abs(float(np.linalg.det(self._h0))) ** (1.0 / 3.0)
+        frozen = ~np.asarray(self._lattice_constraints_mask, dtype=bool) | self._fix_cell_mask
+        self._frozen_h = frozen.reshape(3, 3)
+        rows = []
+        for k in np.flatnonzero(frozen):
+            a, b = divmod(int(k), 3)
+            r = np.zeros((3, 3))
+            r[b, :] = self._h0[a, :]
+            rows.append(r.ravel())
+        if rows:
+            A = np.array(rows)
+            _, sv, vt = np.linalg.svd(A)
+            Q = vt[: int(np.sum(sv > 1e-12 * sv[0]))]
+            self._P_cell = np.eye(9) - Q.T @ Q
+        else:
+            self._P_cell = None
+
+    def _strain_F(self) -> np.ndarray:
+        """Deformation gradient of the current cell: h = h0 F^T."""
+        return (self._h0_inv @ self.lattice).T
+
+    def _strain_project(self, v: np.ndarray) -> np.ndarray:
+        """Project a 9-vector in F space onto the free subspace: the
+        constraint null space and, with fix_volume, orthogonal to the
+        volume normal d(det F)/dF = det F F^-T at the current cell."""
+        v = np.asarray(v, dtype=float)
+        if self._P_cell is not None:
+            v = self._P_cell @ v
+        if self.fix_volume:
+            F = self._strain_F()
+            n = (np.linalg.det(F) * np.linalg.inv(F).T).ravel()
+            if self._P_cell is not None:
+                n = self._P_cell @ n
+            nn = float(n @ n)
+            if nn > 0.0:
+                v = v - (v @ n) / nn * n
+        return v
+
+    def _rotation_basis(self) -> np.ndarray | None:
+        """Orthonormal basis (ndof x k) of the infinitesimal cell
+        rotations allowed by the constraints, in strain coordinates.
+
+        A rotation is x_cell += s vec(W F) with W antisymmetric (r0 does
+        not change).  E(QF) = E(F), so the gradient is orthogonal to these
+        directions; but a LINEAR move along W F is a rotation only to
+        first order -- (I + eps W)^T (I + eps W) = I - eps^2 W^2 -- so
+        their curvature is proportional to the stress and negative under
+        compression or tension (-0.92, -0.72, -0.72 eV for strained AlN).
+        RFO / P-RFO follow such modes, and the eps^2 stretch breaks the
+        crystal symmetry (AlN: P6_3mc -> P1).  _run_rfo removes them.
+        Only rotations compatible with the frozen components count.
+        """
+        if not (self.relax_cell and self.cell_coordinates == "strain"):
+            return None
+        F = self._strain_F()
+        R = []
+        for i, j in ((0, 1), (0, 2), (1, 2)):
+            W = np.zeros((3, 3))
+            W[i, j], W[j, i] = 1.0, -1.0
+            R.append((W @ F).ravel())
+        R = np.array(R).T  # (9, 3)
+        if self._P_cell is not None:
+            # rotation combinations c with (I - P) R c = 0
+            _, sv, vt = np.linalg.svd(R - self._P_cell @ R)
+            tol = 1e-10 * max(float(np.linalg.norm(R)), 1.0)
+            keep = vt[int(np.sum(sv > tol)):]
+            if keep.shape[0] == 0:
+                return None
+            R = R @ keep.T
+        n_ion = 3 * self.N
+        B = np.zeros((n_ion + 9, R.shape[1]))
+        B[n_ion:] = R
+        Q, _ = np.linalg.qr(B)
+        return Q
 
     @staticmethod
     def _parse_lattice_constraints(lattice_constraints) -> np.ndarray:
@@ -675,9 +831,22 @@ class GeometryOptimiser:
         """
         if not self.relax_cell:
             g = forces.ravel().copy()
+        elif self.cell_coordinates == "strain":
+            # ADR-0041: x = [r0, s (F - I)] with r = r0 F^T, h = h0 F^T.
+            #   -dE/dr0 = f F
+            #   -dE/dF  = f_h^T h0 = V sigma F^-T, where f_h = -dE/dh at
+            #             fixed fractional coordinates
+            #             (cell_force_from_stress, finite-difference
+            #             verified); then divided by s for x = s (F - I).
+            F = self._strain_F()
+            f_h = cell_force_from_stress(stress, self.lattice)
+            f_x = self._strain_project((f_h.T @ self._h0).ravel() / self._s_cell)
+            g = np.concatenate([(forces @ F).ravel(), f_x])
         else:
             if self.cell_update_scheme == "vasp":
-                f_cell_raw = stress @ self.lattice
+                # rows = lattice vectors: VASP's A + sigma A (columns)
+                # is h + h sigma.  stress @ lattice before ADR-0041.
+                f_cell_raw = self.lattice @ stress
             else:
                 f_cell_raw = cell_force_from_stress(stress, self.lattice)
 
@@ -714,6 +883,11 @@ class GeometryOptimiser:
         g_disp[~self._free_mask] = 0.0
 
         n_ion = self.N * 3
+        if self.relax_cell and self.cell_coordinates == "strain":
+            # A displacement in x = [r0, s (F - I)]; _set_x projects the
+            # cell block and carries the ions.
+            self._set_x(self._get_x() + g_disp)
+            return
         self.positions += g_disp[:n_ion].reshape(self.N, 3)
         if self.relax_cell:
             d_cell = g_disp[n_ion:].reshape(3, 3)
@@ -771,6 +945,12 @@ class GeometryOptimiser:
 
     def _get_x(self) -> np.ndarray:
         """Flatten current positions (+ cell) into a 1-D vector."""
+        if self.relax_cell and self.cell_coordinates == "strain":
+            F = self._strain_F()
+            r0 = self.positions @ np.linalg.inv(self.lattice) @ self._h0
+            return np.concatenate(
+                [r0.ravel(), self._s_cell * (F - np.eye(3)).ravel()]
+            )
         if self.relax_cell:
             return np.concatenate([self.positions.ravel(), self.lattice.ravel()])
         return self.positions.ravel().copy()
@@ -778,8 +958,10 @@ class GeometryOptimiser:
     def _save_state(self) -> tuple:
         """Snapshot the full geometric state for an exact later restore.
 
-        _set_x is NOT a pure function of its argument when relax_cell is
-        on: it reads self.lattice to convert the incoming Cartesian block
+        With cell_coordinates='strain' (the default, ADR-0041) _set_x is a
+        pure function of x and this pair is merely a cheap exact restore.
+        On the raw-lattice path (cell_coordinates='lattice') _set_x is NOT
+        a pure function of its argument when relax_cell is on: it reads self.lattice to convert the incoming Cartesian block
         to fractional coordinates before re-expanding it in the new cell.
         That affine coupling is deliberate and physically required --
         f_cell = -dE/dh is defined at FIXED FRACTIONAL coordinates (see
@@ -800,6 +982,22 @@ class GeometryOptimiser:
     def _set_x(self, x: np.ndarray) -> None:
         """Unpack a 1-D coordinate vector back into positions (+ cell)."""
         n_ion = self.N * 3
+        if self.relax_cell and self.cell_coordinates == "strain":
+            # A pure function of x (ADR-0041), apart from fix_volume's
+            # retraction and the reset of frozen components below.
+            xc = x[n_ion:]
+            if self._P_cell is not None:
+                xc = self._P_cell @ xc
+            F = np.eye(3) + xc.reshape(3, 3) / self._s_cell
+            lat = self._h0 @ F.T
+            # Frozen components are exactly their reference values (the
+            # projection leaves ~1e-16 of rounding).
+            lat[self._frozen_h] = self._h0[self._frozen_h]
+            frac = x[:n_ion].reshape(self.N, 3) @ self._h0_inv
+            self.lattice = lat
+            self.positions = frac @ lat
+            self._retract_volume()
+            return
         self.positions = x[:n_ion].reshape(self.N, 3).copy()
         if self.relax_cell:
             frac = self.positions @ np.linalg.inv(self.lattice)
@@ -873,6 +1071,9 @@ class GeometryOptimiser:
             done = self._ck_restore(checkpoint, total_max)
             if done is not None:
                 return done
+        # Strain coordinates are relative to the cell the run starts
+        # from: the restored one on a restart (ADR-0041 decision 11).
+        self._set_reference()
         dispatch = {
             "fire": self._run_fire,
             "lbfgs": self._run_lbfgs,
@@ -919,6 +1120,8 @@ class GeometryOptimiser:
         }
         if self.traj_format != "xdatcar":  # absent for xdatcar: older checkpoints match
             out["traj_format"] = self.traj_format
+        if self.relax_cell:  # ADR-0041; absent in older checkpoints = lattice
+            out["cell_coordinates"] = self.cell_coordinates
         out.update(self._ck_meta or {})
         return out
 
@@ -976,8 +1179,19 @@ class GeometryOptimiser:
         """Load ``path``; return the stored result if the run is complete,
         else None after setting up the continuation."""
         meta, arr = load_checkpoint(path)
-        check_settings(meta["settings"], self._ck_settings(),
-                       "GeometryOptimiser", path)
+        saved = dict(meta["settings"])
+        if saved.get("relax_cell") and "cell_coordinates" not in saved:
+            # Written before ADR-0041: raw lattice coordinates.
+            saved["cell_coordinates"] = "lattice"
+        if saved.get("cell_coordinates", self.cell_coordinates) != self.cell_coordinates and self.relax_cell:
+            raise ValueError(
+                f"GeometryOptimiser: cannot continue from {path}; it was written "
+                f"with cell_coordinates='{saved['cell_coordinates']}' and this run "
+                f"uses '{self.cell_coordinates}' (the default is 'strain' since "
+                "ADR-0041).  Set cell_coordinates: "
+                f"{saved['cell_coordinates']} to continue it, or start afresh "
+                "(restart: false in the CLI, or delete the checkpoint file).")
+        check_settings(saved, self._ck_settings(), "GeometryOptimiser", path)
         used = int(meta["used"])
         if self.save_best and meta.get("best_e") is not None:
             self._best_e = float(meta["best_e"])
@@ -1003,6 +1217,7 @@ class GeometryOptimiser:
                 "fix_cell": self._fix_cell_mask.reshape(3, 3).copy(),
                 "best_energy": self._best_e if self.save_best else None,
                 "best_step": self._best_step if self.save_best else None,
+                "cell_coordinates": self.cell_coordinates if self.relax_cell else None,
                 "timing": {},
             }
         if used >= total_max:
@@ -1054,6 +1269,8 @@ class GeometryOptimiser:
             header += f"  {'sigF_max(eV/A)':>14}"
         if self.verbose:
             print(f"\n  GeometryOptimiser [{self.method.upper()}]")
+            if self.relax_cell:
+                print(f"  Cell coordinates : {self.cell_coordinates}")
             print("\n" + header)
             print("  " + "-" * len(header))
 
@@ -1104,6 +1321,14 @@ class GeometryOptimiser:
             raise
 
         return log_fh, header, log_path
+
+    def _log_trailer(self) -> str:
+        """Lines after 'Converged:' in relax.log.  The cell coordinates
+        go here, not in a banner: the first line of relax.log is the
+        column header that readers skip."""
+        if not self.relax_cell:
+            return ""
+        return f"Cell coordinates: {self.cell_coordinates}\n"
 
     def _log_row(self, log_fh, step, e, forces, stress, extra, GPa=EV_ANG3_TO_GPA):
         step = step + self._step_offset
@@ -1304,6 +1529,7 @@ class GeometryOptimiser:
             "fix_cell": self._fix_cell_mask.reshape(3, 3).copy(),
             "best_energy": self._best_e if self.save_best else None,
             "best_step": self._best_step if self.save_best else None,
+            "cell_coordinates": self.cell_coordinates if self.relax_cell else None,
         }
 
     def _run_fire(self) -> dict:
@@ -1397,7 +1623,7 @@ class GeometryOptimiser:
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
             self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
-            log_fh.write(f"\nConverged: {converged}\n")
+            log_fh.write(f"\nConverged: {converged}\n" + self._log_trailer())
         finally:
             log_fh.close()
             self._xdatcar_fh.close()
@@ -1517,7 +1743,7 @@ class GeometryOptimiser:
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
             self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
-            log_fh.write(f"\nConverged: {converged}\n")
+            log_fh.write(f"\nConverged: {converged}\n" + self._log_trailer())
         finally:
             log_fh.close()
             self._xdatcar_fh.close()
@@ -1658,7 +1884,7 @@ class GeometryOptimiser:
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
             self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
-            log_fh.write(f"\nConverged: {converged}\n")
+            log_fh.write(f"\nConverged: {converged}\n" + self._log_trailer())
         finally:
             log_fh.close()
             self._xdatcar_fh.close()
@@ -1784,7 +2010,7 @@ class GeometryOptimiser:
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
             self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
-            log_fh.write(f"\nConverged: {converged}\n")
+            log_fh.write(f"\nConverged: {converged}\n" + self._log_trailer())
         finally:
             log_fh.close()
             self._xdatcar_fh.close()
@@ -1871,11 +2097,25 @@ class GeometryOptimiser:
                     break
                 e_prev = e
 
+                # Strain coordinates: take the cell rotations out of the
+                # model (ADR-0041, see _rotation_basis).  They get a
+                # positive curvature and no gradient, so the step has no
+                # component along them.
+                Hm, gm = H, g
+                Qr = self._rotation_basis()
+                if Qr is not None:
+                    Pm = np.eye(len(g)) - Qr @ Qr.T
+                    shift = 10.0 * max(1.0, float(np.max(np.abs(np.diag(H)))))
+                    Hm = Pm @ H @ Pm + shift * (Qr @ Qr.T)
+                    gm = Pm @ g
+
                 # RFO or P-RFO step direction
                 if self.uphill:
-                    p, _ = self._prfo_step(g, H)
+                    p, _ = self._prfo_step(gm, Hm)
                 else:
-                    p, _ = self._rfo_step(g, H)
+                    p, _ = self._rfo_step(gm, Hm)
+                if Qr is not None:
+                    p = Pm @ p
 
                 # Trust-region clamp
                 p_ion_norm = np.linalg.norm(p[: self.N * 3])
@@ -1972,7 +2212,7 @@ class GeometryOptimiser:
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
             self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
-            log_fh.write(f"\nConverged: {converged}\n")
+            log_fh.write(f"\nConverged: {converged}\n" + self._log_trailer())
         finally:
             log_fh.close()
             self._xdatcar_fh.close()
@@ -2064,7 +2304,7 @@ class GeometryOptimiser:
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
             self._rows_end = output_sizes({"log": log_fh, "traj": self._xdatcar_fh})
-            log_fh.write(f"\nConverged: {converged}\n")
+            log_fh.write(f"\nConverged: {converged}\n" + self._log_trailer())
         finally:
             log_fh.close()
             self._xdatcar_fh.close()

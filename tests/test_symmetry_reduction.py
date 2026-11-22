@@ -387,11 +387,10 @@ def test_cli_templates_run_with_symmetry(key, tmp_path, monkeypatch):
     _merge(cfg, _SHRINK[key])
     sec = cfg[_COMMAND[key]]
     (sec["slack_debye"] if key == "kappa" else sec)["symmetry"] = True
-    if key in ("qha", "gruneisen"):
-        # Their variable-cell relaxations leave non-uniform displacements of
-        # about 1e-5 A (within fmax), so symprec 1e-5 finds only R-3m
-        # (ADR-0040 result); 1e-4 recovers Fd-3m.
-        sec["symprec"] = 1e-4
+    # qha and gruneisen relax each volume with relax_cell first.  Before
+    # ADR-0041 (raw lattice coordinates) that left ~1e-5 A of
+    # symmetry-breaking strain and the default symprec 1e-5 found only
+    # R-3m; with strain coordinates the default finds Fd-3m.
     monkeypatch.chdir(tmp_path)
     _prepare_inputs(key, cfg, tmp_path)
     (tmp_path / f"{key}.yaml").write_text(yaml.safe_dump(cfg))

@@ -754,3 +754,19 @@ the phonon displacements and the elastic strains only.  It is designed
 in ADR-0040 (opt-in `symmetry: true`, own implementation on spglib
 operations, phonopy as a test reference, version 0.3.0a4).  The order of
 the remaining tier B items is unchanged.
+
+
+## Addendum 7: strain cell coordinates, an exception to decision 5 (2026-11-22, 0.3.0a5)
+
+Decision 5 keeps the default path within 1e-10.  ADR-0041 makes an
+exception, agreed in its grilling (Q1).  `relax_cell` now uses strain
+coordinates by default, because the raw lattice coordinates broke the
+symmetry of non-orthogonal crystals by about 1e-5 A.
+
+- Default variable-cell results move within the convergence
+  tolerances.  For example, total-energy differences at fmax 1e-3 /
+  pmax 1e-2 were 1e-7 to 6e-6 eV per 36-54-atom cell.
+- `cell_coordinates: lattice` reproduces the previous default bit for
+  bit.  The only exception is the corrected `vasp` scheme.
+
+This is not a tier B item; it is a follow-up finding of item 5.

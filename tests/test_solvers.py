@@ -136,7 +136,8 @@ def test_generalised_force_cell_matches_finite_difference_dEdh(small_cell_ok):
     atom_types = al["atom_types"]
 
     go = GeometryOptimiser(lattice, positions, atom_types,
-                           force_fn=fn, relax_cell=True, verbose=False)
+                           force_fn=fn, relax_cell=True, verbose=False,
+                           cell_coordinates="lattice")  # raw-h gradient (ADR-0041)
     _, forces, stress = fn(lattice, positions, atom_types)
 
     g = go._generalised_force(forces, stress)
@@ -164,7 +165,8 @@ def test_generalised_force_cell_differs_from_known_wrong_orderings():
                                         [0.02, 0.03, 1.0]])  # shear
 
     go = GeometryOptimiser(lattice, al["positions"], al["atom_types"],
-                           force_fn=fn, relax_cell=True, verbose=False)
+                           force_fn=fn, relax_cell=True, verbose=False,
+                           cell_coordinates="lattice")  # raw-h gradient (ADR-0041)
     stress = np.array([[0.01, 0.004, -0.002],
                        [0.004, -0.02, 0.001],
                        [-0.002, 0.001, 0.03]])
@@ -254,12 +256,16 @@ def test_set_x_round_trips_only_when_the_cell_does_not_move():
     optimiser that keeps its own `x` instead of re-reading the state
     therefore drifts out of step with the geometry, by an amount
     proportional to the cell step.
+
+    This is the raw-lattice path (cell_coordinates='lattice').  In the
+    default strain coordinates (ADR-0041) _set_x is a pure function of x
+    and the round trip is exact; see tests/test_strain_cell.py.
     """
     lattice, positions, types = _perturbed_si_supercell(1.0)
     go = GeometryOptimiser(lattice, positions, types,
                            force_fn=_sw_si_force_fn(), r_cut=_SW_SI_RCUT,
                            relax_cell=True, max_steps=0, method="fire",
-                           verbose=False,
+                           verbose=False, cell_coordinates="lattice",
                            output_dir="/tmp/akitsushima_test_setx")
     go.run()
     x = go._get_x()
@@ -310,6 +316,7 @@ def test_rfo_variable_cell_rereads_its_state_vector_instead_of_carrying_it():
                                relax_cell=True, check_forces=True,
                                check_stress=True, fmax=0.01, pmax=0.1,
                                max_steps=12, method="rfo", verbose=False,
+                               cell_coordinates="lattice",  # the non-pure _set_x
                                output_dir="/tmp/akitsushima_test_rfo_x")
         if inject_defect:
             armed, last = [False], [None]
@@ -394,6 +401,7 @@ def test_vasp_cell_scheme_drives_volume_in_correct_physical_direction():
         go = GeometryOptimiser(lattice_s, positions_s, al["atom_types"],
                                force_fn=fn, relax_cell=True,
                                cell_update_scheme="vasp", fix_atoms=fix_all,
+                               cell_coordinates="lattice",  # vasp acts only here
                                method="fire", max_steps=1, verbose=False,
                                output_dir=f"/tmp/akitsushima_test_vasp_scheme_{scale}")
         _, forces, stress = go._get_forces_and_stress()
