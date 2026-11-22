@@ -51,6 +51,8 @@ from collections.abc import Callable
 
 import numpy as np
 
+from ..fitting.force_fn import call_force_fn
+
 from ..utils.jit import _HAS_NUMBA
 from ..utils.mpi import _mpi_allreduce_sum, _mpi_domain_split, _mpi_rank, local_only
 from .phonon import PhononCalculator
@@ -399,7 +401,8 @@ class BTECalculator:
             pos = ph._pos_sc.copy()
             pos[i0] += d
             pos[j, b] += s * u
-            _, F, _ = self.force_fn(ph.lattice_sc, pos, ph._types_sc)
+            _, F, _ = call_force_fn(self.force_fn, ph.lattice_sc, pos, ph._types_sc,
+                                    need_stress=False)
             return np.asarray(F, dtype=float)
 
         i_start, i_end = _mpi_domain_split(n_calls)

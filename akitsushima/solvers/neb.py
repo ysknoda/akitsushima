@@ -12,6 +12,8 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
+from ..fitting.force_fn import call_force_fn
+
 from ..engine.neighborlist import NeighbourList, neighbour_list_for
 from ..io.poscar import write_poscar
 from ..utils.mpi import _mpi_allreduce_sum, _mpi_domain_split, _mpi_rank, local_only
@@ -190,8 +192,10 @@ class NEBChain:
         all_pos = self.images   # length n_images + 2
 
         # Step 1: endpoint energies (forces not needed)
-        e0, _, _ = self.force_fn(self.lattice, all_pos[0],  self.atom_types)
-        en, _, _ = self.force_fn(self.lattice, all_pos[-1], self.atom_types)
+        e0, _, _ = call_force_fn(self.force_fn, self.lattice, all_pos[0],
+                                 self.atom_types, need_stress=False)
+        en, _, _ = call_force_fn(self.force_fn, self.lattice, all_pos[-1],
+                                 self.atom_types, need_stress=False)
         self.energies[0]  = float(e0)
         self.energies[-1] = float(en)
 
@@ -227,9 +231,9 @@ class NEBChain:
             for k in range(i_start, i_end):
                 nl = self._nls[k]
                 nl.check_and_rebuild(self.lattice, all_pos[k + 1])
-                e, f, _ = self.force_fn(
-                    self.lattice, all_pos[k + 1], self.atom_types,
-                    neigh_list=nl)
+                e, f, _ = call_force_fn(
+                    self.force_fn, self.lattice, all_pos[k + 1], self.atom_types,
+                    need_stress=False, neigh_list=nl)
                 local_e[k] = float(e)
                 local_f[k] = f
 

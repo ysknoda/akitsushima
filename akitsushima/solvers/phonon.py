@@ -6,6 +6,8 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 
+from ..fitting.force_fn import call_force_fn
+
 from ..constants import ATOMIC_MASS, FREQ_RAD_FS_TO_WAVENUMBER_CM
 from ..utils.jit import _HAS_NUMBA, _numba_njit
 from ..utils.mpi import (
@@ -425,9 +427,11 @@ class PhononCalculator:
             """
             pos = self._pos_sc.copy()
             pos[j, b] += delta
-            _, F_p, _ = self.force_fn(self.lattice_sc, pos, self._types_sc)
+            _, F_p, _ = call_force_fn(self.force_fn, self.lattice_sc, pos,
+                                      self._types_sc, need_stress=False)
             pos[j, b] -= 2.0 * delta
-            _, F_m, _ = self.force_fn(self.lattice_sc, pos, self._types_sc)
+            _, F_m, _ = call_force_fn(self.force_fn, self.lattice_sc, pos,
+                                      self._types_sc, need_stress=False)
             return -(np.asarray(F_p) - np.asarray(F_m)) / (2.0 * delta)
 
         # MPI: split the flat list of (j, b) displacement tasks across
@@ -608,7 +612,8 @@ class PhononCalculator:
             j, d = tasks[t]
             pos = self._pos_sc.copy()
             pos[j] += d
-            _, F, _ = self.force_fn(self.lattice_sc, pos, self._types_sc)
+            _, F, _ = call_force_fn(self.force_fn, self.lattice_sc, pos,
+                                    self._types_sc, need_stress=False)
             return np.asarray(F, dtype=float)
 
         with local_only():

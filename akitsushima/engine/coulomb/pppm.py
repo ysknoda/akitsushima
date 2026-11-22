@@ -537,7 +537,8 @@ class PPPMSolver:
     def compute(self,
                 positions: np.ndarray,
                 charges: np.ndarray,
-                neigh_list: Optional[object] = None
+                neigh_list: Optional[object] = None,
+                need_stress: bool = True,
                 ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Compute total Coulomb energy, forces, and stress via PPPM.
@@ -574,16 +575,17 @@ class PPPMSolver:
         # 4. Mesh forces via back-interpolation  O(M^3logM + N.p^3)
         f_mesh = self._mesh_forces(positions, charges, rho_k)
 
-        # 5. Mesh stress (reciprocal-space virial)
-        s_mesh = self._mesh_stress(rho_k)
-
         # 6. Corrections
         e_self = self._self_energy(charges, alpha)
         e_charge = self._charged_system(charges, alpha, self.volume)
+        energy = e_real + e_mesh - e_self + e_charge
 
-        return (e_real + e_mesh - e_self + e_charge,
-                f_real + f_mesh,
-                s_real + s_mesh)
+        # 5. Mesh stress (reciprocal-space virial): only when asked for
+        # (ADR-0043; 28 % of a 3600-atom ZnO call).
+        if not need_stress:
+            return energy, f_real + f_mesh, None
+        s_mesh = self._mesh_stress(rho_k)
+        return energy, f_real + f_mesh, s_real + s_mesh
 
 
 def _pppm_alpha_from_accuracy(r_cut: float, accuracy: float = 1e-5) -> float:

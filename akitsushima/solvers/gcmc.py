@@ -8,6 +8,8 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
+from ..fitting.force_fn import call_force_fn
+
 from ..constants import ATOMIC_MASS, EV_ANG_TO_AMU_ANG_FS2, K_B
 from ..engine.neighborlist import NeighbourList, neighbour_list_for
 from ..fitting.mlip_engine import check_mlip_for_solver
@@ -353,7 +355,8 @@ class GCMCMDSimulation(_BaseMDSimulation):
         if self.N == 0:
             return 0.0
         self._nl.check_and_rebuild(self.lattice, self.positions)
-        e, _, _ = self._force_fn(self.lattice, self.positions, self.atom_types)
+        e, _, _ = call_force_fn(self._force_fn, self.lattice, self.positions,
+                                self.atom_types, need_stress=False)
         return float(e)
 
     def _get_forces(self) -> Tuple[float, np.ndarray, np.ndarray]:
@@ -512,7 +515,8 @@ class GCMCMDSimulation(_BaseMDSimulation):
         active_sp = getattr(self, '_active_sp', self.species)
         pos_ext   = np.vstack([self.positions, r_trial[None, :]])
         types_ext = self.atom_types + [active_sp]
-        e, _, _   = self._force_fn(self.lattice, pos_ext, types_ext)
+        e, _, _   = call_force_fn(self._force_fn, self.lattice, pos_ext, types_ext,
+                                  need_stress=False)
         return float(e) - self._get_energy()
 
     def _local_energy_of_atom(self, idx: int) -> float:
@@ -544,7 +548,8 @@ class GCMCMDSimulation(_BaseMDSimulation):
             return e_full   # removing the only atom leaves an empty (E=0) system
         pos_wo   = np.delete(self.positions, idx, axis=0)
         types_wo = self.atom_types[:idx] + self.atom_types[idx + 1:]
-        e_wo, _, _ = self._force_fn(self.lattice, pos_wo, types_wo)
+        e_wo, _, _ = call_force_fn(self._force_fn, self.lattice, pos_wo, types_wo,
+                                   need_stress=False)
         return e_full - float(e_wo)
 
     def _delta_U_insertion(self, r_new: np.ndarray) -> float:
@@ -1160,7 +1165,8 @@ class CFCMCSimulation(GCMCMDSimulation):
     def _eval(self, pos: np.ndarray, types: list, forces: bool = False):
         if len(types) == 0:
             return (0.0, np.empty((0, 3))) if forces else 0.0
-        e, f, _ = self._force_fn(self.lattice, pos, types)
+        e, f, _ = call_force_fn(self._force_fn, self.lattice, pos, types,
+                                need_stress=False)
         return (float(e), np.asarray(f)) if forces else float(e)
 
     def _refresh_energies(self, forces: bool = False):

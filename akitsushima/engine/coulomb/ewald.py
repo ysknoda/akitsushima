@@ -163,7 +163,8 @@ def ewald_sum(lattice: np.ndarray,
               alpha: Optional[float] = None,
               k_max: Optional[int] = None,
               r_cut: float = 12.0,
-              accuracy: float = 1e-8) -> Tuple[float, np.ndarray, np.ndarray]:
+              accuracy: float = 1e-8,
+              need_stress: bool = True) -> Tuple[float, np.ndarray, np.ndarray]:
     """
     Ewald summation -- fully vectorised (no Python loops over atoms or k).
 
@@ -363,6 +364,9 @@ def ewald_sum(lattice: np.ndarray,
 
         # Stress: sigma_ab = (1/V) sum_k coeff[k] * [delta_ab - w[k] * khat_a khat_b],
         # w[k] = 2 + k^2/(2 alpha^2),  khat = k / |k|  -- see bug-fix note 3 above.
+        # Skipped with need_stress=False (ADR-0043).
+        if not need_stress:
+            continue
         coeff = 0.5 * pref * sk2                                     # (Nk,)
         khat = kvecs / np.sqrt(k2[:, None])                          # (Nk, 3)
         weight = coeff * (2.0 + k2 / (2.0 * alpha**2))                # (Nk,)
@@ -376,6 +380,8 @@ def ewald_sum(lattice: np.ndarray,
     energy += recip_energy
     forces += recip_forces
     stress += recip_stress / volume   # divide remaining (real-space already divided)
+    if not need_stress:
+        stress = None
 
     # =========================================================================
     # Self-energy and charged-system corrections

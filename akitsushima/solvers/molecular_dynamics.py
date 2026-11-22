@@ -14,6 +14,8 @@ import warnings
 
 import numpy as np
 
+from ..fitting.force_fn import call_force_fn
+
 from ..constants import ATOMIC_MASS, EV_ANG3_TO_GPA, EV_ANG_TO_AMU_ANG_FS2, K_B
 from ..engine.neighborlist import NeighbourList, neighbour_list_for, wrap_positions_into_cell
 from ..fitting.force_fn import _resolve_force_fn
@@ -69,6 +71,16 @@ class _BaseMDSimulation:
         :class:`NVTSimulation` and :class:`NPTSimulation` (bug-fix note
         S10, see docstring below).
     """
+
+    # ADR-0043: False on steps whose stress nobody reads (no thermo row
+    # with a pressure, no trajectory frame); the fixed-cell force call
+    # then passes need_stress=False.  NPT never sets it.
+    _want_stress = True
+
+    def _stress_due(self, step: int, thermo_has_pressure: bool) -> bool:
+        is_prod = step >= self.equil_steps
+        return bool((is_prod and step % self.traj_every == 0)
+                    or (thermo_has_pressure and step % self.thermo_every == 0))
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -792,11 +804,15 @@ class NVTSimulation(_BaseMDSimulation):
         return ek + e_pot + t_nhc + v_nhc
 
     def _compute_forces(self) -> Tuple[float, np.ndarray, np.ndarray]:
-        """Evaluate energy, forces, and stress via self._force_fn."""
+        """Evaluate energy, forces, and stress via self._force_fn.
+
+        ``self._want_stress`` False (set by the step loop on steps that
+        write neither a thermo row nor a trajectory frame) asks the force
+        function to skip the stress (ADR-0043); the stress is then None."""
         self._nl.check_and_rebuild(self.lattice, self.positions)
-        return self._force_fn(
-            self.lattice, self.positions, self.atom_types,
-            neigh_list=self._nl)
+        return call_force_fn(
+            self._force_fn, self.lattice, self.positions, self.atom_types,
+            need_stress=self._want_stress, neigh_list=self._nl)
 
     def _write_trajectory_frame(self, fh, step, e_pot, forces, stress) -> None:
         """Append one configuration to the open trajectory file (fixed
@@ -922,7 +938,11 @@ class NVTSimulation(_BaseMDSimulation):
                 self.positions  = frac @ self.lattice
 
                 # --- Force evaluation at new positions -------------------
+                # The NVT thermo row has no pressure: the stress is read
+                # only on trajectory steps (ADR-0043).
+                self._want_stress = self._stress_due(step, False)
                 e_pot, forces, stress = self._compute_forces()
+                self._want_stress = True
                 acc = (forces * EV_ANG_TO_AMU_ANG_FS2
                        / self.masses[:, None])
 
@@ -1216,7 +1236,9 @@ class _StochasticNVTSimulation(NVTSimulation):
             for step in range(start, total_steps):
                 self._tc.start("step")  # timing
                 t_ps = step * self.dt * 1e-3
+                self._want_stress = self._stress_due(step, False)  # ADR-0043
                 e_pot, forces, stress, acc, dQ = self._step(acc)
+                self._want_stress = True
                 Q += dQ
 
                 e_kin  = self._kinetic_energy()
@@ -1631,10 +1653,11 @@ class NVESimulation(_BaseMDSimulation):
         return 2.0 * self._kinetic_energy() / (self.n_dof * K_B)
 
     def _compute_forces(self) -> Tuple[float, np.ndarray, np.ndarray]:
+        # need_stress as in NVTSimulation._compute_forces (ADR-0043)
         self._nl.check_and_rebuild(self.lattice, self.positions)
-        return self._force_fn(
-            self.lattice, self.positions, self.atom_types,
-            neigh_list=self._nl)
+        return call_force_fn(
+            self._force_fn, self.lattice, self.positions, self.atom_types,
+            need_stress=self._want_stress, neigh_list=self._nl)
 
     def _write_trajectory_frame(self, fh, step, e_pot, forces, stress) -> None:
         """Append one configuration to the open trajectory file (fixed cell)."""
@@ -1744,8 +1767,10 @@ class NVESimulation(_BaseMDSimulation):
                 frac -= np.floor(frac)
                 frac[frac >= 1.0] = 0.0
                 self.positions   = frac @ self.lattice
-                # new forces
+                # new forces; the NVE thermo row shows the pressure
+                self._want_stress = self._stress_due(step, True)  # ADR-0043
                 e_pot, forces, stress = self._compute_forces()
+                self._want_stress = True
                 acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
                 # v half-step
                 self.velocities += 0.5 * self.dt * acc

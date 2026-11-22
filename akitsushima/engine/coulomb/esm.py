@@ -305,6 +305,7 @@ class ESMCalculator:
                  lattice: np.ndarray,
                  positions: np.ndarray,
                  atom_types: list,
+                 need_stress: bool = True,
                  ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Compute ESM energy, forces, and stress.
@@ -321,6 +322,8 @@ class ESMCalculator:
         forces : (N,3) ndarray [eV/A]
         stress : (3,3) ndarray [eV/A^3]  -- xy components physically meaningful;
                                           z components set to 0 for BC1.
+                 None with ``need_stress=False`` (ADR-0043): the stress
+                 was 69 % of a bc2 call at 96x96x384.
         """
         lattice = np.asarray(lattice, dtype=float)
         positions = self._to_esm_frame(lattice, positions)
@@ -346,7 +349,7 @@ class ESMCalculator:
         # We always use the per-atom charges array resolved at init unless
         # update_geometry is called explicitly.
 
-        return self._compute_esm(lattice, positions)
+        return self._compute_esm(lattice, positions, need_stress)
 
     def _to_esm_frame(self, lattice, positions):
         """Map z into [-Lz/2, Lz/2) (ADR-0008, decision 3).
@@ -413,6 +416,7 @@ class ESMCalculator:
     def _compute_esm(self,
                       lattice: np.ndarray,
                       positions: np.ndarray,
+                      need_stress: bool = True,
                       ) -> Tuple[float, np.ndarray, np.ndarray]:
         """Main ESM pipeline: density -> potential -> energy/forces/stress."""
 
@@ -449,6 +453,8 @@ class ESMCalculator:
                                        self._GX, self._GY)
 
         # -- 6. Stress [eV/A^3] --------------------------------
+        if not need_stress:
+            return float(energy), forces, None
         stress = self._compute_stress(rho_Gz, V_Gz, Gpar,
                                        self._GX, self._GY,
                                        lattice, dz)
@@ -1381,14 +1387,15 @@ class ESMCoulomb:
                                       charges=np.asarray(q, float))
         return self._esm
 
-    def compute(self, lattice, positions, atom_types, q):
-        """E [eV], F (N, 3) [eV/A], S (3, 3) [eV/A^3] (compressive-positive)."""
+    def compute(self, lattice, positions, atom_types, q, need_stress=True):
+        """E [eV], F (N, 3) [eV/A], S (3, 3) [eV/A^3] (compressive-positive);
+        S is None with ``need_stress=False`` (ADR-0043)."""
         lattice = np.asarray(lattice, float)
         q = np.asarray(q, float)
         esm = self._calc(lattice, positions, atom_types, q)
-        E, F, S = esm(lattice, positions, atom_types)
+        E, F, S = esm(lattice, positions, atom_types, need_stress=need_stress)
         e2, f2, s2 = self._real_space(lattice, esm._to_esm_frame(lattice, positions), q)
-        return E + e2, F + f2, S + s2
+        return E + e2, F + f2, (S + s2 if need_stress else None)
 
     def _real_space(self, lattice, pos, q):
         from scipy.special import erfc
