@@ -42,6 +42,7 @@ _COMMAND = {
     "dielectric": "dielectric",
     "piezo": "piezo",
     "nemd": "nemd",
+    "bte": "bte",
     "mlip": "mlip",
     "dataset": "dataset",
     "anneal": "anneal",
@@ -69,6 +70,7 @@ _SHRINK = {
     "dielectric": {},
     "piezo": {},
     "nemd": {"nemd": {"equil_steps": 20, "n_steps": 120}},
+    "bte": {"bte": {"mesh": 3}},
     "mlip": {},
     "dataset": {},
     "build": {},
@@ -205,6 +207,8 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         _write_si(tmp_path / st["poscar"])
     elif key in ("gruneisen", "qha"):
         _write_si_primitive(tmp_path / st["poscar"])
+    elif key == "bte":
+        _write_si(tmp_path / st["poscar"], n=1)
     elif key == "nemd":
         from test_nemd import write_fcc_ar
         write_fcc_ar(tmp_path / st["poscar"])

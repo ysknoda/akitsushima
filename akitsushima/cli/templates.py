@@ -1309,6 +1309,67 @@ anneal:
     max_displacement: 0.2          # A
 """
 
+_YAML_BTE_DEFAULT = """\
+# akitsushima  --  Lattice thermal conductivity, RTA (ADR-0042)
+# Usage: akitsushima bte bte.yaml
+# POSCAR: the unit cell (here the 8-atom conventional diamond cell).  fc2 and
+# fc3 come from finite displacements on diagonal supercells of it; gamma is
+# the three-phonon linewidth (Togo et al., PRB 91, 094306 (2015)), kappa
+# = 1/(N V) sum C v v tau with tau = 1 / (4 pi gamma).
+
+structure:
+  poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+  # format: auto      # poscar | extxyz | lammps-data | cif; index: -1 (frame)
+
+potential:
+  # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
+  type: Tersoff
+  species: [Si]
+  params:
+    A:       1830.8
+    B:       471.18
+    lambda1: 2.4799
+    lambda2: 1.7322
+    lambda3: 0.0
+    beta:    1.1e-6
+    n:       0.78734
+    c:       100390.0
+    d:       16.217
+    h:       -0.59825
+    R:       2.85
+    D:       0.15
+
+bte:
+  output_dir:   ./bte_output
+  supercell:    [2, 2, 2]      # fc3 supercell (64 atoms for this POSCAR)
+  supercell_fc2: null          # null = supercell; larger is usual
+  ifc_path:     null           # reuse fc2 from the phonon command's ifc.npz
+  delta:        0.03           # A, fc3 displacements (both steps)
+  delta_fc2:    0.01           # A, fc2 displacements
+  cutoff_pair:  null           # A, skip second displacements farther away
+  symmetry:     true           # spglib reduction (pip install akitsushima[symmetry])
+  symprec:      1.0e-5
+  sym_fc3:      true           # index-permutation symmetry + acoustic sum rule
+  mesh:         [11, 11, 11]   # Gamma-centred q mesh; converge it
+  sigma:        0.1            # THz, Gaussian width of the delta function
+  temperatures: [100, 200, 300, 400, 500]
+  occupation:   quantum        # quantum (Bose-Einstein) | classical (kT / hf)
+  n_jobs:       1              # threads for the displaced force calls
+  # -- optional scattering (off when absent) ---------------------------
+  # mass_variance: {Si: 2.01e-4}   # Tamura g per species
+  # isotopes:                      # or g from the isotopic composition:
+  #   Si: {27.97693: 0.92223, 28.97649: 0.04685, 29.97377: 0.03092}
+  #   # IUPAC representative abundances and AME masses; gives g = 2.01e-4,
+  #   # the value of Tamura, PRB 27, 858 (1983)
+  # alloy: {host: Ge, Sn: 0.08}    # virtual crystal: host mass averaged,
+  #                                # g from the composition; force-constant
+  #                                # disorder is ignored (ADR-0042)
+  # boundary_length_um: 1.0        # Casimir length: 1 / tau_b = |v| / L
+  # born: ...                      # Born charges + eps_inf for NAC (polar)
+  verbose:      true
+"""
+
 _YAML_DATASET_DEFAULT = """\
 # akitsushima dataset -- fit / mlip training set from VASP runs (ADR-0021)
 #
@@ -1461,6 +1522,7 @@ _DUMP_MAP = {
     "dielectric": _YAML_DIELECTRIC_DEFAULT,
     "piezo":  _YAML_PIEZO_DEFAULT,
     "nemd":   _YAML_NEMD_DEFAULT,
+    "bte":    _YAML_BTE_DEFAULT,
     "mlip":   _YAML_ELM_DEFAULT,
     "dataset": _YAML_DATASET_DEFAULT,
     "anneal": _YAML_ANNEAL_DEFAULT,
