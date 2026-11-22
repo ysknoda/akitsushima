@@ -434,7 +434,10 @@ class NEBOptimiser:
                 row = (f"{step:6d}  {Ea:10.4f}  "
                        f"{f_max:12.6f}  {ci:4d}  {dt:8.4f}")
                 log.write(row + "\n")
-                self._tc.lap("step")  # timing
+                # The step timer is stopped on break and at the end of the
+                # body so it covers chain.evaluate(); it used to lap here,
+                # before the evaluation, and the restarted timer was
+                # overwritten by the next start() (see GeometryOptimiser._run_fire).
                 if self.verbose and step % self.print_every == 0:
                     print(f"  {row}")
 
@@ -446,6 +449,7 @@ class NEBOptimiser:
                         print(f"  Fmax = {f_max:.4e} eV/A  "
                               f"Ea = {Ea:.4f} eV  "
                               f"Ea' = {chain.reverse_barrier:.4f} eV")
+                    self._tc.stop("step")  # timing
                     converged = True
                     break
 
@@ -514,6 +518,7 @@ class NEBOptimiser:
                 neb_f  = chain.evaluate()
                 F_flat = neb_f.reshape(ndof)
                 v     += 0.5 * dt * F_flat
+                self._tc.stop("step")  # timing (covers chain.evaluate)
 
             log.write(f"\nConverged: {converged}\n")
 

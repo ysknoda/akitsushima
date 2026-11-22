@@ -1361,9 +1361,15 @@ class GeometryOptimiser:
                     alpha = self._ALPHA_START
 
                 fmax_v, _ = self._log_row(log_fh, step, e, forces, stress, f"{dt:.4f}")
-                self._tc.lap("step")  # timing
+                # The step timer is stopped on the break below and at the
+                # end of the body, so it covers the force evaluation.  It
+                # used to lap here, before the force call, and the
+                # restarted timer was overwritten by the next start(): the
+                # reported "Mean / step" was 1.2 ms on a 512-atom GeSn run
+                # whose real steps took 78 ms (Total time / Steps).
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
+                    self._tc.stop("step")  # timing
                     converged = True
                     break
                 e_prev = e
@@ -1386,6 +1392,7 @@ class GeometryOptimiser:
                 e, forces, stress = self._get_forces_and_stress()
                 g = self._generalised_force(forces, stress)
                 v += 0.5 * dt * g
+                self._tc.stop("step")  # timing (covers the force evaluation)
 
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
@@ -1854,9 +1861,12 @@ class GeometryOptimiser:
                 fmax_v, _ = self._log_row(
                     log_fh, step, e, forces, stress, f"{trust:.4f}"
                 )
-                self._tc.lap("step")  # timing
+                # Stopped on break, on the rejection continue and at the end
+                # of the body, so the trial evaluation is timed (it used to
+                # lap here, before it; see _run_fire).
                 self._update_best(e, step)
                 if self._check_converged(fmax_v, stress, e, e_prev):
+                    self._tc.stop("step")  # timing
                     converged = True
                     break
                 e_prev = e
@@ -1935,6 +1945,7 @@ class GeometryOptimiser:
                     # reported energy describing different structures.
                     self._restore_state(state_accepted)
                     trust *= 0.5
+                    self._tc.stop("step")  # timing
                     continue
 
                 # Hessian update
@@ -1956,6 +1967,7 @@ class GeometryOptimiser:
                         H = H - np.outer(Hs, Hs) / sHs + np.outer(y_vec, y_vec) / sy
 
                 x_prev, g_prev = x.copy(), g.copy()
+                self._tc.stop("step")  # timing (covers the trial evaluation)
 
             # file lengths before the summary line: a continued run
             # (raised max_steps) appends its rows here (ADR-0031)
