@@ -18,6 +18,7 @@ from .cmd_md import cmd_md
 from .cmd_mlip import cmd_mlip
 from .cmd_neb import cmd_neb
 from .cmd_nemd import cmd_nemd
+from .cmd_bte import cmd_bte
 from .cmd_osmc import cmd_osmc
 from .cmd_phonon import cmd_phonon
 from .cmd_piezo import cmd_piezo
@@ -50,6 +51,7 @@ _DISPATCH = {
     "dielectric": cmd_dielectric,
     "piezo":   cmd_piezo,
     "nemd":    cmd_nemd,
+    "bte":     cmd_bte,
     "mlip":    cmd_mlip,
     "fit":     cmd_fit,
     "dataset": cmd_dataset,
@@ -84,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  dielectric Static dielectric tensor, LO-TO, IR modes (Born charges)\n"
             "  piezo     Relaxed-ion piezoelectric e, d and coupling k\n"
             "  nemd      Non-equilibrium MD: T profile, local heat flux, Kapitza\n"
+            "  bte       Lattice thermal conductivity from fc3 (RTA, phonon BTE)\n"
             "  mlip      Fit a machine-learning potential (ELM/QELM/NN/linear)\n"
             "  fit       Fit a classical potential "
             "(LJ/Morse/BornMayer/Buckingham/SW/Tersoff)\n"
@@ -128,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("dielectric", "Static dielectric tensor, LO-TO splitting, IR modes")
     _add("piezo",  "Relaxed-ion piezoelectric tensors e, d and coupling k")
     _add("nemd",   "Non-equilibrium MD with Langevin heat baths (kappa, Kapitza)")
+    _add("bte",    "Lattice thermal conductivity from third-order force constants (RTA)")
     _add("mlip",   "Fit a machine-learning potential (ELM/QELM/NN/linear)")
     _add("dataset", "Training set (fit / mlip layout) from VASP vasprun.xml / OUTCAR")
     _add("anneal", "Global structure search: MD-quench annealing or basin hopping")

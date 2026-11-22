@@ -167,6 +167,15 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.3.0a6 (ADR-0042): `akitsushima bte` computes the lattice thermal
+> conductivity from third-order force constants in the relaxation-time
+> approximation, for any akitsushima potential (MLIPs included): fc3 by
+> two-step central differences reduced by the space group, three-phonon
+> linewidths with a Gaussian delta, optional isotope / alloy (Tamura) and
+> boundary scattering, quantum or classical occupation, NAC for polar
+> crystals.  Checked against phono3py with the same force constants
+> (kappa and linewidths to ~1e-5 on Si and AlN).
+>
 > 0.3.0a5 (ADR-0041): variable-cell relaxation (`relax_cell: true`) now
 > moves the cell by a deformation gradient (`cell_coordinates: strain`,
 > the new default), so a symmetric crystal keeps its space group: Si (fcc
