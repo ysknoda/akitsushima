@@ -169,27 +169,53 @@ class PPPMSolver:
         self._setup_half_spectrum()
 
     def _setup_half_spectrum(self) -> None:
-        """k vectors, G and the Parseval weights on the rfftn half
-        spectrum (M, M, M//2 + 1), built once per lattice (ADR-0043).
+        """Mesh factors on the rfftn half spectrum (M, M, M//2 + 1), built
+        once per lattice (ADR-0043).
 
-        A real mesh has rho(-k) = conj(rho(k)), so a sum over the full mesh
-        is the half-spectrum sum with weight 2, except on the planes
-        m3 = 0 and (M even) m3 = M/2, which hold their own partners."""
+        The full-FFT path sums over every mesh point with that point's own
+        k and G, and takes the real part of a complex inverse FFT.  On an
+        even mesh the Nyquist index m = -M/2 is its own negative, so k(-k)
+        is not -k(k) there and the summand is not Hermitian; Re(ifftn)
+        projects it.  To reproduce those sums exactly, every factor is
+        averaged with its value at the partner index of -k:
+            Geff = (G(k) + G(-k)) / 2               energy (even)
+            Keff = (k G(k) - k(-k) G(-k)) / 2        field (odd)
+            Seff = (S(k) + S(-k)) / 2                stress (even)
+        so that i Keff rho is exactly Hermitian (irfftn is then exact) and
+        the half-spectrum sums with weight 2 (1 on the planes m3 = 0 and,
+        M even, m3 = M/2, which hold their own partners) equal the
+        full-mesh sums."""
         M = self.mesh
         mh = M // 2 + 1
         m = np.fft.fftfreq(M) * M
-        m3 = np.arange(mh, dtype=float)
-        m1, m2, m3 = np.meshgrid(m, m, m3, indexing='ij')
+        m1, m2, m3 = np.meshgrid(m, m, m, indexing='ij')
         R = self.recip
-        self._kh = np.stack([m1 * R[0, a] + m2 * R[1, a] + m3 * R[2, a]
-                             for a in range(3)])            # (3, M, M, mh)
-        self._k2h = np.sum(self._kh ** 2, axis=0)
-        self._Gh = np.ascontiguousarray(self._G_mesh[:, :, :mh])
-        w = np.full(mh, 2.0)
-        w[0] = 1.0
+        kf = np.stack([m1 * R[0, a] + m2 * R[1, a] + m3 * R[2, a]
+                       for a in range(3)])                  # (3, M, M, M)
+        k2 = np.sum(kf ** 2, axis=0)
+        G = self._G_mesh
+        ip = (-np.arange(M)) % M                            # index of -m
+
+        def partner(A):
+            return A[..., ip, :, :][..., :, ip, :][..., :, :, ip]
+
+        on = k2 > 1e-14
+        safe = np.where(on, k2, 1.0)
+        w = np.where(on, (2.0 + k2 / (2.0 * self.alpha ** 2)) / safe, 0.0)
+        Sf = np.empty((3, 3, M, M, M))
+        for a in range(3):
+            for b in range(3):
+                Sf[a, b] = np.where(on, G * ((a == b) - w * kf[a] * kf[b]), 0.0)
+        Gp = partner(G)
+        self._Geff = np.ascontiguousarray((0.5 * (G + Gp))[:, :, :mh])
+        self._Keff = np.ascontiguousarray(
+            (0.5 * (kf * G - partner(kf) * Gp))[..., :mh])
+        self._Seff = np.ascontiguousarray((0.5 * (Sf + partner(Sf)))[..., :mh])
+        wt = np.full(mh, 2.0)
+        wt[0] = 1.0
         if M % 2 == 0:
-            w[-1] = 1.0
-        self._wh = w
+            wt[-1] = 1.0
+        self._wh = wt
 
     # ------------------------------------------------------------------
     # Optimal influence function  G(k)
@@ -603,12 +629,11 @@ class PPPMSolver:
         q = np.ascontiguousarray(charges, dtype=float)
         rho_mesh = _assign_kernel(ix0, W, q, M)
         rho_kh = np.fft.rfftn(rho_mesh)
-        phi_kh = self._Gh * rho_kh
-        e_mesh = 0.5 * float(np.sum(self._wh * np.real(np.conj(rho_kh) * phi_kh)))
+        e_mesh = 0.5 * float(np.sum(self._wh * self._Geff * np.abs(rho_kh) ** 2))
         M3 = M ** 3
         E = np.empty((3, M, M, M))
         for a in range(3):
-            E[a] = -M3 * np.fft.irfftn(1j * self._kh[a] * phi_kh, s=(M, M, M),
+            E[a] = -M3 * np.fft.irfftn(1j * self._Keff[a] * rho_kh, s=(M, M, M),
                                           axes=(0, 1, 2))
         f_mesh = _gather_kernel(ix0, W, q, E, M)
         rho_k = rho_kh
@@ -626,21 +651,10 @@ class PPPMSolver:
         return energy, f_real + f_mesh, s_real + s_mesh
 
     def _mesh_stress_half(self, rho_kh: np.ndarray) -> np.ndarray:
-        """_mesh_stress on the half spectrum with the Parseval weights."""
-        k2 = self._k2h
-        on = k2 > 1e-14
-        coeff = np.where(on, self._wh * self._Gh * np.abs(rho_kh) ** 2, 0.0)
-        safe = np.where(on, k2, 1.0)
-        weight = coeff * (2.0 + k2 / (2.0 * self.alpha ** 2)) / safe
-        kh = self._kh
-        stress = np.empty((3, 3))
-        tot = coeff.sum()
-        for a in range(3):
-            for b in range(a, 3):
-                v = (a == b) * tot - np.sum(weight * kh[a] * kh[b])
-                stress[a, b] = stress[b, a] = v
-        return stress / (2.0 * self.volume)
-
+        """_mesh_stress on the half spectrum (see _setup_half_spectrum)."""
+        a2 = self._wh * np.abs(rho_kh) ** 2
+        S = np.einsum("abxyz,xyz->ab", self._Seff, a2)
+        return 0.5 * (S + S.T) / (2.0 * self.volume)
 
 def _pppm_alpha_from_accuracy(r_cut: float, accuracy: float = 1e-5) -> float:
     """
