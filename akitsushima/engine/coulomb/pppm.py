@@ -166,6 +166,30 @@ class PPPMSolver:
 
         # Pre-compute optimal influence function on the M^3 k-mesh
         self._G_mesh = self._build_influence_function()
+        self._setup_half_spectrum()
+
+    def _setup_half_spectrum(self) -> None:
+        """k vectors, G and the Parseval weights on the rfftn half
+        spectrum (M, M, M//2 + 1), built once per lattice (ADR-0043).
+
+        A real mesh has rho(-k) = conj(rho(k)), so a sum over the full mesh
+        is the half-spectrum sum with weight 2, except on the planes
+        m3 = 0 and (M even) m3 = M/2, which hold their own partners."""
+        M = self.mesh
+        mh = M // 2 + 1
+        m = np.fft.fftfreq(M) * M
+        m3 = np.arange(mh, dtype=float)
+        m1, m2, m3 = np.meshgrid(m, m, m3, indexing='ij')
+        R = self.recip
+        self._kh = np.stack([m1 * R[0, a] + m2 * R[1, a] + m3 * R[2, a]
+                             for a in range(3)])            # (3, M, M, mh)
+        self._k2h = np.sum(self._kh ** 2, axis=0)
+        self._Gh = np.ascontiguousarray(self._G_mesh[:, :, :mh])
+        w = np.full(mh, 2.0)
+        w[0] = 1.0
+        if M % 2 == 0:
+            w[-1] = 1.0
+        self._wh = w
 
     # ------------------------------------------------------------------
     # Optimal influence function  G(k)
@@ -564,16 +588,30 @@ class PPPMSolver:
             self.lattice, positions, charges, alpha, self.r_cut,
             neigh_list=neigh_list)
 
-        # 2. Charge assignment -> FFT
-        rho_mesh = self._assign_charges(positions, charges)
-        rho_k = np.fft.fftn(rho_mesh)
-
-        # 3. Mesh energy  E_mesh = (1/2) sum_k G(k)|rho_i|^2
-        phi_k = self._solve_poisson(rho_mesh)
-        e_mesh = self._mesh_energy(rho_k, phi_k)
-
-        # 4. Mesh forces via back-interpolation  O(M^3logM + N.p^3)
-        f_mesh = self._mesh_forces(positions, charges, rho_k)
+        # 2-4. Mesh part on the real-FFT half spectrum (ADR-0043): one
+        # rfftn of the charge mesh (it was transformed twice, with the
+        # complex FFT), three irfftn for the field, B-spline weights built
+        # once and shared by assignment and gather (numba).  Same sums as
+        # _assign_charges / _mesh_energy / _mesh_forces, which stay as the
+        # full-FFT reference.
+        M, p = self.mesh, self.order
+        frac = positions @ self.inv_lat
+        frac -= np.floor(frac)
+        ix0, W = self._bspline_weights_all(frac * M, p)
+        ix0 = np.ascontiguousarray(ix0, dtype=np.int64)
+        W = np.ascontiguousarray(W)
+        q = np.ascontiguousarray(charges, dtype=float)
+        rho_mesh = _assign_kernel(ix0, W, q, M)
+        rho_kh = np.fft.rfftn(rho_mesh)
+        phi_kh = self._Gh * rho_kh
+        e_mesh = 0.5 * float(np.sum(self._wh * np.real(np.conj(rho_kh) * phi_kh)))
+        M3 = M ** 3
+        E = np.empty((3, M, M, M))
+        for a in range(3):
+            E[a] = -M3 * np.fft.irfftn(1j * self._kh[a] * phi_kh, s=(M, M, M),
+                                          axes=(0, 1, 2))
+        f_mesh = _gather_kernel(ix0, W, q, E, M)
+        rho_k = rho_kh
 
         # 6. Corrections
         e_self = self._self_energy(charges, alpha)
@@ -584,8 +622,24 @@ class PPPMSolver:
         # (ADR-0043; 28 % of a 3600-atom ZnO call).
         if not need_stress:
             return energy, f_real + f_mesh, None
-        s_mesh = self._mesh_stress(rho_k)
+        s_mesh = self._mesh_stress_half(rho_k)
         return energy, f_real + f_mesh, s_real + s_mesh
+
+    def _mesh_stress_half(self, rho_kh: np.ndarray) -> np.ndarray:
+        """_mesh_stress on the half spectrum with the Parseval weights."""
+        k2 = self._k2h
+        on = k2 > 1e-14
+        coeff = np.where(on, self._wh * self._Gh * np.abs(rho_kh) ** 2, 0.0)
+        safe = np.where(on, k2, 1.0)
+        weight = coeff * (2.0 + k2 / (2.0 * self.alpha ** 2)) / safe
+        kh = self._kh
+        stress = np.empty((3, 3))
+        tot = coeff.sum()
+        for a in range(3):
+            for b in range(a, 3):
+                v = (a == b) * tot - np.sum(weight * kh[a] * kh[b])
+                stress[a, b] = stress[b, a] = v
+        return stress / (2.0 * self.volume)
 
 
 def _pppm_alpha_from_accuracy(r_cut: float, accuracy: float = 1e-5) -> float:
@@ -636,3 +690,64 @@ def _pppm_mesh_from_alpha(lattice: np.ndarray,
     K = max(3.0, -np.log10(max(float(accuracy), 1e-30)) - 1.0)
     M_min = max(int(np.ceil(K * alpha * L_max)), 16)
     return int(next_fast_len(M_min))
+
+
+# ----------------------------------------------------------------------
+#  numba kernels (ADR-0043)
+# ----------------------------------------------------------------------
+
+
+def _assign_kernel_py(ix0, W, q, M):
+    """rho[GX, GY, GZ] += q * (wx * wy) * wz, atoms in order (np.add.at's
+    order in _assign_charges)."""
+    N, _, p = W.shape
+    rho = np.zeros((M, M, M))
+    for n in range(N):
+        for a in range(p):
+            gx = (ix0[n, 0] + a) % M
+            wa = W[n, 0, a]
+            for b in range(p):
+                gy = (ix0[n, 1] + b) % M
+                wab = wa * W[n, 1, b]
+                for c in range(p):
+                    gz = (ix0[n, 2] + c) % M
+                    rho[gx, gy, gz] += q[n] * (wab * W[n, 2, c])
+    return rho
+
+
+def _gather_kernel_py(ix0, W, q, E, M):
+    """F_n = q_n sum_stencil (wx * wy) * wz E[:, gx, gy, gz]."""
+    N, _, p = W.shape
+    out = np.zeros((N, 3))
+    for n in _prange(N):
+        ex = 0.0
+        ey = 0.0
+        ez = 0.0
+        for a in range(p):
+            gx = (ix0[n, 0] + a) % M
+            wa = W[n, 0, a]
+            for b in range(p):
+                gy = (ix0[n, 1] + b) % M
+                wab = wa * W[n, 1, b]
+                for c in range(p):
+                    gz = (ix0[n, 2] + c) % M
+                    w = wab * W[n, 2, c]
+                    ex += w * E[0, gx, gy, gz]
+                    ey += w * E[1, gx, gy, gz]
+                    ez += w * E[2, gx, gy, gz]
+        out[n, 0] = q[n] * ex
+        out[n, 1] = q[n] * ey
+        out[n, 2] = q[n] * ez
+    return out
+
+
+try:
+    import numba as _nb
+
+    _prange = _nb.prange
+    _assign_kernel = _nb.njit(cache=True)(_assign_kernel_py)
+    _gather_kernel = _nb.njit(parallel=True, cache=True)(_gather_kernel_py)
+except ImportError:  # pragma: no cover - numba is a core dependency
+    _prange = range
+    _assign_kernel = _assign_kernel_py
+    _gather_kernel = _gather_kernel_py
