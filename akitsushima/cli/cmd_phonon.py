@@ -20,6 +20,8 @@ from .common import (
     _print_results_header,
     _print_timing_summary,
     _resolve_masses,
+    _symmetry_kw,
+    _symmetry_line,
 )
 
 __all__ = ["cmd_phonon"]
@@ -49,6 +51,9 @@ def cmd_phonon(args) -> int:
     print(f"  Supercell : {supercell}")
     print(f"  Delta     : {ph_cfg.get('delta',0.01)} A")
     print(f"  n_jobs    : {ph_cfg.get('n_jobs',1)}")
+    sym_kw = _symmetry_kw(ph_cfg)
+    if sym_kw["symmetry"]:
+        print(f"  Symmetry  : on (symprec {sym_kw['symprec']} A)")
 
     output_dir = ph_cfg.get("output_dir", "./phonon_output")
     os.makedirs(output_dir, exist_ok=True)
@@ -68,7 +73,7 @@ def cmd_phonon(args) -> int:
             atom_types=pos_data["atom_types"], force_fn=force_fn,
             supercell=supercell, delta=ph_cfg.get("delta",0.01),
             masses=_resolve_masses(ph_cfg,pos_data["atom_types"])
-                   if ph_cfg.get("masses") else None)
+                   if ph_cfg.get("masses") else None, **sym_kw)
         t0 = _time.perf_counter()
         calc.compute_ifc(n_jobs=ph_cfg.get("n_jobs",1), verbose=verbose)
         t_sections.append(("Compute IFC", _time.perf_counter()-t0))
@@ -139,6 +144,8 @@ def cmd_phonon(args) -> int:
     _print_results_header("phonon")
     print(f"\n[IFC]")
     print(f"  Supercell : {supercell}  Delta : {ph_cfg.get('delta',0.01)} A")
+    if calc.symmetry_info:
+        print(f"  Symmetry  : {_symmetry_line(calc.symmetry_info)}")
     if bs_cfg and bs_cfg.get("q_path"):
         print(f"\n[Band structure]")
         print(f"  q-points  : {len(bs_cfg.get('q_path',[]))} special points")
@@ -208,6 +215,7 @@ def _write_phonon_json(path, calc, pot_cfg, supercell, ph_cfg, T_D,
         "masses_amu": calc.masses.tolist(),
         "debye_temperature_vsound_K": T_D,
         "free_energy_eV_cell": {str(k): v for k, v in F_phonon.items()},
+        "symmetry": calc.symmetry_info,
     }
     if thermal is not None:
         out["thermal"] = {k: (v.tolist() if isinstance(v, np.ndarray) else v)

@@ -166,6 +166,14 @@
 > longer fails every MD chunk on its NPT-only `tau_baro`.  The parallel
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
+>
+> 0.3.0a4 (ADR-0040): `symmetry: true` in `phonon`, `qha`, `gruneisen`,
+> `kappa` (Slack section) and `elastic` uses the space group (spglib,
+> `pip install akitsushima[symmetry]`) to displace only inequivalent
+> atoms along a minimal set of directions and to strain only the modes
+> the symmetry needs.  Diamond Si: 12 -> 1 force calls for the phonons,
+> 37 -> 10 strained cells for C, equal to the full method to round-off.
+> Off by default; a P1 cell gives the full method bit for bit.
 
 A classical force-field and machine-learning potential toolkit for atomistic
 simulation. `akitsushima` fits interatomic potentials, relaxes structures,

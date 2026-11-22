@@ -1,5 +1,5 @@
 ---
-status: proposed (2026-11-22)
+status: accepted (2026-11-22, 0.3.0a4)
 ---
 
 # Symmetry reduction of phonon displacements and elastic strains (spglib)
@@ -218,6 +218,164 @@ only the spglib reduction.  Agreed with the user on 2026-11-22
    - The version goes to 0.3.0a4; commits are local.
    - The default path (`symmetry: false`) of every command stays equal
      to 0.3.0a3 within 1e-10; it is in fact unchanged code.
+
+## Result (2026-11-22, 0.3.0a4)
+
+### Implementation
+
+- **`solvers/symmetry.py` (new):**
+  - `spglib_operations` returns the operations with, for each one, the
+    atom permutation and the integer lattice shift (positions as given,
+    not wrapped).
+  - The spglib numbers are per (species, mass).
+  - `unique_rotations` keeps one operation per rotation; the elastic path
+    uses it, so that the pure translations of a supercell drop out
+    (AlN 5x5x3: 900 operations -> 12).
+  - `greedy_spanning` chooses the directions and the modes.
+  - spglib's DeprecationWarning about its old error handling is silenced
+    around the call only.
+- **`PhononCalculator`:**
+  - New arguments `symmetry` and `symprec`.
+  - `_symmetry_plan` keeps the operations with S^-1 R S integer and
+    builds the supercell permutations by integer arithmetic.
+  - `_compute_ifc_symmetric` accumulates the normal equations of each
+    origin-cell column block over all images.
+  - The symmetrisation, ASR and D-ASR moved unchanged into `_finish_ifc`.
+  - `symmetry_info` records the group and the counts.
+- **`ElasticConstantsCalculator`:**
+  - New arguments `symmetry` and `symprec`.
+  - The reduced point list, and `_fit_symmetric` (C, C_clamped, internal
+    strain and residual stress from one fit; `fit_rms_GPa` NaN for the
+    modes taken from symmetry).
+  - The results get a `symmetry` entry.
+- **CLI:**
+  - `_symmetry_kw` and `_symmetry_line` in `cli/common.py`.
+  - The keys in `phonon`, `qha`, `gruneisen`, `kappa.slack_debye` and
+    `elastic`, which `piezo` runs through `cmd_elastic`.
+  - `dielectric` and `piezo` sections refuse the keys before any work.
+  - The results JSON of `phonon`, `elastic`, `qha` and `gruneisen`
+    records the group.
+  - `elastic_results.json` writes the NaN residuals as null.
+  - The templates list the keys, commented as off.
+- **Packaging:** extra `symmetry = ["spglib>=2.0"]` (in `all`); version
+  0.3.0a4.
+
+### Validation in the suite (`tests/test_symmetry_reduction.py`, 18 tests)
+
+Two cases differ from the plan of decision 7, for reasons found while
+writing the tests:
+- **Hexagonal case:** the Tersoff AlN wurtzite set already in the tests
+  stands in for hcp Ti.  It is the target material, and it has the 60
+  and 120 degree operations.
+- **P1 case:** a rattled 8-atom Si cell (phonons) and a rattled 64-atom
+  Si cell (elastic) stand in for a GeSn random cell.  A rattled 2-atom
+  cell is not P1: two atoms always keep an inversion centre (P-1).
+
+| Case | Count (full -> reduced) | Agreement with the full method |
+|---|---|---|
+| Diamond Si, Tersoff, phonon 2x2x2 | 12 -> 1 force calls | IFC within 1e-10 relative (measured 6e-14 at 3x3x3) |
+| Wurtzite AlN, Tersoff, phonon 3x3x2 | 24 -> 6 | IFC 2.6e-5 relative at delta 0.01, 6.6e-6 at 0.005 (ratio 4.0), below the full method's own change with delta (2.9e-5) |
+| Wurtzite AlN vs phonopy | -- | within 0.01 THz at three q-points |
+| Diamond Si, Tersoff, elastic 64 atoms | 37 -> 10 strained cells (modes 1, 4) | C, C_clamped 1e-14 relative; internal strain 3e-13; C exactly cubic |
+| Wurtzite AlN, Tersoff, elastic 72 atoms, one amplitude | 13 -> 6 (modes 1, 3, 4) | clamped C: 0.090 / 0.023 GPa at s = 0.01 / 0.005 (ratio 4.0); C66 = (C11 - C12)/2 to 1e-10 |
+| Rattled Si (P1), phonon and elastic | full counts | identical bit for bit |
+
+The other tests cover:
+- the refusals: ESM, missing spglib, an operation that maps no atom,
+  bad key values, `dielectric` with the key;
+- the five CLI templates with `symmetry: true`.
+
+**New slow tests:** about 18 s in all, under the 60 s rule.
+
+**Full suite in the worktree:** 1087 passed, 1 skipped, 12 failed, in
+19.1 min.
+- All 12 failures were `FileNotFoundError` on `example/GeSn/...`: the
+  worktree has no `example/` (it is not tracked).
+- With main's `example` linked, those four files pass (68 passed).
+- After the final lint and test edits, a run with `example` linked:
+  1099 passed, 1 skipped, in 19.2 min, 0.8 min under the xdist
+  threshold.
+- One run in between stopped on a bus error inside numpy's matrix
+  product in `ewald_sum` (`test_engine_forces.py`).  That file passed
+  three times on its own and in the final run, and this item does not
+  touch Ewald, so it is taken as a one-off crash.
+
+### Validation outside the suite: AlN ELM MLIP
+
+Run with `example/symmetry/validate_adr0040.py`, under nohup on one
+thread; results in `validate_ledger.jsonl`.
+- The 4x4x3 MLIP relaxation gave a = 3.1143 A, c = 4.9645 A and
+  u = 0.3827.
+- An ideal wurtzite cell was rebuilt from these values, and spglib finds
+  P6_3mc.
+
+| | Full | Reduced |
+|---|---|---|
+| Phonon 4x4x3 (192 atoms): force calls | 24 | 6 |
+| Phonon: wall time | 0.64 s | 0.36 s |
+| Phonon: largest frequency difference on G-M-K-G-A | -- | 0.012 cm^-1 (of 782 cm^-1); IFC 5.5e-5 relative |
+| Elastic 5x5x3 (300 atoms, relaxed ions): strained cells | 37 | 16 |
+| Elastic: wall time | 52.6 s | 23.7 s |
+| Elastic: largest difference in C | -- | 1.87 GPa (C66: 92.67 -> 94.55) |
+| Elastic: largest difference in C_clamped | -- | 1.57 GPa (C66: 144.86 -> 146.43) |
+
+- **The phonon wall time** falls less than the count, because one force
+  call of the MLIP on 192 atoms is short next to the reconstruction.
+- **The C66 difference is the O(s^2) term**
+  (`check_c66_scaling.py`, clamped ions, one amplitude):
+
+  | s | max diff (GPa) | full C66 (GPa) | reduced C66 (GPa) |
+  |---|---|---|---|
+  | 0.01 | 1.93 | 145.00 | 146.93 |
+  | 0.005 | 0.50 | 144.42 | 144.92 |
+  | 0.0025 | 0.128 | 144.27 | 144.39 |
+  | 0.00125 | 0.032 | 144.23 | 144.26 |
+
+  - Both C66 values tend to 144.22 GPa.
+  - The reduced C66 comes from normal strains rotated by 60 degrees.  Its
+    O(s^2) coefficient is about 3.5 times that of the xy shear the full
+    method uses.
+  - With the default amplitudes (up to 1 %), the reduced C66 of a
+    hexagonal crystal on this MLIP is therefore about 2 % too high.  The
+    full method's own C66 is about 0.6 % too high, and its C11 and C22
+    differ by 0.8 GPa.
+  - Smaller amplitudes remove most of the difference: at `strains:
+    [0.0025]` it is 0.13 GPa.
+  - On Tersoff AlN the same term is 20 times smaller (0.09 GPa at
+    s = 0.01).
+
+### Gate
+
+1.5 times on the count, met on every fixed case:
+
+| Case | Count | Ratio |
+|---|---|---|
+| Diamond Si phonon | 12 -> 1 | 12x |
+| Diamond Si elastic | 37 -> 10 | 3.7x |
+| AlN wurtzite phonon | 24 -> 6 | 4x |
+| AlN wurtzite elastic | 37 -> 16 | 2.3x |
+
+Wall time on the AlN MLIP: 1.8x (phonon) and 2.2x (elastic).
+
+### Findings
+
+1. **The variable-cell relaxation breaks the symmetry slightly.**
+   - `GeometryOptimiser` with `relax_cell: true` (FIRE) leaves non-uniform
+     ionic displacements of 5e-6 to 2e-5 A from a perfect diamond crystal.
+     The forces there are 1e-14 eV/A and the stress is isotropic, and with
+     fixed ions the displacements stay at 3e-15 A.
+   - These displacements are within fmax, but above symprec 1e-5.  So
+     after the relaxations of `qha` and `gruneisen` spglib finds R-3m, not
+     Fd-3m.
+   - The reduced result is still correct (R-3m is a true symmetry of the
+     relaxed cell), but the saving is smaller.  `symprec: 1e-4` recovers
+     Fd-3m.
+   - The cause in `GeometryOptimiser` is not looked into here.  The file
+     has other, uncommitted work in main.
+2. **Hexagonal C66 from rotated normal strains carries a larger O(s^2)
+   term on the AlN MLIP**, as above.  `symmetry: true` on hexagonal
+   crystals should go with smaller strain amplitudes.  The default
+   amplitudes are unchanged.
 
 ## Consequences
 

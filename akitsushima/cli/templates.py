@@ -530,6 +530,10 @@ phonon:
   supercell:         [4, 4, 4]
   delta:             0.01
   n_jobs:            1
+  symmetry:          false          # true: displace only inequivalent atoms
+                                    # (spglib, ADR-0040; pip install
+                                    # akitsushima[symmetry])
+  symprec:           1.0e-5         # A, spglib tolerance
   band_structure:
     q_path:
       - ["G", [0.0, 0.0, 0.0]]
@@ -598,6 +602,7 @@ kappa:
     use_vsound: false
     supercell:  2
     ifc_path:   null                # reuse a saved ifc.npz if available
+    symmetry:   false               # spglib displacement reduction (ADR-0040)
   verbose:         true
 """
 
@@ -992,6 +997,9 @@ elastic:
   max_steps:   1000
   skin_width:  0.5           # A
   n_jobs:      1             # threads over strained cells (-1: all cores)
+  symmetry:    false         # true: strain only the modes symmetry needs
+                             # (spglib, ADR-0040)
+  symprec:     1.0e-5        # A, spglib tolerance
   masses:      {}            # amu overrides, e.g. {Si: 28.0855}
   verbose:     true
 """
@@ -1031,6 +1039,7 @@ gruneisen:
   supercell:   [4, 4, 4]      # phonon supercell; also the relaxation cell,
                               # so r_cut + 0.5 A skin < half its width
   delta:       0.01           # A, finite displacement
+  symmetry:    false          # spglib displacement reduction (ADR-0040)
   pre_relax:   true           # full cell + ion relaxation first -> V0
   relax:                      # every relaxation (pre and fixed-volume)
     method:    fire
@@ -1098,6 +1107,7 @@ qha:
   supercell:   [4, 4, 4]      # phonon supercell; also the relaxation cell,
                               # so r_cut + 0.5 A skin < half its width
   delta:       0.01           # A, finite displacement
+  symmetry:    false          # spglib displacement reduction (ADR-0040)
   pre_relax:   true           # full cell + ion relaxation first -> V0
   relax:                      # every relaxation (pre and fixed-volume)
     method:    fire

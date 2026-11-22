@@ -15,6 +15,8 @@ from .common import (
     _print_results_header,
     _print_timing_summary,
     _resolve_masses,
+    _symmetry_kw,
+    _symmetry_line,
 )
 
 __all__ = ["cmd_kappa"]
@@ -99,8 +101,11 @@ def cmd_kappa(args) -> int:
             ph_calc = PhononCalculator(
                 lattice=pos_data["lattice"], positions=pos_data["positions"],
                 atom_types=pos_data["atom_types"], force_fn=force_fn,
-                supercell=supercell)
+                supercell=supercell, **_symmetry_kw(slack_cfg))
             ph_calc.compute_ifc(verbose=verbose)
+            if verbose and ph_calc.symmetry_info:
+                print(f"  Slack IFC symmetry : "
+                      f"{_symmetry_line(ph_calc.symmetry_info)}")
         kappa_slack = calc.slack_debye(
             phonon_calc=ph_calc, T=T_target,
             gruneisen=slack_cfg.get("gruneisen"),
