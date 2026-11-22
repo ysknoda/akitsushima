@@ -22,6 +22,8 @@ from .common import (
     _print_results_header,
     _print_timing_summary,
     _resolve_masses,
+    _symmetry_kw,
+    _symmetry_line,
 )
 
 __all__ = ["cmd_qha", "_volume_setup"]
@@ -46,6 +48,16 @@ def _volume_setup(args, section: str, title: str):
                          "the ESM boundaries (ADR-0018)")
     check_mlip_for_solver(force_fn, section,
                           species=set(pos_data["atom_types"]))
+    # ADR-0040: the displacement reduction for qha and gruneisen only;
+    # dielectric and piezo keep their own schemes and refuse the key.
+    if section in ("qha", "gruneisen"):
+        sym_kw = _symmetry_kw(sec)
+    elif "symmetry" in sec or "symprec" in sec:
+        raise ValueError(f"{section}: symmetry / symprec is not supported "
+                         f"here (ADR-0040 covers phonon, qha, gruneisen, "
+                         f"kappa and elastic)")
+    else:
+        sym_kw = {"symmetry": False, "symprec": 1e-5}
     is_root = (_mpi_rank == 0)
     out_dir = sec.get("output_dir", f"./{section}_output")
     if is_root:
@@ -74,7 +86,7 @@ def _volume_setup(args, section: str, title: str):
             "lattice": lat, "positions": pos, "types": types, "supercell": sc,
             "relax_kw": relax_kw, "out_dir": out_dir, "is_root": is_root,
             "masses": _resolve_masses(sec, types), "pre_relax": pre,
-            "t_sections": t_sections,
+            "t_sections": t_sections, "sym_kw": sym_kw,
             "verbose": sec.get("verbose", True) and not getattr(args, "quiet", False)
                        and is_root}
 
@@ -107,7 +119,7 @@ def cmd_qha(args) -> int:
         print(f"  supercell      : {st['supercell']}   q_mesh {sec.get('q_mesh', 20)}")
         print(f"  EOS            : {eos}")
 
-    rows, F, S, C, dropped = [], [], [], [], []
+    rows, F, S, C, dropped, sym_info = [], [], [], [], [], []
     t0 = _time.perf_counter()
     for k, f in enumerate(np.linspace(1.0 - rng, 1.0 + rng, n_v)):
         r = relax_at_volume(st["lattice"], st["positions"], types, fn, V0 * f,
@@ -115,7 +127,9 @@ def cmd_qha(args) -> int:
                             output_dir=os.path.join(out_dir, f"relax_v{k}"))
         pc = phonons_at(r["lattice"], r["positions"], types, fn, st["supercell"],
                         delta=sec.get("delta", 0.01), masses=st["masses"],
-                        n_jobs=sec.get("n_jobs", 1), born=st["born"])
+                        n_jobs=sec.get("n_jobs", 1), born=st["born"],
+                        **st["sym_kw"])
+        sym_info.append(pc.symmetry_info)
         th = pc.thermal_properties(T, q_mesh=sec.get("q_mesh", 20))
         V = abs(float(np.linalg.det(r["lattice"])))
         if st["verbose"]:
@@ -123,6 +137,8 @@ def cmd_qha(args) -> int:
                   f"{r['pressure_GPa']:+8.3f} GPa  f_min = "
                   f"{th['min_frequency_THz']:+.3f} THz"
                   + ("" if r["converged"] else "  (relaxation NOT converged)"))
+            if pc.symmetry_info:
+                print(f"    symmetry: {_symmetry_line(pc.symmetry_info)}")
         if th["min_frequency_THz"] < -tol:
             if not skip:
                 if is_root:
@@ -161,7 +177,8 @@ def cmd_qha(args) -> int:
            "volumes_A3": Vs.tolist(), "energies_eV": Es.tolist(),
            "pressures_GPa": [r[2] for r in rows],
            "dropped_unstable_volumes_A3": dropped,
-           "t_max_K": q["t_max_K"], "truncated": q["truncated"]}
+           "t_max_K": q["t_max_K"], "truncated": q["truncated"],
+           "symmetry": sym_info if st["sym_kw"]["symmetry"] else None}
     for k, v in q.items():
         if isinstance(v, np.ndarray):
             out[k] = v.tolist()

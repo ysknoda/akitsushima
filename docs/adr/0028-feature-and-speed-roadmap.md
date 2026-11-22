@@ -679,6 +679,9 @@ MLIPs and large MD with them):
    displacements and strains, LAMMPS potential files (Q17).
    Re-scoped on 2026-11-22 (addendum 6): the spglib reduction only,
    ADR-0040; phonopy output and LAMMPS files moved to tier C.
+   Done: ADR-0040 (0.3.0a4): `symmetry: true` in phonon / qha /
+   gruneisen / kappa / elastic; diamond Si 12 -> 1 force calls and
+   37 -> 10 strained cells, AlN wurtzite 24 -> 6 and 37 -> 16.
 6. Lattice thermal conductivity from third-order force constants in the
    relaxation-time approximation (Q16); after 5, which reduces its
    displacements.

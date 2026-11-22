@@ -13,6 +13,7 @@ from .common import (
     _print_output_files,
     _print_results_header,
     _print_timing_summary,
+    _symmetry_line,
 )
 
 __all__ = ["cmd_gruneisen"]
@@ -53,7 +54,9 @@ def cmd_gruneisen(args) -> int:
         pcs.append(phonons_at(r["lattice"], r["positions"], types, fn,
                               st["supercell"], delta=sec.get("delta", 0.01),
                               masses=st["masses"], n_jobs=sec.get("n_jobs", 1),
-                              born=st["born"]))
+                              born=st["born"], **st["sym_kw"]))
+        if is_root and pcs[-1].symmetry_info:
+            print(f"  volume {k}: symmetry {_symmetry_line(pcs[-1].symmetry_info)}")
     st["t_sections"].append(("3 volumes: relax + IFC", _time.perf_counter() - t0))
     # Bulk modulus from the three pressures, for information.
     B = -V0 * (press[2] - press[0]) / (2 * dv * V0)
@@ -61,7 +64,9 @@ def cmd_gruneisen(args) -> int:
     out = {"command": "gruneisen",
            "input_hash": st["input_hash"], "nac": st["born"] is not None,
            "volumes_A3": [abs(float(np.linalg.det(p.lattice_prim))) for p in pcs],
-           "pressures_GPa": press, "bulk_modulus_GPa": B}
+           "pressures_GPa": press, "bulk_modulus_GPa": B,
+           "symmetry": ([p.symmetry_info for p in pcs]
+                        if st["sym_kw"]["symmetry"] else None)}
 
     bs = sec.get("band_structure", {}) or {}
     if bs.get("q_path"):

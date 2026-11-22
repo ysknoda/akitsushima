@@ -24,6 +24,8 @@ from .common import (
     _print_results_header,
     _print_timing_summary,
     _resolve_masses,
+    _symmetry_kw,
+    _symmetry_line,
 )
 
 __all__ = ["cmd_elastic"]
@@ -78,6 +80,9 @@ def cmd_elastic(args) -> int:
         print(f"  relax_ions : {el_cfg.get('relax_ions', True)}  "
               f"fmax {el_cfg.get('fmax', 1e-4)} eV/A")
         print(f"  n_jobs     : {el_cfg.get('n_jobs', 1)}")
+    sym_kw = _symmetry_kw(el_cfg)
+    if is_root and sym_kw["symmetry"]:
+        print(f"  symmetry   : on (symprec {sym_kw['symprec']} A)")
     t_sections = []
 
     pre = None
@@ -110,7 +115,10 @@ def cmd_elastic(args) -> int:
         lattice, positions, atom_types, force_fn, strains=strains,
         relax_ions=el_cfg.get("relax_ions", True),
         fmax=el_cfg.get("fmax", 1e-4), max_steps=el_cfg.get("max_steps", 1000),
-        skin_width=skin, n_jobs=el_cfg.get("n_jobs", 1))
+        skin_width=skin, n_jobs=el_cfg.get("n_jobs", 1), **sym_kw)
+    if is_root and calc.symmetry_info:
+        print(f"  symmetry   : {_symmetry_line(calc.symmetry_info)}; modes "
+              f"computed {calc.symmetry_info['modes_computed']}")
     res = calc.compute()
     t_sections.append(("Strained cells (" + str(len(calc._points())) + ")",
                        _time.perf_counter() - t0))
@@ -147,10 +155,13 @@ def cmd_elastic(args) -> int:
         "v_l_m_s": mod["v_l_m_s"], "v_t_m_s": mod["v_t_m_s"],
         "v_m_m_s": mod["v_m_m_s"],
         "debye_temperature_K": mod["debye_temperature_K"],
-        "fit_rms_GPa": {k: v.tolist() for k, v in res["fit_rms_GPa"].items()},
+        # NaN (a mode taken from symmetry, ADR-0040) is written as null.
+        "fit_rms_GPa": {k: [None if np.isnan(x) else float(x) for x in v]
+                        for k, v in res["fit_rms_GPa"].items()},
         "residual_stress_GPa": res["residual_stress_GPa"].tolist(),
         "unconverged": [list(p) for p in res["unconverged"]],
         "internal_strain_A": res["internal_strain"].tolist(),
+        "symmetry": res.get("symmetry"),
     }
     with open(os.path.join(output_dir, "elastic_results.json"), "w") as fh:
         json.dump(out, fh, indent=1, default=float)
@@ -179,7 +190,8 @@ def cmd_elastic(args) -> int:
     print(f"\n[Clamped-ion C (GPa)]")
     print(_fmt6(res["C_clamped"], "{:10.2f}"))
     print(f"\n[Fit]  RMS residual per mode (GPa): "
-          + " ".join(f"{v:.3g}" for v in res["fit_rms_GPa"]["relaxed"]))
+          + " ".join("-" if np.isnan(v) else f"{v:.3g}"
+                     for v in res["fit_rms_GPa"]["relaxed"]))
     if res["unconverged"]:
         print(f"  WARNING: unconverged ionic relaxations at {res['unconverged']}")
     print(f"\n[Born stability]  eigenvalues (GPa): "

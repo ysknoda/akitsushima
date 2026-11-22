@@ -93,6 +93,29 @@ def _check_structure(struct_cfg: dict, default: str = "POSCAR"):
     return data
 
 
+def _symmetry_kw(sec: dict) -> dict:
+    """``symmetry`` / ``symprec`` of a phonon or elastic section (ADR-0040),
+    as keyword arguments of PhononCalculator / ElasticConstantsCalculator."""
+    sym = sec.get("symmetry", False)
+    if not isinstance(sym, bool):
+        raise ValueError(f"symmetry must be true or false, got {sym!r}")
+    symprec = float(sec.get("symprec", 1e-5))
+    if symprec <= 0.0:
+        raise ValueError(f"symprec must be positive, got {symprec}")
+    return {"symmetry": sym, "symprec": symprec}
+
+
+def _symmetry_line(info) -> str:
+    """One log line for a symmetry_info dict (ADR-0040)."""
+    if not info:
+        return "off"
+    calls = (f"{info['n_force_calls']} force calls ({info['n_force_calls_full']} "
+             "without)" if "n_force_calls" in info else
+             f"{info['n_cells']} strained cells ({info['n_cells_full']} without)")
+    return (f"{info['spacegroup']} ({info['number']}), "
+            f"{info['n_operations_used']} operations used; {calls}")
+
+
 def _resolve_masses(cfg: dict, atom_types: list) -> np.ndarray:
     """Return per-atom mass array from a YAML section (masses sub-dict)."""
     mass_map = cfg.get("masses", {})

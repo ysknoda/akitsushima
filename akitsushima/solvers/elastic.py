@@ -116,6 +116,11 @@ class ElasticConstantsCalculator:
     n_jobs          : worker threads over the strained cells (-1: all
                      cores).  force_fn must be thread-safe for n_jobs > 1
                      (ExternalFileEngine and ELMModel.compute are not).
+    symmetry        : if True, strain only the Voigt modes whose symmetry
+                     images span the six strains, skip a -s point that is
+                     an image of +s, and fit C over all images (spglib,
+                     ADR-0040).  Default False: all six modes.
+    symprec         : spglib distance tolerance [A] for ``symmetry``.
 
     Minimum cell size
     -----------------
@@ -138,7 +143,9 @@ class ElasticConstantsCalculator:
                  fmax       : float = 1e-4,
                  max_steps  : int   = 1000,
                  skin_width : float = 0.5,
-                 n_jobs     : int   = 1):
+                 n_jobs     : int   = 1,
+                 symmetry   : bool  = False,
+                 symprec    : float = 1e-5):
         if strains is not None and delta is not None:
             raise ValueError("ElasticConstantsCalculator: give strains= or "
                              "delta=, not both.")
@@ -169,11 +176,53 @@ class ElasticConstantsCalculator:
         # cell: GeometryOptimiser truncates its relax.log / XDATCAR_relax on
         # every call, so a shared path let concurrent relaxations clobber
         # each other's scratch files.
+        self.symmetry = bool(symmetry)
+        self.symprec = float(symprec)
+        self.symmetry_info = None
+        self._sym = None
+        if self.symmetry:
+            self._sym = self._symmetry_plan()
         self._scratch_dir = tempfile.mkdtemp(prefix="akitsushima_elastic_")
         self._check_cells()
 
+    def _symmetry_plan(self):
+        """Operations and the strain points to compute (ADR-0040); None
+        when only the identity is found (the full method is used, bit for
+        bit)."""
+        from .symmetry import greedy_spanning, spglib_operations, strain_vector
+        ops = spglib_operations(self.lattice0, self.positions0,
+                                self.atom_types, symprec=self.symprec,
+                                unique_rotations=True)
+        n_full = 1 + 12 * len(self.strains)
+        info = ops.summary()
+        info.update({"enabled": True, "n_cells_full": n_full})
+        self.symmetry_info = info
+        if ops.is_identity_only:
+            info.update({"n_cells": n_full, "modes_computed": [1, 2, 3, 4, 5, 6]})
+            return None
+        R = ops.rot_cart
+
+        def images(eps):
+            return np.array([strain_vector(r @ eps @ r.T) for r in R])
+
+        modes = greedy_spanning([_strain_matrix(j, 1.0) for j in range(6)],
+                                images, 6)
+        pts = [(None, 0.0)]
+        for j in modes:
+            e = _strain_matrix(j, 1.0)
+            neg = any(np.allclose(r @ e @ r.T, -e, atol=1e-10) for r in R)
+            for s_ in self.strains:
+                pts.append((j, +s_))
+                if not neg:
+                    pts.append((j, -s_))
+        info.update({"n_cells": len(pts),
+                     "modes_computed": [j + 1 for j in modes]})
+        return {"ops": ops, "points": pts, "modes": modes}
+
     def _points(self) -> list:
         """(mode j, signed strain) pairs; mode None is the unstrained cell."""
+        if self._sym is not None:
+            return list(self._sym["points"])
         pts = [(None, 0.0)]
         for j in range(6):
             for s in self.strains:
@@ -253,6 +302,9 @@ class ElasticConstantsCalculator:
                 f"(mode, strain) {unconverged}; the relaxed-ion C and the "
                 f"internal strain there are less accurate.", RuntimeWarning)
 
+        if self._sym is not None:
+            return self._fit_symmetric(pts, res, unconverged)
+
         n = len(self.positions0)
         C, C0 = np.zeros((6, 6)), np.zeros((6, 6))
         dudeta = np.zeros((n, 3, 6))
@@ -293,11 +345,84 @@ class ElasticConstantsCalculator:
         C0 = 0.5 * (C0 + C0.T)
         bulk_modulus = (C[0, 0] + C[1, 1] + C[2, 2]
                        + 2.0 * (C[0, 1] + C[1, 2] + C[0, 2])) / 9.0
+        out = {"C": C, "C_clamped": C0, "internal_strain": dudeta,
+               "fit_rms_GPa": rms,
+               "residual_stress_GPa": np.mean(intercepts, axis=0),
+               "unconverged": unconverged, "strains": self.strains,
+               "bulk_modulus": float(bulk_modulus)}
+        if self.symmetry_info is not None:
+            out["symmetry"] = dict(self.symmetry_info)
+        return out
+
+    def _displacements(self, pt, r) -> np.ndarray:
+        """(N, 3) relaxed minus affine positions at one strain point,
+        minimum image in the strained cell, uniform translation removed."""
+        lat_s = self._strained_lattice(*pt)
+        f = (r[3] - r[2]) @ np.linalg.inv(lat_s)
+        d = (f - np.round(f)) @ lat_s
+        return d - d.mean(axis=0)
+
+    def _fit_symmetric(self, pts, res, unconverged) -> dict:
+        """C, C_clamped and the internal strain from one least-squares fit
+        over every computed point and all its symmetry images (ADR-0040).
+
+        Under a rotation R the strain eps goes to R eps R^T, the stress to
+        R sigma R^T, and the ionic displacement u_i to R u_i on atom
+        perm(i).  The model is y = C eta + b, eta the engineering Voigt
+        strain, y the standard-sign stress in GPa, b the residual stress.
+        """
+        from .symmetry import strain_vector, stress_vector
+        ops, modes = self._sym["ops"], self._sym["modes"]
+        n = len(self.positions0)
+        H, Yc, Yr, U, owner = [], [], [], [], []
+        for k, (pt, r) in enumerate(zip(pts, res)):
+            eps = (np.zeros((3, 3)) if pt[0] is None
+                   else _strain_matrix(pt[0], pt[1]))
+            u = self._displacements(pt, r) if self.relax_ions else None
+            for o, R in enumerate(ops.rot_cart):
+                H.append(strain_vector(R @ eps @ R.T))
+                Yc.append(-stress_vector(R @ r[0] @ R.T) * EV_ANG3_TO_GPA)
+                Yr.append(-stress_vector(R @ r[1] @ R.T) * EV_ANG3_TO_GPA)
+                if u is not None:
+                    ui = np.empty_like(u)
+                    ui[ops.perm[o]] = u @ R.T
+                    U.append(ui.ravel())
+                owner.append(k if o == 0 else -1)
+        A = np.column_stack([np.array(H), np.ones(len(H))])
+        Xc, *_ = np.linalg.lstsq(A, np.array(Yc), rcond=None)
+        Xr, *_ = np.linalg.lstsq(A, np.array(Yr), rcond=None)
+        C0, C = Xc[:6].T, Xr[:6].T
+        dudeta = np.zeros((n, 3, 6))
+        if U:
+            Xu, *_ = np.linalg.lstsq(A, np.array(U), rcond=None)
+            dudeta = np.stack([Xu[j].reshape(n, 3) for j in range(6)], axis=2)
+
+        # RMS residual of each computed mode over its own computed points
+        # (and the unstrained cell), as in the full method; NaN for the
+        # modes taken from symmetry.
+        owner = np.array(owner)
+        rms = {"relaxed": np.full(6, np.nan), "clamped": np.full(6, np.nan)}
+        for j in modes:
+            rows = [i for i, k in enumerate(owner)
+                    if k >= 0 and pts[k][0] in (None, j)]
+            for key, X, Y in (("clamped", Xc, Yc), ("relaxed", Xr, Yr)):
+                Ysel = np.array(Y)[rows]
+                rms[key][j] = float(np.sqrt(np.mean((A[rows] @ X - Ysel) ** 2)))
+
+        if not np.any(C0) and not np.any(C):
+            raise ValueError(
+                "ElasticConstantsCalculator: the stress is identically zero "
+                "at every strain -- the force function returns no stress "
+                "(e.g. an external engine without one).")
+        C = 0.5 * (C + C.T)
+        C0 = 0.5 * (C0 + C0.T)
+        bulk_modulus = (C[0, 0] + C[1, 1] + C[2, 2]
+                       + 2.0 * (C[0, 1] + C[1, 2] + C[0, 2])) / 9.0
         return {"C": C, "C_clamped": C0, "internal_strain": dudeta,
-                "fit_rms_GPa": rms,
-                "residual_stress_GPa": np.mean(intercepts, axis=0),
+                "fit_rms_GPa": rms, "residual_stress_GPa": Xr[6],
                 "unconverged": unconverged, "strains": self.strains,
-                "bulk_modulus": float(bulk_modulus)}
+                "bulk_modulus": float(bulk_modulus),
+                "symmetry": dict(self.symmetry_info)}
 
 
 def elastic_moduli(C      : np.ndarray,

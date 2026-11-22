@@ -150,6 +150,11 @@ class PhononCalculator:
                  lattice vector.  Default 2 (= 2x2x2).
     delta      : finite-displacement amplitude [A].  Default 0.01.
     masses     : optional (N_basis,) array [amu]; defaults to ATOMIC_MASS.
+    symmetry   : if True, displace only symmetry-inequivalent atoms along a
+                 minimal set of directions and rebuild the IFC from the
+                 space-group operations (spglib, ADR-0040).  Default False:
+                 every origin-cell atom along x, y and z.
+    symprec    : spglib distance tolerance [A] for ``symmetry``.
 
     Examples
     --------
@@ -173,7 +178,9 @@ class PhononCalculator:
                  force_fn   : Callable,
                  supercell  : Union[int, List[int]] = 2,
                  delta      : float = 0.01,
-                 masses     : Optional[np.ndarray] = None):
+                 masses     : Optional[np.ndarray] = None,
+                 symmetry   : bool  = False,
+                 symprec    : float = 1e-5):
 
         self.lattice_prim = np.asarray(lattice, dtype=float).copy()
         self.positions    = np.asarray(positions, dtype=float).copy()
@@ -181,6 +188,9 @@ class PhononCalculator:
         self.force_fn     = force_fn
         self.delta        = float(delta)
         self.N_basis      = len(atom_types)
+        self.symmetry     = bool(symmetry)
+        self.symprec      = float(symprec)
+        self.symmetry_info: Optional[dict] = None   # ADR-0040
 
         # Supercell replication factors
         if np.isscalar(supercell):
@@ -240,6 +250,11 @@ class PhononCalculator:
                 f"with supercell[2] = {self.supercell[2]} > 1: replicating the "
                 "cell in z compresses the vacuum layer and corrupts the ESM "
                 "boundary condition.  Use supercell = [N, N, 1].")
+        if self.symmetry and uses_esm(force_fn):
+            raise ValueError(
+                "PhononCalculator: symmetry=True with ESM electrostatics is "
+                "refused: the ESM boundary condition need not share the "
+                "operations that act on z (ADR-0040).")
 
         # Results (populated after compute_ifc / compute_band_structure / etc.)
         self.IFC          : Optional[np.ndarray] = None   # (3N_sc, 3N_sc) eV/A^2
@@ -386,8 +401,10 @@ class PhononCalculator:
         if verbose and _mpi_rank == 0:
             parallel_str = f", {n_jobs} threads/rank" if n_jobs > 1 else ", serial"
             mpi_str = f", {_mpi_size} MPI ranks" if _HAS_MPI else ""
+            n_eval = ("symmetry-reduced force evaluations" if self.symmetry
+                      else f"{6 * self.N_basis} force evaluations")
             print(f"\n  Computing IFC  "
-                  f"({6 * self.N_basis} force evaluations, delta={delta} A, "
+                  f"({n_eval}, delta={delta} A, "
                   f"N_sc={N_sc}{parallel_str}{mpi_str}) ...")
 
         def _eval_displacement(j: int, b: int) -> np.ndarray:
@@ -434,6 +451,11 @@ class PhononCalculator:
         # worker threads inside it, only the single calling thread ever
         # writes the suppression flag -- worker threads only ever read it.
         origin = self._origin_indices()
+        if self.symmetry:
+            plan = self._symmetry_plan(verbose)
+            if plan is not None:
+                IFC = self._compute_ifc_symmetric(plan, n_jobs)
+                return self._finish_ifc(IFC, verbose)
         tasks = [(j, b) for j in origin for b in range(3)]
         i_start, i_end = _mpi_domain_split(len(tasks))
         local_tasks = tasks[i_start:i_end]
@@ -454,6 +476,12 @@ class PhononCalculator:
                         IFC_local[:, j * 3 + b] = fut.result().ravel()
 
         IFC = self._fill_by_translation(_mpi_allreduce_sum(IFC_local), origin)
+        return self._finish_ifc(IFC, verbose)
+
+    def _finish_ifc(self, IFC: np.ndarray, verbose: bool) -> np.ndarray:
+        """Symmetrise, enforce the acoustic sum rule and precompute D-ASR
+        on a full (translation-filled) IFC; store and return it."""
+        N_sc = self.N_sc
 
         # 1. Symmetrise (Newton's 3rd law: sum_ij = sum_ji^T)
         IFC = 0.5 * (IFC + IFC.T)
@@ -483,6 +511,140 @@ class PhononCalculator:
                   f"(ASR residual = {np.max(np.abs(row_sums)):.2e} eV/A^2)")
 
         return IFC
+
+    # ------------------------------------------------------------------ #
+    #  2b. Symmetry reduction (ADR-0040)                                   #
+    # ------------------------------------------------------------------ #
+
+    def _sc_index(self, basis: np.ndarray, cells: np.ndarray) -> np.ndarray:
+        """Supercell index of (basis atom, cell), the order of
+        _build_supercell: cell (n0, n1, n2) outer, basis atom inner."""
+        _, S1, S2 = self.supercell
+        return ((cells[:, 0] * S1 + cells[:, 1]) * S2 + cells[:, 2]) \
+            * self.N_basis + basis
+
+    def _symmetry_plan(self, verbose: bool) -> Optional[dict]:
+        """Operations, supercell permutations and the displacements to
+        compute; None when only the identity is left (the full method is
+        then used, bit for bit)."""
+        from .symmetry import greedy_spanning, spglib_operations
+        ops = spglib_operations(self.lattice_prim, self.positions,
+                                self.atom_types, self.masses, self.symprec)
+        S = np.asarray(self.supercell, dtype=np.int64)
+        # Keep the operations whose rotation maps the supercell lattice
+        # onto itself: S^-1 R S integer (fractional, column vectors).
+        R_sc = (ops.rot_frac * S[None, None, :]) / S[None, :, None]
+        ops = ops.keep(np.all(np.abs(R_sc - np.round(R_sc)) < 1e-8, axis=(1, 2)))
+        n_full = 6 * self.N_basis
+        info = ops.summary()
+        info.update({"enabled": True, "n_force_calls_full": n_full})
+        self.symmetry_info = info
+        if ops.is_identity_only:
+            info["n_force_calls"] = n_full
+            if verbose and _mpi_rank == 0:
+                print(f"  Symmetry      : {ops.symbol} ({ops.number}), identity "
+                      f"only with this supercell -> full method")
+            return None
+
+        cells = np.asarray(self._sc_cell, dtype=np.int64)
+        basis = np.asarray(self._sc_to_prim, dtype=np.int64)
+        # Supercell permutation of every operation: atom (b, n) goes to
+        # (perm[b], shift[b] + R n), cell index modulo the supercell.
+        sc_perm = np.empty((ops.n_ops, self.N_sc), dtype=np.int64)
+        for k in range(ops.n_ops):
+            new_cells = (ops.shift[k, basis] + cells @ ops.rot_frac[k].T) % S
+            sc_perm[k] = self._sc_index(ops.perm[k, basis], new_cells)
+
+        origin_of = {int(basis[j]): j for j in self._origin_indices()}
+        seen, reps = set(), []
+        for b in range(self.N_basis):
+            if b not in seen:
+                reps.append(b)
+                seen.update(int(x) for x in ops.perm[:, b])
+        axes = np.eye(3)
+        tasks = []                 # (supercell atom, displacement vector)
+        for b in reps:
+            site = ops.perm[:, b] == b
+            R_site = ops.rot_cart[site]
+            kept = greedy_spanning(axes, lambda u, R=R_site: R @ u, 3)
+            for i in kept:
+                u = axes[i]
+                tasks.append((origin_of[b], self.delta * u))
+                neg_image = np.any(np.all(np.abs(R_site @ u + u) < 1e-8, axis=1))
+                if not neg_image:
+                    tasks.append((origin_of[b], -self.delta * u))
+        info.update({"n_force_calls": len(tasks),
+                     "representatives": [int(b) for b in reps]})
+        if verbose and _mpi_rank == 0:
+            print(f"  Symmetry      : {ops.symbol} ({ops.number}), "
+                  f"{ops.n_found} operations, {ops.n_ops} kept with supercell "
+                  f"{list(self.supercell)}; {len(tasks)} force evaluations "
+                  f"({n_full} without symmetry)")
+        return {"ops": ops, "sc_perm": sc_perm, "tasks": tasks,
+                "cells": cells, "basis": basis, "origin_of": origin_of}
+
+    def _compute_ifc_symmetric(self, plan: dict, n_jobs: int) -> np.ndarray:
+        """IFC from the symmetry-reduced displacements (ADR-0040).
+
+        Every computed displacement d of atom a, with forces F, has the
+        image R d of atom sc_perm[a] with forces F'_{sc_perm[i]} = R F_i
+        under each operation.  The images are translated so that the
+        displaced atom lies in the origin cell, and each origin-cell
+        column block solves the least-squares problem
+        D Phi_col^T = -F over its images.  The set of images is closed
+        under d -> -d (either -d was computed or it is an image), so the
+        fit is the central difference and the residual forces of the
+        reference cancel.
+        """
+        ops, sc_perm, tasks = plan["ops"], plan["sc_perm"], plan["tasks"]
+        cells, basis, origin_of = plan["cells"], plan["basis"], plan["origin_of"]
+        N_sc = self.N_sc
+        S = np.asarray(self.supercell, dtype=np.int64)
+
+        i_start, i_end = _mpi_domain_split(len(tasks))
+        F_local = np.zeros((len(tasks), N_sc, 3))
+
+        def _forces(t):
+            j, d = tasks[t]
+            pos = self._pos_sc.copy()
+            pos[j] += d
+            _, F, _ = self.force_fn(self.lattice_sc, pos, self._types_sc)
+            return np.asarray(F, dtype=float)
+
+        with local_only():
+            idx = range(i_start, i_end)
+            if n_jobs == 1:
+                for t in idx:
+                    F_local[t] = _forces(t)
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=n_jobs) as ex:
+                    for t, F in zip(idx, ex.map(_forces, idx)):
+                        F_local[t] = F
+        F_all = _mpi_allreduce_sum(F_local)
+
+        # Normal equations per origin-cell basis atom: A = sum d d^T,
+        # B = sum d (-F)^T, Phi_col^T = A^-1 B.
+        A = np.zeros((self.N_basis, 3, 3))
+        B = np.zeros((self.N_basis, 3, N_sc * 3))
+        for t, (j, d) in enumerate(tasks):
+            F = F_all[t]
+            for k in range(ops.n_ops):
+                R = ops.rot_cart[k]
+                p = sc_perm[k]
+                a_img = p[j]
+                # Translate so that the displaced atom is in the origin cell.
+                p = self._sc_index(basis[p], (cells[p] - cells[a_img]) % S)
+                b_img = int(basis[a_img])
+                d_img = R @ d
+                F_img = np.empty_like(F)
+                F_img[p] = F @ R.T
+                A[b_img] += np.outer(d_img, d_img)
+                B[b_img] -= np.outer(d_img, F_img.ravel())
+        IFC = np.zeros((N_sc * 3, N_sc * 3))
+        for b, j in origin_of.items():
+            IFC[:, 3 * j:3 * j + 3] = np.linalg.solve(A[b], B[b]).T
+        return self._fill_by_translation(IFC, list(origin_of.values()))
 
     def _fill_by_translation(self, IFC: np.ndarray, origin: List[int]
                              ) -> np.ndarray:
