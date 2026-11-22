@@ -685,6 +685,10 @@ MLIPs and large MD with them):
 6. Lattice thermal conductivity from third-order force constants in the
    relaxation-time approximation (Q16); after 5, which reduces its
    displacements.
+   Done: ADR-0042 (0.3.0a6): `akitsushima bte`, own fc3 + RTA on the
+   ADR-0040 symmetry plan; matches phono3py with the same force
+   constants to ~1e-5 (Si, AlN); Si Tersoff 19^3 kappa(300 K) = 298
+   W/m/K; LJ Ar classical RTA 0.68 W/m/K against GK 0.68.
 7. Point-defect workflow: formation energy and migration barrier (Q16),
    a separate item from 6 (Q7).
 8. EAM, PPPM and ESM speed-ups (Q12 and addendum 4).
