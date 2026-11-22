@@ -167,6 +167,15 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.3.0a7 (ADR-0043): EAM (Zhou and setfl tables) in numba, PPPM on the
+> real FFT with numba charge assignment, and ESM Green functions applied
+> in O(Nz) without matrices: one force call, one thread, Zhou Ni 4000
+> atoms 4.2x, Buckingham + PPPM MgO 1.6x, ESM 64x64x256 7-8x, results
+> within 1e-13 of 0.3.0a6.  Force functions take `need_stress=False`
+> (stress returned as None); MD skips the Coulomb stress on steps that
+> write no pressure or trajectory frame, and phonon / BTE / NEB / TSA /
+> GCMC energy calls never compute it.
+>
 > 0.3.0a6 (ADR-0042): `akitsushima bte` computes the lattice thermal
 > conductivity from third-order force constants in the relaxation-time
 > approximation, for any akitsushima potential (MLIPs included): fc3 by

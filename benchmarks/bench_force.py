@@ -155,6 +155,22 @@ def synthetic_mlip(n_hidden):
     return ak.make_force_fn(model), acsf.n_per_atom
 
 
+def esm_slab(n=6, a=4.212, Lz=30.0, seed=1):
+    """Two rock-salt MgO layers centred on z = 0 (ESM frame), rattled."""
+    pos, t = [], []
+    for iz, z in enumerate((-a / 4, a / 4)):
+        for i in range(n):
+            for j in range(n):
+                for fx, fy, sp in ((0, 0, "Mg"), (0.5, 0.5, "Mg"), (0.5, 0, "O"), (0, 0.5, "O")):
+                    if iz == 1:
+                        sp = "O" if sp == "Mg" else "Mg"
+                    pos.append([(i + fx) * a, (j + fy) * a, z])
+                    t.append(sp)
+    lat = np.diag([n * a, n * a, Lz])
+    pos = np.array(pos) + np.random.default_rng(seed).normal(0, 0.05, (len(t), 3))
+    return lat, pos, t
+
+
 def build_cases(args):
     """(name, force_fn, r_cut or None, [(lattice, positions, types), ...])."""
     import akitsushima as ak
@@ -181,6 +197,16 @@ def build_cases(args):
             coulomb_method=method,
         )
         cases.append((f"buck_{method}_mgo", fn, R_CUT_MGO, structs))
+    # ESM slab (ADR-0043): Buckingham MgO with ESM electrostatics on a
+    # 64 x 64 x 256 grid, 6 x 6 rock-salt bilayer, Lz = 30 A.
+    slab = esm_slab()
+    for bc in ("bc1", "bc2", "bc3"):
+        fn = ak.make_force_fn(
+            "buckingham", buck_params=BUCK_MGO, charges=Q_MGO, r_cut=R_CUT_MGO,
+            coulomb_method="esm",
+            esm={"bc": bc, "sigma": 0.5, "n_grid_xy": 64, "n_grid_z": 256},
+        )
+        cases.append((f"buck_esm_{bc}_mgo_slab", fn, R_CUT_MGO, [slab]))
     fn, n_feat = synthetic_mlip(args.n_hidden)
     cases.append((f"acsf{n_feat}_elm{args.n_hidden}_si", fn, None, si))
     if args.mlip_model:

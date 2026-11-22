@@ -71,7 +71,7 @@ def _eam_cases():
 
 @pytest.mark.parametrize("name", ["zhou_ni", "zhou_nial", "setfl_nial"])
 def test_eam_numba_path_matches_the_numpy_path(name, tmp_path):
-    cases = dict((n, (f, s)) for n, f, s in _eam_cases())
+    cases = {n: (f, s) for n, f, s in _eam_cases()}
     if name == "setfl_nial":
         from akitsushima.engine.eam_zhou import write_setfl
 
@@ -111,7 +111,7 @@ def test_eam_bare_callables_keep_the_numpy_path():
     )
     assert pot._nb is None
     fn = make_force_fn(PotentialEngine().add(pot))
-    E, F, S = fn(*cubic(FCC, 3.0, 4, ["X"] * 4))
+    E, F, _S = fn(*cubic(FCC, 3.0, 4, ["X"] * 4))
     assert np.isfinite(E) and np.abs(F.sum(axis=0)).max() < 1e-10
 
 
@@ -170,7 +170,7 @@ def test_esm_recursions_match_the_matrix_reference(bc):
         n_grid_z=96,
         external_field=0.05 if bc == "bc2" else 0.0,
     )
-    E, F, S = calc(lat, pos, t)
+    _E, _F, S = calc(lat, pos, t)
     V_new = calc._V_Gz.copy()
     rho = calc._rho_Gz
     V_old = calc._solve_poisson_esm_matrix(
@@ -248,7 +248,7 @@ def _fns():
 
 @pytest.mark.parametrize("which", ["pppm", "ewald", "esm", "eam"])
 def test_need_stress_false_keeps_energy_and_forces_and_returns_none(which):
-    name, fn, (L, P, T) = [c for c in _fns() if c[0] == which][0]
+    _name, fn, (L, P, T) = next(c for c in _fns() if c[0] == which)
     assert accepts_need_stress(fn)
     E, F, S = fn(L, P, T)
     E2, F2, S2 = fn(L, P, T, need_stress=False)
