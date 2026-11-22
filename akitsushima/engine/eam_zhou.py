@@ -154,7 +154,7 @@ def zhou_eam(elements: dict, species: list, r_cut: Optional[float] = None,
     def cfac(a, b):
         return float(chi.get(f"{a}-{b}", chi.get(f"{b}-{a}", 1.0))) if a != b else 1.0
 
-    def switched(fn):
+    def switched(fn, spec):
         def val(r):
             S, _ = _switch(np.asarray(r, float), r_cut, width)
             return fn(np.asarray(r, float))[0] * S
@@ -164,6 +164,7 @@ def zhou_eam(elements: dict, species: list, r_cut: Optional[float] = None,
             v, dv = fn(r)
             S, dS = _switch(r, r_cut, width)
             return dv * S + v * dS
+        val._ak_spec = spec + (r_cut, width)   # numba form (ADR-0043)
         return val, der
 
     def cross(a, b):
@@ -181,14 +182,24 @@ def zhou_eam(elements: dict, species: list, r_cut: Optional[float] = None,
             return v, dv
         return fn
 
-    F_tab = {s: (lambda rho, p=P[s]: embedding(rho, p)[0],
-                 lambda rho, p=P[s]: embedding(rho, p)[1]) for s in species}
-    rho_tab = {s: switched(lambda r, p=P[s]: density(r, p)) for s in species}
+    def emb(p):
+        val = (lambda rho: embedding(rho, p)[0])
+        val._ak_spec = ("zhou_embedding", p)
+        return val, (lambda rho: embedding(rho, p)[1])
+
+    F_tab = {s: emb(P[s]) for s in species}
+    rho_tab = {s: switched(lambda r, p=P[s]: density(r, p), ("zhou_density", P[s]))
+               for s in species}
     phi_tab = {}
     for i, a in enumerate(species):
         for b in species[i:]:
-            fn = (lambda r, p=P[a]: pair_aa(r, p)) if a == b else cross(a, b)
-            phi_tab[frozenset((a, b))] = switched(fn)
+            if a == b:
+                fn = (lambda r, p=P[a]: pair_aa(r, p))
+                spec = ("zhou_pair", P[a])
+            else:
+                fn = cross(a, b)
+                spec = ("zhou_cross", P[a], P[b], cfac(a, b))
+            phi_tab[frozenset((a, b))] = switched(fn, spec)
     pot = EAMPotential(F_tab, rho_tab, phi_tab, r_cut=r_cut, species=species)
     pot.zhou_params = P
     pot.zhou_chi = {f"{a}-{b}": cfac(a, b) for i, a in enumerate(species)
@@ -283,13 +294,16 @@ def read_setfl(path: str, species: Optional[list] = None) -> EAMPotential:
     def spline(x, y):
         cs = CubicSpline(x, y)
         d = cs.derivative()
-        return (lambda z: cs(z)), (lambda z: d(z))
+        val = (lambda z: cs(z))
+        val._ak_spec = ("spline", cs.x, cs.c)          # numba form (ADR-0043)
+        return val, (lambda z: d(z))
 
     def over_r(x, y):
         cs = CubicSpline(x, y)
         d = cs.derivative()
-        return ((lambda z: cs(z) / z),
-                (lambda z: (d(z) * z - cs(z)) / (z * z)))
+        val = (lambda z: cs(z) / z)
+        val._ak_spec = ("spline_over_r", cs.x, cs.c)
+        return val, (lambda z: (d(z) * z - cs(z)) / (z * z))
 
     F_tab = {s: spline(rho_g, tables[("F", s)]) for s in names}
     rho_tab = {s: spline(r_g, tables[("rho", s)]) for s in names}

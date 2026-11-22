@@ -248,7 +248,7 @@ def make_force_fn(backend,
         _rc     = float(r_cut)
         _engine = PotentialEngine().add(BuckinghamPotential(buck_params, r_cut=_rc))
 
-        def _buck(lattice, positions, atom_types, neigh_list=None):
+        def _buck(lattice, positions, atom_types, neigh_list=None, need_stress=True):
             return compute_all_general(
                 lattice, positions, atom_types, _engine,
                 charges        = charges,
@@ -259,7 +259,8 @@ def make_force_fn(backend,
                 pppm_mesh      = pppm_mesh,
                 pppm_order     = pppm_order,
                 neigh_list     = neigh_list,
-                esm            = esm)
+                esm            = esm,
+                need_stress    = need_stress)
         _buck.r_cut  = _rc
         _buck.kind   = "buckingham"
         _buck.engine = _engine
@@ -296,7 +297,7 @@ def make_force_fn(backend,
             # i.e. from bound to unbound.  Route it through the same
             # electrostatics the 'buckingham' backend uses instead.
             def _engine_coulomb_fn(lattice, positions, atom_types,
-                                   neigh_list=None):
+                                   neigh_list=None, need_stress=True):
                 return compute_all_general(
                     lattice, positions, atom_types, _eng,
                     charges        = charges,
@@ -307,7 +308,8 @@ def make_force_fn(backend,
                     pppm_mesh      = pppm_mesh,
                     pppm_order     = pppm_order,
                     neigh_list     = neigh_list,
-                    esm            = esm)
+                    esm            = esm,
+                    need_stress    = need_stress)
             _engine_coulomb_fn.r_cut  = _rc
             _engine_coulomb_fn.kind   = "engine"
             _engine_coulomb_fn.engine = _eng
@@ -317,10 +319,14 @@ def make_force_fn(backend,
             _engine_coulomb_fn.charges = dict(charges)
             return _engine_coulomb_fn
 
-        def _engine_fn(lattice, positions, atom_types, neigh_list=None):
-            return _eng.compute(lattice, positions, atom_types,
-                                neigh_list=neigh_list,
-                                use_numba=_NUMBA_ENV)   # honour NUMBA_ENABLE env var
+        def _engine_fn(lattice, positions, atom_types, neigh_list=None,
+                       need_stress=True):
+            e, f, st = _eng.compute(lattice, positions, atom_types,
+                                    neigh_list=neigh_list,
+                                    use_numba=_NUMBA_ENV)   # honour NUMBA_ENABLE env var
+            # The short-range virials are cheap; None keeps the contract
+            # of need_stress=False (ADR-0043) uniform across closures.
+            return e, f, (st if need_stress else None)
         _engine_fn.r_cut  = _rc
         _engine_fn.kind   = "engine"
         _engine_fn.engine = _eng
@@ -375,6 +381,42 @@ def _resolve_force_fn(force_fn, r_cut,
     else:
         raise ValueError(
             f"{caller_name}: provide force_fn= or (buck_params=, charges=, r_cut=).")
+
+
+def accepts_need_stress(fn) -> bool:
+    """True when ``fn`` names a ``need_stress`` parameter (ADR-0043).
+
+    Unlike ``neigh_list``, a bare ``**kwargs`` does not count: wrappers that
+    forward their keywords to a backend which does not know the flag would
+    fail.  Results are cached per callable."""
+    try:
+        return _NEED_STRESS_CACHE[fn]
+    except (KeyError, TypeError):
+        pass
+    import inspect
+    try:
+        ok = "need_stress" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        ok = False
+    try:
+        _NEED_STRESS_CACHE[fn] = ok
+    except TypeError:
+        pass
+    return ok
+
+
+import weakref as _weakref  # noqa: E402
+
+_NEED_STRESS_CACHE = _weakref.WeakKeyDictionary()
+
+
+def call_force_fn(fn, lattice, positions, atom_types, need_stress=True, **kw):
+    """fn(lattice, positions, atom_types, **kw), with ``need_stress=False``
+    passed only to callables that accept it (ADR-0043).  The stress is None
+    only when the callable honoured the flag."""
+    if not need_stress and accepts_need_stress(fn):
+        return fn(lattice, positions, atom_types, need_stress=False, **kw)
+    return fn(lattice, positions, atom_types, **kw)
 
 
 def uses_esm(force_fn) -> bool:

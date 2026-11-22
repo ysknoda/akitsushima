@@ -12,6 +12,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from ..fitting.force_fn import call_force_fn
+
 from ..constants import (
     ATOMIC_MASS,
     EV_ANG_TO_AMU_ANG_FS2,
@@ -163,8 +165,10 @@ class TransitionStateAnalyser:
                 pos_p = self.positions.copy(); pos_p[atom_j, cart_j] += delta
                 pos_m = self.positions.copy(); pos_m[atom_j, cart_j] -= delta
 
-                _, F_p, _ = self.force_fn(self.lattice, pos_p, self.atom_types)
-                _, F_m, _ = self.force_fn(self.lattice, pos_m, self.atom_types)
+                _, F_p, _ = call_force_fn(self.force_fn, self.lattice, pos_p,
+                                          self.atom_types, need_stress=False)
+                _, F_m, _ = call_force_fn(self.force_fn, self.lattice, pos_m,
+                                          self.atom_types, need_stress=False)
 
                 # H[:, j] = -dF/dr_j
                 H_local[:, j] = -(F_p - F_m).ravel() / (2.0 * delta)

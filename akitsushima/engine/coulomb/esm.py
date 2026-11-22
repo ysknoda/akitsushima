@@ -305,6 +305,7 @@ class ESMCalculator:
                  lattice: np.ndarray,
                  positions: np.ndarray,
                  atom_types: list,
+                 need_stress: bool = True,
                  ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Compute ESM energy, forces, and stress.
@@ -321,6 +322,8 @@ class ESMCalculator:
         forces : (N,3) ndarray [eV/A]
         stress : (3,3) ndarray [eV/A^3]  -- xy components physically meaningful;
                                           z components set to 0 for BC1.
+                 None with ``need_stress=False`` (ADR-0043): the stress
+                 was 69 % of a bc2 call at 96x96x384.
         """
         lattice = np.asarray(lattice, dtype=float)
         positions = self._to_esm_frame(lattice, positions)
@@ -346,7 +349,7 @@ class ESMCalculator:
         # We always use the per-atom charges array resolved at init unless
         # update_geometry is called explicitly.
 
-        return self._compute_esm(lattice, positions)
+        return self._compute_esm(lattice, positions, need_stress)
 
     def _to_esm_frame(self, lattice, positions):
         """Map z into [-Lz/2, Lz/2) (ADR-0008, decision 3).
@@ -413,6 +416,7 @@ class ESMCalculator:
     def _compute_esm(self,
                       lattice: np.ndarray,
                       positions: np.ndarray,
+                      need_stress: bool = True,
                       ) -> Tuple[float, np.ndarray, np.ndarray]:
         """Main ESM pipeline: density -> potential -> energy/forces/stress."""
 
@@ -449,6 +453,8 @@ class ESMCalculator:
                                        self._GX, self._GY)
 
         # -- 6. Stress [eV/A^3] --------------------------------
+        if not need_stress:
+            return float(energy), forces, None
         stress = self._compute_stress(rho_Gz, V_Gz, Gpar,
                                        self._GX, self._GY,
                                        lattice, dz)
@@ -562,7 +568,76 @@ class ESMCalculator:
     #  Step 2: Solve Poisson equation                                     #
     # ------------------------------------------------------------------ #
 
-    def _solve_poisson_esm(self,
+    def _gpar_keys(self, gp: np.ndarray) -> np.ndarray:
+        """|G_par| rounded to 8 significant digits of its largest value, the
+        values the matrix path used for its kernels (kept so that results
+        agree with it to 1e-10; ADR-0043)."""
+        gmax = float(np.max(np.abs(gp)))
+        if gmax > 0.0:
+            scale = 10 ** (8 - int(np.floor(np.log10(gmax))) - 1)
+            return np.round(gp * scale) / scale
+        return gp.copy()
+
+    def _solve_poisson_esm(self, rho_Gz, Gpar, z_grid, dz, Lz):
+        """Poisson for every G_par != 0 by the O(Nz) recursions of
+        ``_esm_apply`` (ADR-0043); G_par = 0 as before.  The matrix path,
+        ``_solve_poisson_esm_matrix``, builds an Nz x Nz kernel per
+        distinct |G_par| and is kept as the reference."""
+        Nx, Ny, Nz = rho_Gz.shape
+        K = _ESM_EV_PER_E2_ANG
+        g = self._gpar_keys(Gpar.ravel())
+        X = np.ascontiguousarray(rho_Gz.reshape(-1, Nz))
+        Y = _esm_apply(g, np.asarray(z_grid, float), float(dz), float(Lz),
+                       _BC_CODE[self._bc], X, False)
+        on = g >= 1e-10
+        pref = np.where(on, 2.0 * np.pi / np.where(on, g, 1.0) * dz * K, 0.0)
+        V_Gz = (pref[:, None] * Y).reshape(Nx, Ny, Nz)
+        bc = self._bc
+        rho_z0 = rho_Gz[0, 0, :].real
+        V_z0 = self._solve_gpar0(rho_z0, z_grid, dz, Lz, bc)
+        V_Gz[0, 0, :] = V_z0 * K
+        if self.external_field != 0.0:
+            self._V_ext0 = (V_z0 - self._solve_gpar0(rho_z0, z_grid, dz, Lz, bc,
+                                                     field_on=False)) * K
+        else:
+            self._V_ext0 = np.zeros_like(V_z0)
+        return V_Gz
+
+    def _compute_stress(self, rho_Gz, V_Gz, Gpar, GX, GY, lattice, dz):
+        """In-plane stress as ``_compute_stress_matrix`` (see there for the
+        formula), with dG/d|G| applied by the O(Nz) recursions."""
+        K = _ESM_EV_PER_E2_ANG
+        area = self._Lx * self._Ly
+        V = abs(np.linalg.det(lattice))
+        Nz = rho_Gz.shape[2]
+        V_ion = V_Gz.copy()
+        V_ext0 = getattr(self, "_V_ext0", None)
+        if V_ext0 is not None:
+            V_ion[0, 0, :] -= V_ext0
+        E_ion = 0.5 * area * float(np.sum((np.conj(rho_Gz) * V_ion).real)) * dz
+        sig = self.sigma
+        gp = Gpar.ravel()
+        gx, gy = GX.ravel(), GY.ravel()
+        rho = np.ascontiguousarray(rho_Gz.reshape(-1, Nz))
+        Vf = V_ion.reshape(-1, Nz)
+        scale = 10 ** (8 - int(np.floor(np.log10(max(gp.max(), 1e-30)))) - 1)
+        k = np.round(gp * scale) / scale
+        dGr = _esm_apply(k, np.asarray(self._z_grid, float), float(dz),
+                         float(self._Lz), _BC_CODE[self._bc], rho, True)
+        on = k >= 1e-10
+        ks = np.where(on, k, 1.0)
+        t1 = (np.conj(rho) * Vf).real.sum(axis=1) * (-1.0 / ks - 2.0 * ks * sig**2)
+        t2 = (np.conj(rho) * dGr).real.sum(axis=1) * K * (2.0 * np.pi / ks) * dz
+        w = np.where(on, 0.5 * area * dz * (t1 + t2) / ks, 0.0)
+        S2 = np.zeros((2, 2))
+        S2[0, 0] = np.sum(w * gx ** 2)
+        S2[1, 1] = np.sum(w * gy ** 2)
+        S2[0, 1] = S2[1, 0] = np.sum(w * gx * gy)
+        stress = np.zeros((3, 3))
+        stress[:2, :2] = (E_ion * np.eye(2) + S2) / V
+        return stress
+
+    def _solve_poisson_esm_matrix(self,
                             rho_Gz: np.ndarray,
                             Gpar: np.ndarray,
                             z_grid: np.ndarray,
@@ -967,7 +1042,7 @@ class ESMCalculator:
     #  Step 5: Stress                                                     #
     # ------------------------------------------------------------------ #
 
-    def _compute_stress(self,
+    def _compute_stress_matrix(self,
                          rho_Gz: np.ndarray,
                          V_Gz: np.ndarray,
                          Gpar: np.ndarray,
@@ -1381,14 +1456,15 @@ class ESMCoulomb:
                                       charges=np.asarray(q, float))
         return self._esm
 
-    def compute(self, lattice, positions, atom_types, q):
-        """E [eV], F (N, 3) [eV/A], S (3, 3) [eV/A^3] (compressive-positive)."""
+    def compute(self, lattice, positions, atom_types, q, need_stress=True):
+        """E [eV], F (N, 3) [eV/A], S (3, 3) [eV/A^3] (compressive-positive);
+        S is None with ``need_stress=False`` (ADR-0043)."""
         lattice = np.asarray(lattice, float)
         q = np.asarray(q, float)
         esm = self._calc(lattice, positions, atom_types, q)
-        E, F, S = esm(lattice, positions, atom_types)
+        E, F, S = esm(lattice, positions, atom_types, need_stress=need_stress)
         e2, f2, s2 = self._real_space(lattice, esm._to_esm_frame(lattice, positions), q)
-        return E + e2, F + f2, S + s2
+        return E + e2, F + f2, (S + s2 if need_stress else None)
 
     def _real_space(self, lattice, pos, q):
         from scipy.special import erfc
@@ -1425,3 +1501,105 @@ class ESMCoulomb:
         V = abs(np.linalg.det(lattice))
         S = -np.einsum("ma,mb->ab", f, d) / V
         return float(e.sum()), F, 0.5 * (S + S.T)
+
+
+# ----------------------------------------------------------------------
+#  O(Nz) application of the ESM Green functions (ADR-0043)
+# ----------------------------------------------------------------------
+
+_BC_CODE = {"_vv": 0, "_vm": 1, "_mm": 2}
+
+
+def _esm_apply_py(gs, z, dz, Lz, bc, X, deriv):
+    """Y[c] = G(g_c) X[c] (deriv: dG/dg X[c]) for every column c, on the
+    uniform ascending grid z (z_0 = -Lz/2), without forming G.
+
+    G is a sum of terms of two kinds (see _green_function_matrix):
+    - exp(-g |z_i - z_j|): forward and backward recursions with the decay
+      a = exp(-g dz) < 1 (and their (i - j)-weighted companions for d/dg);
+    - exp(-g (s_i + t_j)) with s, t >= 0: rank-one (or triangular rank-one)
+      products u_i sum_j w_j X_j.
+    Every exponent is <= 0, so nothing overflows.  Columns with
+    g < 1e-10 (G_par = 0) are left zero."""
+    nc, nz = X.shape
+    Y = np.zeros((nc, nz), dtype=np.complex128)
+    for c in _prange(nc):
+        g = gs[c]
+        if g < 1e-10:
+            continue
+        x = X[c]
+        a = np.exp(-g * dz)
+        L = np.empty(nz, dtype=np.complex128)
+        R = np.empty(nz, dtype=np.complex128)
+        Mf = np.empty(nz, dtype=np.complex128)
+        Mb = np.empty(nz, dtype=np.complex128)
+        L[0] = x[0]
+        Mf[0] = 0.0
+        for i in range(1, nz):
+            L[i] = x[i] + a * L[i - 1]
+            Mf[i] = a * (Mf[i - 1] + L[i - 1])
+        R[nz - 1] = 0.0
+        Mb[nz - 1] = 0.0
+        for i in range(nz - 2, -1, -1):
+            R[i] = a * (x[i + 1] + R[i + 1])
+            Mb[i] = a * (Mb[i + 1] + R[i + 1] + x[i + 1])
+        if deriv:
+            T1 = -dz * (Mf + Mb)
+        else:
+            T1 = L + R
+        if bc == 0:
+            Y[c] = T1
+            continue
+        h = 0.5 * Lz
+        s = h - z                      # Lz/2 - z >= 0
+        u = np.exp(-g * s)
+        U = np.sum(u * x)
+        if bc == 1:
+            if deriv:
+                Us = np.sum(s * u * x)
+                Y[c] = T1 + s * u * U + u * Us
+            else:
+                Y[c] = T1 - u * U
+            continue
+        # bc == 2: grounded plates
+        t = h + z                      # Lz/2 + z >= 0
+        v = np.exp(-g * t)
+        Vv = np.sum(v * x)
+        sp = 3.0 * h - z               # 3 Lz/2 - z >= 0
+        p = np.exp(-g * sp)
+        # e2 = exp(-g (2 Lz - |z_i - z_j|)) = p_i v_j (j <= i), v_i p_j (j > i)
+        cv = np.cumsum(v * x)          # sum_{j<=i} v_j x_j
+        cp = np.cumsum((p * x)[::-1])[::-1]   # sum_{j>=i} p_j x_j
+        cp_gt = np.empty(nz, dtype=np.complex128)
+        cp_gt[: nz - 1] = cp[1:]
+        cp_gt[nz - 1] = 0.0
+        T4 = p * cv + v * cp_gt
+        N = T1 + T4 - u * U - v * Vv
+        D = 1.0 - np.exp(-2.0 * g * Lz)
+        if not deriv:
+            Y[c] = N / D
+            continue
+        T0 = L + R
+        N0 = T0 + T4 - u * U - v * Vv
+        cvt = np.cumsum(t * v * x)
+        cps = np.cumsum((sp * p * x)[::-1])[::-1]
+        cps_gt = np.empty(nz, dtype=np.complex128)
+        cps_gt[: nz - 1] = cps[1:]
+        cps_gt[nz - 1] = 0.0
+        dT4 = -(sp * p * cv + p * cvt + t * v * cp_gt + v * cps_gt)
+        Us = np.sum(s * u * x)
+        Vt = np.sum(t * v * x)
+        dN = T1 + dT4 + (s * u * U + u * Us) + (t * v * Vv + v * Vt)
+        dD = 2.0 * Lz * np.exp(-2.0 * g * Lz)
+        Y[c] = dN / D - N0 * dD / (D * D)
+    return Y
+
+
+try:
+    import numba as _nb
+
+    _prange = _nb.prange
+    _esm_apply = _nb.njit(parallel=True, cache=True)(_esm_apply_py)
+except ImportError:  # pragma: no cover - numba is a core dependency
+    _prange = range
+    _esm_apply = _esm_apply_py

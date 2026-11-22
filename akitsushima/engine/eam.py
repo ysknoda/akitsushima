@@ -122,6 +122,39 @@ class EAMPotential:
                          for sp in rho_table}
             self._phi = {pair: _make_interp(fn, r_grid)
                          for pair, fn in phi_table.items()}
+        self._nb = self._build_kernel_tables()
+
+    def _build_kernel_tables(self):
+        """numba tables when every function's form is known (ADR-0043):
+        (species index, RHO (ns,), FF (ns,), PHI (ns, ns), flat tables);
+        None otherwise (bare callables keep the numpy path)."""
+        from ._eam_kernels import build_tables, spec_of
+
+        sp = list(self.species)
+        specs, ids = [], {}
+
+        def fid(fn):
+            s = spec_of(fn)
+            if s is None:
+                raise LookupError
+            key = id(fn)
+            if key not in ids:
+                ids[key] = len(specs)
+                specs.append(s)
+            return ids[key]
+
+        ns = len(sp)
+        try:
+            RHO = np.array([fid(self._rho[s][0]) for s in sp], np.int64)
+            FF = np.array([fid(self._F[s][0]) for s in sp], np.int64)
+            PHI = np.zeros((ns, ns), np.int64)
+            for a in range(ns):
+                for b in range(ns):
+                    PHI[a, b] = fid(self._phi[frozenset({sp[a], sp[b]})][0])
+        except (LookupError, KeyError):
+            return None
+        return ({s: k for k, s in enumerate(sp)}, RHO, FF, PHI,
+                build_tables(specs))
 
     def _eval(self, func, dfunc, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Evaluate function and its derivative at points x."""
@@ -206,6 +239,21 @@ class EAMPotential:
 
         P = len(idx_i)
         p_start, p_end = _mpi_domain_split(P)
+        if self._nb is not None and p_start == 0 and p_end == P:
+            # ADR-0043: one numba pass when every function has a known form
+            # and this rank holds all pairs (no MPI split in effect).
+            from ._eam_kernels import eam_kernel
+
+            index, RHO, FF, PHI, tab = self._nb
+            try:
+                spc = np.array([index[a] for a in sp], np.int64)
+            except KeyError:
+                spc = None
+            if spc is not None:
+                e, f, vir = eam_kernel(N, idx_i, idx_j,
+                                       np.ascontiguousarray(rij_arr), r_arr,
+                                       spc, RHO, FF, PHI, *tab)
+                return float(e), f, vir / volume
         r_loc = r_arr[p_start:p_end]
         rij_loc = rij_arr[p_start:p_end]
         ii_loc = idx_i[p_start:p_end]
@@ -253,9 +301,18 @@ class EAMPotential:
         stress = np.zeros((3, 3))
         phi_r = np.zeros(len(r_loc))
         dphi_r = np.zeros(len(r_loc))
+        # Species-pair masks from integer codes (ADR-0043): the per-pair
+        # Python comprehension over frozensets was the largest cost of
+        # this path.  Same masks, so the same numbers.
+        codes = {s: k for k, s in enumerate(sorted(set(sp)))}
+        ci = np.array([codes[a] for a in sp], np.int64)[ii_loc]
+        cj = np.array([codes[a] for a in sp], np.int64)[jj_loc]
+        lo_c, hi_c = np.minimum(ci, cj), np.maximum(ci, cj)
         for pair_key, (phi_f, dphi_f) in self._phi.items():
-            pair_mask = np.array([frozenset({a, b}) == pair_key
-                                   for a, b in zip(sp_i_loc, sp_j_loc)])
+            ks = sorted(codes.get(x, -1) for x in pair_key)
+            if len(ks) == 1:
+                ks = ks * 2
+            pair_mask = (lo_c == ks[0]) & (hi_c == ks[1])
             if np.any(pair_mask):
                 pv, dpv = self._eval(phi_f, dphi_f, r_loc[pair_mask])
                 phi_r[pair_mask] = pv

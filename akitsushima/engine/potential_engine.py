@@ -139,6 +139,7 @@ def compute_all_general(
         neigh_list: Optional[NeighbourList] = None,
         use_numba: bool = False,
         esm: Optional[dict] = None,
+        need_stress: bool = True,
         ) -> Tuple[float, np.ndarray, np.ndarray]:
     """
     Unified energy / force / stress driver for any combination of potentials.
@@ -151,6 +152,10 @@ def compute_all_general(
     coulomb_method : 'ewald' | 'pppm' | 'esm' (ADR-0008: slab boundary
                  conditions; settings in ``esm`` = {bc, sigma, n_grid_xy,
                  n_grid_z, external_field}).
+    need_stress : False skips the Coulomb stress (PPPM mesh virial, ESM
+                 stress, Ewald reciprocal virial) and returns None for the
+                 stress (ADR-0043).  The short-range virial is cheap and
+                 computed anyway.
 
     Returns
     -------
@@ -170,7 +175,7 @@ def compute_all_general(
         if np.any(np.abs(q) > 1e-10):
             if coulomb_method == "esm":
                 e_c, f_c, s_c = _esm_coulomb(esm).compute(
-                    lattice, positions, atom_types, q)
+                    lattice, positions, atom_types, q, need_stress=need_stress)
             elif coulomb_method == "pppm":
                 alpha = (_pppm_alpha_from_accuracy(rc, pppm_accuracy)
                          if ewald_alpha is None else ewald_alpha)
@@ -203,11 +208,14 @@ def compute_all_general(
                 if not np.allclose(solver.lattice, lattice, atol=1e-10):
                     solver.update_lattice(lattice)
                 e_c, f_c, s_c = solver.compute(positions, q,
-                                                neigh_list=neigh_list)
+                                                neigh_list=neigh_list,
+                                                need_stress=need_stress)
             else:
                 alpha = (5.0 / rc if ewald_alpha is None else ewald_alpha)
                 e_c, f_c, s_c = ewald_sum(
-                    lattice, positions, q, alpha=alpha, r_cut=rc)
-            return e_sr + e_c, f_sr + f_c, s_sr + s_c
+                    lattice, positions, q, alpha=alpha, r_cut=rc,
+                    need_stress=need_stress)
+            return (e_sr + e_c, f_sr + f_c,
+                    s_sr + s_c if need_stress else None)
 
-    return e_sr, f_sr, s_sr
+    return e_sr, f_sr, (s_sr if need_stress else None)

@@ -691,7 +691,12 @@ MLIPs and large MD with them):
    W/m/K; LJ Ar classical RTA 0.68 W/m/K against GK 0.68.
 7. Point-defect workflow: formation energy and migration barrier (Q16),
    a separate item from 6 (Q7).
+   Skipped by the user on 2026-11-22, after round 1 of its grilling
+   (Q1-Q9 asked, none answered); not scheduled.
 8. EAM, PPPM and ESM speed-ups (Q12 and addendum 4).
+   Done: ADR-0043 (0.3.0a7): `need_stress`, EAM in numba (4.2-4.4x),
+   PPPM on the real FFT (1.6x, held by the Buckingham pair grouping),
+   ESM Green functions in O(Nz) (7-8x); results within 1e-13.
 9. GPU, ADR-0016: still gated on access to the H100 (Q4).
 `pytest-xdist` is added only if the full suite exceeds 20 min (Q9).
 

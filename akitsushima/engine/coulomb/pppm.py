@@ -166,6 +166,56 @@ class PPPMSolver:
 
         # Pre-compute optimal influence function on the M^3 k-mesh
         self._G_mesh = self._build_influence_function()
+        self._setup_half_spectrum()
+
+    def _setup_half_spectrum(self) -> None:
+        """Mesh factors on the rfftn half spectrum (M, M, M//2 + 1), built
+        once per lattice (ADR-0043).
+
+        The full-FFT path sums over every mesh point with that point's own
+        k and G, and takes the real part of a complex inverse FFT.  On an
+        even mesh the Nyquist index m = -M/2 is its own negative, so k(-k)
+        is not -k(k) there and the summand is not Hermitian; Re(ifftn)
+        projects it.  To reproduce those sums exactly, every factor is
+        averaged with its value at the partner index of -k:
+            Geff = (G(k) + G(-k)) / 2               energy (even)
+            Keff = (k G(k) - k(-k) G(-k)) / 2        field (odd)
+            Seff = (S(k) + S(-k)) / 2                stress (even)
+        so that i Keff rho is exactly Hermitian (irfftn is then exact) and
+        the half-spectrum sums with weight 2 (1 on the planes m3 = 0 and,
+        M even, m3 = M/2, which hold their own partners) equal the
+        full-mesh sums."""
+        M = self.mesh
+        mh = M // 2 + 1
+        m = np.fft.fftfreq(M) * M
+        m1, m2, m3 = np.meshgrid(m, m, m, indexing='ij')
+        R = self.recip
+        kf = np.stack([m1 * R[0, a] + m2 * R[1, a] + m3 * R[2, a]
+                       for a in range(3)])                  # (3, M, M, M)
+        k2 = np.sum(kf ** 2, axis=0)
+        G = self._G_mesh
+        ip = (-np.arange(M)) % M                            # index of -m
+
+        def partner(A):
+            return A[..., ip, :, :][..., :, ip, :][..., :, :, ip]
+
+        on = k2 > 1e-14
+        safe = np.where(on, k2, 1.0)
+        w = np.where(on, (2.0 + k2 / (2.0 * self.alpha ** 2)) / safe, 0.0)
+        Sf = np.empty((3, 3, M, M, M))
+        for a in range(3):
+            for b in range(3):
+                Sf[a, b] = np.where(on, G * ((a == b) - w * kf[a] * kf[b]), 0.0)
+        Gp = partner(G)
+        self._Geff = np.ascontiguousarray((0.5 * (G + Gp))[:, :, :mh])
+        self._Keff = np.ascontiguousarray(
+            (0.5 * (kf * G - partner(kf) * Gp))[..., :mh])
+        self._Seff = np.ascontiguousarray((0.5 * (Sf + partner(Sf)))[..., :mh])
+        wt = np.full(mh, 2.0)
+        wt[0] = 1.0
+        if M % 2 == 0:
+            wt[-1] = 1.0
+        self._wh = wt
 
     # ------------------------------------------------------------------
     # Optimal influence function  G(k)
@@ -537,7 +587,8 @@ class PPPMSolver:
     def compute(self,
                 positions: np.ndarray,
                 charges: np.ndarray,
-                neigh_list: Optional[object] = None
+                neigh_list: Optional[object] = None,
+                need_stress: bool = True,
                 ) -> Tuple[float, np.ndarray, np.ndarray]:
         """
         Compute total Coulomb energy, forces, and stress via PPPM.
@@ -563,28 +614,47 @@ class PPPMSolver:
             self.lattice, positions, charges, alpha, self.r_cut,
             neigh_list=neigh_list)
 
-        # 2. Charge assignment -> FFT
-        rho_mesh = self._assign_charges(positions, charges)
-        rho_k = np.fft.fftn(rho_mesh)
-
-        # 3. Mesh energy  E_mesh = (1/2) sum_k G(k)|rho_i|^2
-        phi_k = self._solve_poisson(rho_mesh)
-        e_mesh = self._mesh_energy(rho_k, phi_k)
-
-        # 4. Mesh forces via back-interpolation  O(M^3logM + N.p^3)
-        f_mesh = self._mesh_forces(positions, charges, rho_k)
-
-        # 5. Mesh stress (reciprocal-space virial)
-        s_mesh = self._mesh_stress(rho_k)
+        # 2-4. Mesh part on the real-FFT half spectrum (ADR-0043): one
+        # rfftn of the charge mesh (it was transformed twice, with the
+        # complex FFT), three irfftn for the field, B-spline weights built
+        # once and shared by assignment and gather (numba).  Same sums as
+        # _assign_charges / _mesh_energy / _mesh_forces, which stay as the
+        # full-FFT reference.
+        M, p = self.mesh, self.order
+        frac = positions @ self.inv_lat
+        frac -= np.floor(frac)
+        ix0, W = self._bspline_weights_all(frac * M, p)
+        ix0 = np.ascontiguousarray(ix0, dtype=np.int64)
+        W = np.ascontiguousarray(W)
+        q = np.ascontiguousarray(charges, dtype=float)
+        rho_mesh = _assign_kernel(ix0, W, q, M)
+        rho_kh = np.fft.rfftn(rho_mesh)
+        e_mesh = 0.5 * float(np.sum(self._wh * self._Geff * np.abs(rho_kh) ** 2))
+        M3 = M ** 3
+        E = np.empty((3, M, M, M))
+        for a in range(3):
+            E[a] = -M3 * np.fft.irfftn(1j * self._Keff[a] * rho_kh, s=(M, M, M),
+                                          axes=(0, 1, 2))
+        f_mesh = _gather_kernel(ix0, W, q, E, M)
+        rho_k = rho_kh
 
         # 6. Corrections
         e_self = self._self_energy(charges, alpha)
         e_charge = self._charged_system(charges, alpha, self.volume)
+        energy = e_real + e_mesh - e_self + e_charge
 
-        return (e_real + e_mesh - e_self + e_charge,
-                f_real + f_mesh,
-                s_real + s_mesh)
+        # 5. Mesh stress (reciprocal-space virial): only when asked for
+        # (ADR-0043; 28 % of a 3600-atom ZnO call).
+        if not need_stress:
+            return energy, f_real + f_mesh, None
+        s_mesh = self._mesh_stress_half(rho_k)
+        return energy, f_real + f_mesh, s_real + s_mesh
 
+    def _mesh_stress_half(self, rho_kh: np.ndarray) -> np.ndarray:
+        """_mesh_stress on the half spectrum (see _setup_half_spectrum)."""
+        a2 = self._wh * np.abs(rho_kh) ** 2
+        S = np.einsum("abxyz,xyz->ab", self._Seff, a2)
+        return 0.5 * (S + S.T) / (2.0 * self.volume)
 
 def _pppm_alpha_from_accuracy(r_cut: float, accuracy: float = 1e-5) -> float:
     """
@@ -634,3 +704,64 @@ def _pppm_mesh_from_alpha(lattice: np.ndarray,
     K = max(3.0, -np.log10(max(float(accuracy), 1e-30)) - 1.0)
     M_min = max(int(np.ceil(K * alpha * L_max)), 16)
     return int(next_fast_len(M_min))
+
+
+# ----------------------------------------------------------------------
+#  numba kernels (ADR-0043)
+# ----------------------------------------------------------------------
+
+
+def _assign_kernel_py(ix0, W, q, M):
+    """rho[GX, GY, GZ] += q * (wx * wy) * wz, atoms in order (np.add.at's
+    order in _assign_charges)."""
+    N, _, p = W.shape
+    rho = np.zeros((M, M, M))
+    for n in range(N):
+        for a in range(p):
+            gx = (ix0[n, 0] + a) % M
+            wa = W[n, 0, a]
+            for b in range(p):
+                gy = (ix0[n, 1] + b) % M
+                wab = wa * W[n, 1, b]
+                for c in range(p):
+                    gz = (ix0[n, 2] + c) % M
+                    rho[gx, gy, gz] += q[n] * (wab * W[n, 2, c])
+    return rho
+
+
+def _gather_kernel_py(ix0, W, q, E, M):
+    """F_n = q_n sum_stencil (wx * wy) * wz E[:, gx, gy, gz]."""
+    N, _, p = W.shape
+    out = np.zeros((N, 3))
+    for n in _prange(N):
+        ex = 0.0
+        ey = 0.0
+        ez = 0.0
+        for a in range(p):
+            gx = (ix0[n, 0] + a) % M
+            wa = W[n, 0, a]
+            for b in range(p):
+                gy = (ix0[n, 1] + b) % M
+                wab = wa * W[n, 1, b]
+                for c in range(p):
+                    gz = (ix0[n, 2] + c) % M
+                    w = wab * W[n, 2, c]
+                    ex += w * E[0, gx, gy, gz]
+                    ey += w * E[1, gx, gy, gz]
+                    ez += w * E[2, gx, gy, gz]
+        out[n, 0] = q[n] * ex
+        out[n, 1] = q[n] * ey
+        out[n, 2] = q[n] * ez
+    return out
+
+
+try:
+    import numba as _nb
+
+    _prange = _nb.prange
+    _assign_kernel = _nb.njit(cache=True)(_assign_kernel_py)
+    _gather_kernel = _nb.njit(parallel=True, cache=True)(_gather_kernel_py)
+except ImportError:  # pragma: no cover - numba is a core dependency
+    _prange = range
+    _assign_kernel = _assign_kernel_py
+    _gather_kernel = _gather_kernel_py
