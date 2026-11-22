@@ -171,9 +171,9 @@ Three findings:
 - Lattice thermal conductivity from third-order force constants in the
   relaxation-time approximation; point-defect formation energy and
   migration barrier as one workflow (Q16).
-- phonopy force constants and `FORCE_SETS` output; spglib symmetry to
-  reduce the phonon displacements and elastic strains; reading LAMMPS
-  potential files (`.sw`, `.tersoff`) (Q17).
+- spglib symmetry to reduce the phonon displacements and elastic
+  strains (Q17).  phonopy output and LAMMPS potential files, first
+  listed here, moved to tier C on 2026-11-22 (addendum 6).
 - GPU, ADR-0016 (Q23): stage 1 starts after step 5 and once access to
   the H100 is known.
 - `pytest-xdist` (Q13): not added after the durations of step 4
@@ -200,6 +200,9 @@ Three findings:
   integration (Q16).
 - New potential families: MEAM, core-shell, D3 dispersion, variable
   charge (Q17); chosen when a system needs one.
+- phonopy force constants and `FORCE_SETS` output; reading (and
+  writing) LAMMPS potential files (`.sw`, `.tersoff`) (Q17).  Moved from
+  tier B item 5 by the user on 2026-11-22 as not urgent (addendum 6).
 - DFT-free calculation of any system (added 2026-11-15, ADR-0029
   follow-up): an existing universal MLIP as an external engine, or a
   package-native multi-element atom-centred model.  Notes in ADR-0029.
@@ -674,6 +677,8 @@ MLIPs and large MD with them):
    in its ledger; the template md_quench no longer fails on `tau_baro`.
 5. phonopy force constants and `FORCE_SETS`, spglib reduction of
    displacements and strains, LAMMPS potential files (Q17).
+   Re-scoped on 2026-11-22 (addendum 6): the spglib reduction only,
+   ADR-0040; phonopy output and LAMMPS files moved to tier C.
 6. Lattice thermal conductivity from third-order force constants in the
    relaxation-time approximation (Q16); after 5, which reduces its
    displacements.
@@ -728,3 +733,21 @@ needing two or more cores waits for the user's word.
 - Still held: the parallel matrix, the idle baseline and the durability
   runs.
 
+
+## Addendum 6: tier B item 5 re-scoped (grilling 2026-11-22, after 0.3.0a3)
+
+Before the grilling of item 5 the user asked for its purpose and its
+effect on other items.  The answer:
+- the phonopy output serves interoperability (comparing MLIP and DFT
+  phonons in one format, phonopy's own tools);
+- the LAMMPS files serve using published potentials without
+  transcription, and handing fitted SW / Tersoff sets to LAMMPS;
+- the spglib reduction saves force calls on ordered crystals, and is the
+  prerequisite of item 6.
+
+The user judged the phonopy output and the LAMMPS potential files not
+urgent and moved both to tier C.  Item 5 is now the spglib reduction of
+the phonon displacements and the elastic strains only.  It is designed
+in ADR-0040 (opt-in `symmetry: true`, own implementation on spglib
+operations, phonopy as a test reference, version 0.3.0a4).  The order of
+the remaining tier B items is unchanged.
