@@ -26,6 +26,15 @@ __all__ = [
 # spglib's own default distance tolerance [A].
 DEFAULT_SYMPREC = 1e-5
 
+# The atom mapping accepts images up to MAPPING_FACTOR * symprec away
+# (ADR-0041 decision 6).  spglib's own overlap test does not bound the
+# Cartesian distance of every atom by symprec: on 12 variable-cell-relaxed
+# Si / AlN supercells at symprec 1e-5 to 1e-3 the largest residual of an
+# operation spglib accepted was 1.53 symprec (1.08 in a second case), and
+# a strict 1 * symprec check refused both.  3 leaves a factor ~2 of margin;
+# the permutation must still be a bijection between atoms of one kind.
+MAPPING_FACTOR = 3.0
+
 
 def require_spglib():
     """Return the spglib module, or stop with the install hint."""
@@ -70,6 +79,8 @@ class SymmetryOperations:
                 vector shift[k, i]: R f_i + t = f_perm + shift.
     symbol, number : international symbol and space-group number.
     symprec   : the tolerance used [A].
+    max_residual : largest distance between an atom's image and the atom
+                it is mapped onto, over all operations [A].
     """
 
     lattice: np.ndarray
@@ -82,6 +93,7 @@ class SymmetryOperations:
     number: int
     symprec: float
     n_found: int = field(default=0)
+    max_residual: float = field(default=0.0)
 
     @property
     def n_ops(self) -> int:
@@ -105,6 +117,7 @@ class SymmetryOperations:
             self.number,
             self.symprec,
             self.n_found,
+            self.max_residual,
         )
 
     def summary(self) -> dict:
@@ -114,11 +127,13 @@ class SymmetryOperations:
             "n_operations": self.n_found,
             "n_operations_used": self.n_ops,
             "symprec_A": self.symprec,
+            "max_mapping_residual_A": self.max_residual,
         }
 
 
-def _atom_mapping(lattice, frac, numbers, R, t, symprec, chunk=256):
-    """perm, shift of one operation; None when an atom has no image.
+def _atom_mapping(lattice, frac, numbers, R, t, tol, chunk=256):
+    """perm, shift, largest residual of one operation; None when an atom
+    has no image within ``tol`` [A] or the mapping is not a bijection.
 
     Distances are taken in chunks of rows so that a large cell (an
     elastic supercell of a few thousand atoms) needs no N x N x 3 array.
@@ -127,6 +142,7 @@ def _atom_mapping(lattice, frac, numbers, R, t, symprec, chunk=256):
     n_at = len(frac)
     perm = np.empty(n_at, dtype=np.int64)
     shift = np.empty((n_at, 3), dtype=np.int64)
+    worst = 0.0
     for a in range(0, n_at, chunk):
         d = img[a:a + chunk, None, :] - frac[None, :, :]
         n = np.round(d)
@@ -134,13 +150,15 @@ def _atom_mapping(lattice, frac, numbers, R, t, symprec, chunk=256):
         dist[numbers[a:a + chunk, None] != numbers[None, :]] = np.inf
         best = np.argmin(dist, axis=1)
         rows = np.arange(len(best))
-        if np.any(dist[rows, best] > symprec):
+        d_best = dist[rows, best]
+        if np.any(d_best > tol):
             return None
+        worst = max(worst, float(d_best.max()))
         perm[a:a + chunk] = best
         shift[a:a + chunk] = n[rows, best]
     if len(np.unique(perm)) != n_at:
         return None
-    return perm, shift
+    return perm, shift, worst
 
 
 def spglib_operations(
@@ -193,17 +211,19 @@ def spglib_operations(
     LT = lattice.T
     LT_inv = np.linalg.inv(LT)
     rot_cart = np.einsum("ij,njk,kl->nil", LT, rots, LT_inv)
-    perms, shifts = [], []
+    perms, shifts, worst = [], [], 0.0
+    tol = MAPPING_FACTOR * symprec
     for k in range(len(rots)):
-        m = _atom_mapping(lattice, frac, numbers, rots[k], trans[k], symprec)
+        m = _atom_mapping(lattice, frac, numbers, rots[k], trans[k], tol)
         if m is None:
             raise ValueError(
                 f"symmetry: spglib operation {k} (rotation "
                 f"{rots[k].tolist()}, translation {np.round(trans[k], 6).tolist()}) "
-                f"does not map every atom onto an atom of the same kind within "
-                f"symprec = {symprec} A.  Tighten symprec or symmetrise the "
-                f"structure."
+                f"does not map every atom onto a distinct atom of the same kind "
+                f"within {MAPPING_FACTOR:g} x symprec = {tol:g} A.  Tighten "
+                f"symprec or symmetrise the structure."
             )
+        worst = max(worst, m[2])
         # The mapping used wrapped coordinates; express the shift for the
         # positions as given: R (fw_i + w_i) + t = (fw_p + w_p) + shift.
         perms.append(m[0])
@@ -220,6 +240,7 @@ def spglib_operations(
         number=int(num.rstrip(")") or 0),
         symprec=float(symprec),
         n_found=n_found,
+        max_residual=worst,
     )
 
 

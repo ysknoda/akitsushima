@@ -344,7 +344,7 @@ def test_an_operation_that_does_not_map_the_atoms_is_an_error(monkeypatch):
         return s
 
     monkeypatch.setattr(spglib, "get_symmetry", bogus)
-    with pytest.raises(ValueError, match="does not map every atom"):
+    with pytest.raises(ValueError, match="does not map every atom onto a distinct atom"):
         spglib_operations(lat, pos, types)
 
 
@@ -433,3 +433,29 @@ def test_dielectric_refuses_the_symmetry_key(tmp_path, monkeypatch):
     (tmp_path / "d.yaml").write_text(yaml.safe_dump(cfg))
     with pytest.raises(ValueError, match="not supported"):
         mod.cmd_dielectric(_ns(tmp_path / "d.yaml"))
+
+
+def test_atom_mapping_accepts_up_to_mapping_factor_symprec():
+    """ADR-0040 addendum: spglib accepts operations whose residual exceeds
+    symprec (measured up to 1.53 symprec), so the mapping allows
+    MAPPING_FACTOR * symprec, still needs a bijection, and reports the
+    largest residual."""
+    from akitsushima.solvers.symmetry import MAPPING_FACTOR, _atom_mapping
+
+    a = 5.43
+    lat = 0.5 * a * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]], float)
+    frac0 = np.array([[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]])
+    numbers = np.array([1, 1])
+    # inversion through the bond centre swaps the two atoms
+    R, t = -np.eye(3, dtype=np.int64), np.array([0.25, 0.25, 0.25])
+    sp = 1e-5
+    for k in (2.0, MAPPING_FACTOR + 0.5):
+        frac = frac0.copy()
+        frac[1] += np.linalg.solve(lat.T, [k * sp, 0.0, 0.0])  # |delta| = k symprec
+        m = _atom_mapping(lat, frac, numbers, R, t, MAPPING_FACTOR * sp)
+        if k < MAPPING_FACTOR:
+            assert m is not None
+            assert list(m[0]) == [1, 0]
+            assert m[2] == pytest.approx(k * sp, rel=1e-6)
+        else:
+            assert m is None
