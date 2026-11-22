@@ -167,6 +167,17 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.3.0a5 (ADR-0041): variable-cell relaxation (`relax_cell: true`) now
+> moves the cell by a deformation gradient (`cell_coordinates: strain`,
+> the new default), so a symmetric crystal keeps its space group: Si (fcc
+> primitive) and AlN (wurtzite) stay Fd-3m / P6_3mc at symprec 1e-5 for
+> all six methods, where the raw lattice components left ~1e-5 A of
+> symmetry-breaking strain.  Default `relax_cell` results change within
+> the convergence tolerances; `cell_coordinates: lattice` restores the
+> old path bit for bit.  `method: rfo` with `relax_cell` now converges;
+> `cell_update_scheme: vasp` is corrected (`lattice @ stress`) and
+> deprecated with strain coordinates.
+>
 > 0.3.0a4 (ADR-0040): `symmetry: true` in `phonon`, `qha`, `gruneisen`,
 > `kappa` (Slack section) and `elastic` uses the space group (spglib,
 > `pip install akitsushima[symmetry]`) to displace only inequivalent

@@ -401,3 +401,37 @@ Wall time on the AlN MLIP: 1.8x (phonon) and 2.2x (elastic).
   third-order force constants (item 6, its own ADR).
 - Symmetrising an input structure (spglib's refinement): left to the
   user's own preparation of the structure.
+
+## Addendum (2026-11-22, 0.3.0a5): mapping tolerance (ADR-0041 decision 6)
+
+`spglib_operations` refused, as decision 4 says it should, any operation
+whose atom mapping failed at symprec.  But spglib's own overlap test
+does not bound the Cartesian distance of every atom by symprec.  On a
+slightly distorted AlN it accepted an operation at symprec 1e-5 that the
+strict check then refused, so `symmetry: true` stopped with an error on
+a structure spglib had classified without complaint.
+
+**Measurement.**  Twelve variable-cell-relaxed supercells from the
+raw-lattice path (Si fcc primitive 3x3x3, AlN 3x3x2; six methods,
+constraints, fix_volume, the old `vasp` scheme) at symprec 1e-5, 1e-4
+and 1e-3 make 36 cases.  The largest mapping residual of an operation
+spglib accepted was:
+
+- 1.53 symprec for AlN, L-BFGS + `vasp`, at 1e-4;
+- 1.08 symprec for Si, L-BFGS, at 1e-4;
+- at most 0.95 symprec for the other 34 cases.
+
+The strict check refused both. 450 randomly rattled or strained cells at
+symprec 1e-4 stayed at or below 1.26.
+
+**Change.**  The mapping now accepts images up to `MAPPING_FACTOR *
+symprec` with `MAPPING_FACTOR = 3`, about twice the largest residual
+measured.  The rest of decision 4 is unchanged:
+
+- the mapping must still be a bijection between atoms of one kind;
+- an operation that fails the 3 x symprec test is still an error.
+
+The largest residual over all operations is stored as
+`SymmetryOperations.max_residual` and reported in the summary as
+`max_mapping_residual_A`, so the `symmetry` record of every results
+file shows it.

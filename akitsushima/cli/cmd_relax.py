@@ -59,6 +59,7 @@ def cmd_relax(args) -> int:
         print(f"  max_steps  : {rel_cfg.get('max_steps', 2000)}")
         print(f"  save_best  : {rel_cfg.get('save_best', False)}")
         if rel_cfg.get("relax_cell", False):
+            print(f"  cell_coordinates   : {rel_cfg.get('cell_coordinates', 'strain')}")
             print(f"  cell_update_scheme : {rel_cfg.get('cell_update_scheme', 'generalized_force')}")
             print(f"  lattice_constraints: {rel_cfg.get('lattice_constraints', None)} (null=all free)")
             print(f"  fix_volume : {rel_cfg.get('fix_volume', False)}")
@@ -128,6 +129,7 @@ def cmd_relax(args) -> int:
         dt_max       = rel_cfg.get("dt_max",       None),
         cell_update_scheme = rel_cfg.get("cell_update_scheme", "generalized_force"),
         lattice_constraints = rel_cfg.get("lattice_constraints", None),
+        cell_coordinates = rel_cfg.get("cell_coordinates", "strain"),
         # These eight reach GeometryOptimiser for the first time here.
         # The template offers method: rfo but exposed none of the
         # RFO-specific knobs, so P-RFO saddle-point mode (uphill) and

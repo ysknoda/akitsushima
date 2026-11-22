@@ -173,19 +173,29 @@ relax:
   dt_start:      null                # null = use default (0.1 fs)
   dt_max:        null                # null = use default (1.0 fs)
 
-  # -- Cell update scheme (relax_cell: true only) -----------------------
-  # 'generalized_force' (default): physically-derived Parrinello-Rahman-
-  #   style force f_cell = +volume * (h^-T @ stress) (exact dE/dh with
-  #   correct sign; '@' is a matrix product and h^-T multiplies stress
-  #   from the LEFT). Can amplify small stress asymmetries into large
-  #   cell-shape changes for strongly non-orthogonal (hexagonal,
-  #   monoclinic, ...) cells, since h^-T depends sensitively on the
-  #   current cell shape.
-  # 'vasp': direct update f_cell = stress @ lattice (no lattice-inverse
-  #   factor), mirroring VASP's own cell-relaxation formula (dyna.F).
-  #   Not a strict energy gradient, but an empirically well-behaved,
-  #   numerically gentler update rule -- worth trying if
-  #   'generalized_force' behaves erratically for a non-orthogonal cell.
+  # -- Cell coordinates (relax_cell: true only, ADR-0041) ----------------
+  # 'strain' (default): the cell moves by a deformation gradient F
+  #   relative to the starting cell (h = h0 F^T, atoms carried along).
+  #   The step is the same for any choice of lattice vectors, so a
+  #   symmetric crystal stays symmetric (spglib finds the same space
+  #   group at symprec 1e-5 after the relaxation).
+  # 'lattice': the 9 raw lattice components are the coordinates (the
+  #   behaviour before 0.3.0a5).  For non-orthogonal cells (fcc
+  #   primitive, hexagonal, ...) an isotropic stress gives an anisotropic
+  #   step, and the relaxed crystal keeps ~1e-5 A of symmetry-breaking
+  #   strain.  Use it only to reproduce older results or to continue an
+  #   older checkpoint.
+  cell_coordinates: strain           # strain | lattice
+
+  # -- Cell update scheme (cell_coordinates: lattice only) --------------
+  # 'generalized_force' (default): f_cell = +volume * (h^-T @ stress),
+  #   the exact dE/dh ('@' is a matrix product; h^-T multiplies stress
+  #   from the LEFT).
+  # 'vasp': f_cell = lattice @ stress, VASP's update (dyna.F) for
+  #   lattice vectors as rows (stress @ lattice before 0.3.0a5).  Not an
+  #   exact energy gradient.
+  # With cell_coordinates: strain the scheme has no effect; 'vasp' then
+  # warns and is deprecated (removed at the next minor release).
   cell_update_scheme: generalized_force   # generalized_force | vasp
 
   # -- Lattice component constraints (relax_cell: true only) -------------
@@ -195,13 +205,10 @@ relax:
   # Each is 1 (free to relax) or 0 (frozen). null = all 9 free (default,
   # fully unconstrained cell).
   #
-  # NOTE: this mask acts on the RAW (unsymmetrized) components of the
-  # cell force, so it does not by itself guarantee suppression of
-  # spurious cell-rotation drift (an unsymmetrized cell force can, over
-  # long relaxations, slowly rotate the whole cell relative to the lab
-  # frame even though the physical shape/volume converges normally). If
-  # you do not need independent raw-component control, leave this at
-  # its default (null, fully free).
+  # A frozen component keeps its starting value exactly (with
+  # cell_coordinates: strain the mask becomes a linear constraint on F;
+  # the meaning is the same).  The stress along frozen components is not
+  # relaxed, so pmax may never be met: use check_stress: false then.
   #
   # Examples:
   #   "1 0 0 0 1 0 0 0 1"  -- diagonal components only (a1x, a2y, a3z
