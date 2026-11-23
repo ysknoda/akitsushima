@@ -482,7 +482,8 @@ def test_langevin_piston_option_is_validated_and_recorded(tmp_path):
     assert "baro_thermostat" not in _npt(s, tmp_path)._ck_settings()
     sim = _npt(s, tmp_path, baro_thermostat="Langevin", cell_dof="tri")
     assert sim._ck_settings()["baro_thermostat"] == "langevin"
-    assert set(sim._ck_arrays()) == {"p_g", "baro_heat"}
+    # ADR-0044: the particle chain is carried as arrays too
+    assert set(sim._ck_arrays()) == {"p_g", "baro_heat", "xi_nhc", "vxi_nhc"}
 
 
 @pytest.mark.slow

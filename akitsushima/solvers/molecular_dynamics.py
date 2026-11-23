@@ -33,6 +33,38 @@ __all__ = ["NVTSimulation", "LangevinSimulation", "CSVRSimulation", "NVESimulati
            "NPTSimulation"]
 
 
+def _check_nhc_chain(nhc_chain, cls: str) -> int:
+    """Validated Nose-Hoover chain length M (ADR-0044): an integer >= 2."""
+    if isinstance(nhc_chain, bool) or int(nhc_chain) != nhc_chain or nhc_chain < 2:
+        raise ValueError(
+            f"{cls}: nhc_chain must be an integer >= 2, got {nhc_chain!r}.")
+    return int(nhc_chain)
+
+
+def _chain_alias(attr: str, idx: int) -> property:
+    """Attribute alias of link ``idx`` of the chain list ``attr`` (ADR-0044).
+
+    ``Q1``, ``Q2``, ``xi1``, ``xi2``, ``vxi1`` and ``vxi2`` were scalar
+    attributes of the 2-link chain; they now read and write the first two
+    links of ``Q_nhc`` / ``xi_nhc`` / ``vxi_nhc``.  Setting one on an
+    object without the list (built with ``__new__``) creates a 2-link
+    chain, as the scalars implied."""
+    def fget(self):
+        try:
+            return self.__dict__[attr][idx]
+        except KeyError:
+            raise AttributeError(attr) from None
+
+    def fset(self, value):
+        lst = self.__dict__.get(attr)
+        if lst is None:
+            lst = [0.0, 0.0]
+            self.__dict__[attr] = lst
+        lst[idx] = float(value)
+
+    return property(fget, fset, doc=f"Link {idx + 1} of ``{attr}``.")
+
+
 class _BaseMDSimulation:
     """
     Shared utilities for all MD solver classes.
@@ -420,6 +452,10 @@ class _BaseMDSimulation:
             out["cell_dof"] = self.cell_dof
         if getattr(self, "baro_thermostat", "nhc") != "nhc":
             out["baro_thermostat"] = self.baro_thermostat
+        # ADR-0044; absent for 2 links, so checkpoints written before the
+        # chain length existed match a 2-link run and no other.
+        if getattr(self, "nhc_chain", 2) != 2:
+            out["nhc_chain"] = int(self.nhc_chain)
         for name in ("temperature", "tau_nhc", "tau_baro", "pressure_gpa"):
             if hasattr(self, name):
                 out[name] = float(getattr(self, name))
@@ -450,7 +486,10 @@ class _BaseMDSimulation:
         for name in self._CK_SCALARS:
             setattr(self, name, float(meta["scalars"][name]))
         for name in self._ck_arrays():
-            setattr(self, name, np.array(arr["state_" + name], dtype=float))
+            if "state_" + name in arr:
+                self._ck_set_array(name, arr["state_" + name])
+            else:
+                self._ck_missing_array(name, meta)
         self.rng = np.random.default_rng()
         self.rng.bit_generator.state = meta["rng"]
         truncate_outputs(outputs, meta["sizes"])
@@ -492,9 +531,80 @@ class _BaseMDSimulation:
         save_checkpoint(checkpoint, meta, arrays)
 
     # ------------------------------------------------------------------ #
+    #  Nose-Hoover chain of the particles (ADR-0044: M links)
+    # ------------------------------------------------------------------ #
+    Q1 = _chain_alias("Q_nhc", 0)
+    Q2 = _chain_alias("Q_nhc", 1)
+    xi1 = _chain_alias("xi_nhc", 0)
+    xi2 = _chain_alias("xi_nhc", 1)
+    vxi1 = _chain_alias("vxi_nhc", 0)
+    vxi2 = _chain_alias("vxi_nhc", 1)
+
+    def _init_nhc_chain(self, nhc_chain, temperature, tau_nhc) -> None:
+        """Masses and zero state of an M-link particle chain.
+
+        Martyna, Tuckerman & Klein, Mol. Phys. 87, 1117 (1996): the first
+        link couples to the n_dof particle degrees of freedom, Q_1 =
+        n_dof kT tau^2; every further link to the one below it, Q_j =
+        kT tau^2.  The state lives in Python lists of floats, so M = 2
+        repeats the float64 arithmetic of the former scalars exactly."""
+        M = _check_nhc_chain(nhc_chain, self.__class__.__name__)
+        self.nhc_chain = M
+        self.Q_nhc = ([self.n_dof * K_B * temperature * tau_nhc**2]
+                      + [K_B * temperature * tau_nhc**2] * (M - 1))
+        self.xi_nhc = [0.0] * M
+        self.vxi_nhc = [0.0] * M
+
+    def _nhc_chain_energy(self) -> Tuple[float, float]:
+        """(kinetic, potential) energy of the particle chain [eV]:
+        sum_j Q_j vxi_j^2 / 2 and n_dof kT xi_1 + sum_{j>1} kT xi_j."""
+        Q, v, xi = self.Q_nhc, self.vxi_nhc, self.xi_nhc
+        t_nhc = 0.5 * Q[0] * v[0]**2
+        for j in range(1, len(Q)):
+            t_nhc = t_nhc + 0.5 * Q[j] * v[j]**2
+        v_nhc = self.n_dof * K_B * self.temperature * xi[0]
+        for j in range(1, len(Q)):
+            v_nhc = v_nhc + K_B * self.temperature * xi[j]
+        return t_nhc, v_nhc
+
+    def _nhc_ck_set(self, name, value) -> bool:
+        """Restore a chain list from a checkpoint array; False if ``name``
+        is not one of the chain lists."""
+        if name not in ("xi_nhc", "vxi_nhc"):
+            return False
+        setattr(self, name, [float(x) for x in np.asarray(value).ravel()])
+        return True
+
+    def _nhc_ck_legacy(self, name, meta) -> bool:
+        """A checkpoint written before ADR-0044 carries the 2-link chain as
+        the scalars xi1, xi2, vxi1, vxi2.  It is accepted only for a
+        2-link chain (the settings check refuses any other M)."""
+        if name not in ("xi_nhc", "vxi_nhc") or self.nhc_chain != 2:
+            return False
+        sc = meta.get("scalars", {})
+        keys = ("xi1", "xi2") if name == "xi_nhc" else ("vxi1", "vxi2")
+        if not all(k in sc for k in keys):
+            return False
+        setattr(self, name, [float(sc[k]) for k in keys])
+        return True
+
+    def _ck_set_array(self, name, value) -> None:
+        """Restore one array-valued state item from a checkpoint."""
+        if not self._nhc_ck_set(name, value):
+            setattr(self, name, np.array(value, dtype=float))
+
+    def _ck_missing_array(self, name, meta) -> None:
+        """An array the class carries is absent from the checkpoint."""
+        if not self._nhc_ck_legacy(name, meta):
+            raise ValueError(
+                f"{self.__class__.__name__}: the checkpoint has no state "
+                f"array {name!r}; it was written by another version or class.")
+
     def _nhc_step(self) -> None:
         """
-        2-chain Nose-Hoover-chain half-step -- VASP-style MTTK propagator.
+        M-link Nose-Hoover-chain half-step -- VASP-style MTTK propagator
+        (ADR-0044 generalised the former 2-link body; for M = 2 it does
+        the same operations in the same order).
 
         Bug-fix note (S10): this exact method body used to be duplicated
         verbatim in both NVTSimulation and NPTSimulation (NVTSimulation's
@@ -507,9 +617,18 @@ class _BaseMDSimulation:
         energy argument.
 
         Requires ``self.dt``, ``self.n_dof``, ``self.temperature``,
-        ``self.Q1``, ``self.Q2``, ``self.vxi1``, ``self.vxi2``,
-        ``self.xi1``, ``self.xi2``, ``self.velocities``,
-        ``self._fix_mask``, and ``self._kinetic_energy()``.
+        ``self.Q_nhc``, ``self.xi_nhc``, ``self.vxi_nhc`` (lists of
+        length M), ``self.velocities``, ``self._fix_mask``, and
+        ``self._kinetic_energy()``.
+
+        One half-step of dt/2 (Martyna, Tuckerman & Klein, Mol. Phys. 87,
+        1117 (1996), with one sub-step): the top link takes a quarter
+        kick; going down, link j is damped by exp(-vxi_{j+1} dt/8),
+        kicked by G_j dt/4 and damped again; the particle velocities are
+        scaled by exp(-vxi_1 dt/2) and every xi_j advances by vxi_j dt/2;
+        then the same in reverse, going up, with the damping factors of
+        the way down (vxi_{j+1} has not changed in between).  G_1 =
+        (2 E_kin - n_dof kT)/Q_1, G_j = (Q_{j-1} vxi_{j-1}^2 - kT)/Q_j.
 
         All exponential arguments are clamped to [-350, 350] to prevent
         float64 overflow (the negative Suzuki-Yoshida weight in a
@@ -518,40 +637,44 @@ class _BaseMDSimulation:
         Phys. 97, 2635 (1992); see https://vasp.at/wiki/Nose-Hoover_thermostat).
         """
         dt = self.dt
-        Q1 = self.Q1; Q2 = self.Q2
+        Q, v, xi = self.Q_nhc, self.vxi_nhc, self.xi_nhc
+        M = len(Q)
         kT = K_B * self.temperature
         e_kin = self._kinetic_energy()
 
-        G1 = (2.0 * e_kin - self.n_dof * kT) / Q1
-        G2 = (Q1 * self.vxi1 ** 2 - kT) / Q2
+        def force(j):
+            if j == 0:
+                return (2.0 * e_kin - self.n_dof * kT) / Q[0]
+            return (Q[j - 1] * v[j - 1] ** 2 - kT) / Q[j]
 
-        # vxi2 half-kick
-        self.vxi2 += G2 * (dt * 0.25)
+        # Top link: quarter kick
+        v[M - 1] += force(M - 1) * (dt * 0.25)
 
-        # vxi1: damp + kick + damp
-        s_arg = float(np.clip(-self.vxi2 * dt * 0.125, -350.0, 350.0))
-        s     = np.exp(s_arg)
-        self.vxi1 = s * (s * self.vxi1 + G1 * dt * 0.25)
+        # Down the chain: damp + kick + damp
+        s = [1.0] * (M - 1)
+        for j in range(M - 2, -1, -1):
+            s_arg = float(np.clip(-v[j + 1] * dt * 0.125, -350.0, 350.0))
+            s[j] = np.exp(s_arg)
+            v[j] = s[j] * (s[j] * v[j] + force(j) * dt * 0.25)
 
         # Scale velocities
-        sc_arg = float(np.clip(-self.vxi1 * dt * 0.5, -350.0, 350.0))
+        sc_arg = float(np.clip(-v[0] * dt * 0.5, -350.0, 350.0))
         self.velocities *= np.exp(sc_arg)
         self.velocities *= ~self._fix_mask
 
         # Advance thermostat positions
-        self.xi1 += self.vxi1 * dt * 0.5
-        self.xi2 += self.vxi2 * dt * 0.5
+        for j in range(M):
+            xi[j] += v[j] * dt * 0.5
 
-        # Recompute E_kin and G1
+        # Recompute E_kin (G_1)
         e_kin = self._kinetic_energy()
-        G1    = (2.0 * e_kin - self.n_dof * kT) / Q1
 
-        # Reverse: damp + kick + damp
-        self.vxi1 = s * (s * self.vxi1 + G1 * dt * 0.25)
+        # Up the chain: damp + kick + damp, with the same factors
+        for j in range(M - 1):
+            v[j] = s[j] * (s[j] * v[j] + force(j) * dt * 0.25)
 
-        # vxi2 half-kick (reverse)
-        G2         = (Q1 * self.vxi1 ** 2 - kT) / Q2
-        self.vxi2 += G2 * (dt * 0.25)
+        # Top link: quarter kick (reverse)
+        v[M - 1] += force(M - 1) * (dt * 0.25)
 
 
 #  SECTION 6.1: NVT molecular dynamics -- Nose-Hoover chain thermostat
@@ -620,11 +743,13 @@ class NVTSimulation(_BaseMDSimulation):
     """
     NVT molecular dynamics with Nose-Hoover chain (NHC) thermostat.
 
-    Integrator  : velocity Verlet + NHC of length 2.  _nhc_step applies a
-                  SINGLE symmetric sub-step, not a 4-sub-step
-                  Suzuki-Yoshida decomposition -- its own docstring
-                  explains that the negative SY weight is avoided.
-    Reference   : Martyna, Tobias & Klein, J. Chem. Phys. 97, 2635 (1992)
+    Integrator  : velocity Verlet + NHC of length nhc_chain (ADR-0044).
+                  _nhc_step applies a SINGLE symmetric sub-step, not a
+                  4-sub-step Suzuki-Yoshida decomposition -- its own
+                  docstring explains that the negative SY weight is
+                  avoided.
+    Reference   : Martyna, Tobias & Klein, J. Chem. Phys. 101, 4177 (1994);
+                  Martyna, Tuckerman & Klein, Mol. Phys. 87, 1117 (1996)
 
     Parameters
     ----------
@@ -636,6 +761,12 @@ class NVTSimulation(_BaseMDSimulation):
     n_steps      : production MD steps.
     equil_steps  : equilibration steps (excluded from trajectory / averages).
     tau_nhc      : NHC thermostat time constant [fs]  (50--200 fs typical).
+    nhc_chain    : number of links M of the Nose-Hoover chain (>= 2;
+                   ADR-0044).  With 2 links the second caps the first
+                   thermostat velocity near 1/(tau sqrt(n_dof)), so a run
+                   far from the target temperature approaches it only
+                   over ~ln(1.9) tau sqrt(n_dof) (about 14 ps for 13608
+                   atoms at tau 100 fs).
     traj_every   : trajectory output interval [steps].
     traj_format  : "xdatcar" (default) | "extxyz" | "lammps-dump" (ADR-0034):
                    XDATCAR_<task>, traj_<task>.extxyz or traj_<task>.lammpstrj.
@@ -654,7 +785,13 @@ class NVTSimulation(_BaseMDSimulation):
     """
 
     _CK_ENSEMBLE = "nvt"
-    _CK_SCALARS = ("xi1", "xi2", "vxi1", "vxi2")
+    # The chain state is carried as arrays (ADR-0044); a checkpoint of an
+    # earlier version (scalars xi1, xi2, vxi1, vxi2) restores a 2-link run.
+    _CK_SCALARS: Tuple[str, ...] = ()
+
+    def _ck_arrays(self) -> dict:
+        return {"xi_nhc": np.array(self.xi_nhc, dtype=float),
+                "vxi_nhc": np.array(self.vxi_nhc, dtype=float)}
 
     def __init__(self,
                  lattice         : np.ndarray,
@@ -676,6 +813,7 @@ class NVTSimulation(_BaseMDSimulation):
                  timestep        : float = 1.0,
                  n_steps         : int   = 10000,
                  tau_nhc         : float = 100.0,
+                 nhc_chain       : int   = 2,
                  output_dir      : str   = ".",
                  traj_every      : int   = 10,
                  traj_format     : str   = "xdatcar",
@@ -746,11 +884,8 @@ class NVTSimulation(_BaseMDSimulation):
         # _BaseMDSimulation._compute_n_dof.
         self.n_dof  = self._compute_n_dof(self.N, self._fix_mask)
 
-        # 2-chain NHC state variables
-        self.Q1   = self.n_dof * K_B * temperature * tau_nhc**2
-        self.Q2   = K_B * temperature * tau_nhc**2
-        self.xi1  = 0.0;  self.xi2  = 0.0
-        self.vxi1 = 0.0;  self.vxi2 = 0.0
+        # M-link NHC state (ADR-0044)
+        self._init_nhc_chain(nhc_chain, temperature, tau_nhc)
 
         self._tc = TimingCollector(enabled=timing)
         self.velocity_rescale_steps = int(velocity_rescale_steps)
@@ -778,10 +913,10 @@ class NVTSimulation(_BaseMDSimulation):
 
     def _nhc_conserved(self, e_pot: float) -> float:
         """
-        Conserved quantity for the 2-chain Nose-Hoover thermostat:
+        Conserved quantity for the M-link Nose-Hoover chain:
           H_NHC = E_kin + E_pot
-                + 0.5*Q1*vxi1^2 + 0.5*Q2*vxi2^2
-                + n_dof*kT*xi1 + kT*xi2
+                + sum_j 0.5*Q_j*vxi_j^2
+                + n_dof*kT*xi_1 + sum_{j>1} kT*xi_j
 
         The chain kinetic term is ALREADY in eV and must not be unit
         converted.  Q1 = n_dof*k_B[eV/K]*T[K]*tau[fs]^2 is eV*fs^2 and
@@ -797,10 +932,7 @@ class NVTSimulation(_BaseMDSimulation):
         appears only in this diagnostic.
         """
         ek    = self._kinetic_energy()
-        t_nhc = (0.5 * self.Q1 * self.vxi1**2
-                 + 0.5 * self.Q2 * self.vxi2**2)
-        v_nhc = (self.n_dof * K_B * self.temperature * self.xi1
-                 + K_B * self.temperature * self.xi2)
+        t_nhc, v_nhc = self._nhc_chain_energy()
         return ek + e_pot + t_nhc + v_nhc
 
     def _compute_forces(self) -> Tuple[float, np.ndarray, np.ndarray]:
@@ -1165,8 +1297,13 @@ class _StochasticNVTSimulation(NVTSimulation):
     def _ck_settings(self) -> dict:
         out = super()._ck_settings()
         out.pop("tau_nhc", None)
+        out.pop("nhc_chain", None)
         out["damping"] = float(self.damping)
         return out
+
+    def _ck_arrays(self) -> dict:
+        """No Nose-Hoover chain to carry (ADR-0044)."""
+        return {}
 
     def _wrap(self) -> None:
         frac = self.positions @ np.linalg.inv(self.lattice)
@@ -1883,7 +2020,7 @@ class NVESimulation(_BaseMDSimulation):
 #  Algorithm   : Martyna-Tuckerman-Tobias-Klein (MTTK) with isotropic
 #                volume scaling.  Ref: Martyna et al., Mol. Phys. 87, 1117 (1996)
 #
-#  Thermostat  : Nose-Hoover chain (NHC, length 2) -- same as NVT.
+#  Thermostat  : Nose-Hoover chain (NHC, nhc_chain links) -- same as NVT.
 #  Barostat    : Andersen-Hoover isotropic barostat (scalar volume DOF).
 #                Cell shape is preserved; only volume V varies.
 #
@@ -1991,6 +2128,8 @@ class NPTSimulation(_BaseMDSimulation):
     n_steps      : production steps.
     equil_steps  : equilibration steps (not written to trajectory / averages).
     tau_nhc      : NHC thermostat time constant [fs].  Default 100 fs.
+    nhc_chain    : links of the particle Nose-Hoover chain (>= 2; ADR-0044,
+                   see NVTSimulation).  The barostat chain has two links.
     tau_baro     : barostat time constant [fs].  Default 1000 fs.
                    Should be >= 5--10 x tau_nhc for stability.
     cell_dof     : "iso" (default, volume only) | "aniso" (Lx, Ly, Lz) |
@@ -2028,8 +2167,8 @@ class NPTSimulation(_BaseMDSimulation):
     """
 
     _CK_ENSEMBLE = "npt"
-    _CK_SCALARS = ("xi1", "xi2", "vxi1", "vxi2", "p_eps",
-                   "xi1_b", "xi2_b", "vxi1_b", "vxi2_b")
+    # The particle chain is carried as arrays (ADR-0044); see NVTSimulation.
+    _CK_SCALARS = ("p_eps", "xi1_b", "xi2_b", "vxi1_b", "vxi2_b")
 
     #: eV/A^3 -> GPa conversion
     _EV_ANG3_TO_GPA = EV_ANG3_TO_GPA
@@ -2056,6 +2195,7 @@ class NPTSimulation(_BaseMDSimulation):
                  n_steps        : int   = 10000,
                  equil_steps    : int   = 0,
                  tau_nhc        : float = 100.0,
+                 nhc_chain      : int   = 2,
                  tau_baro       : float = 1000.0,
                  traj_every     : int   = 10,
                  traj_format    : str   = "xdatcar",
@@ -2175,10 +2315,9 @@ class NPTSimulation(_BaseMDSimulation):
         # exactly the spurious kinetic energy.
         self.velocities[self._fix_mask] = 0.0
 
-        self.Q1   = self.n_dof * K_B * temperature * tau_nhc**2
-        self.Q2   =              K_B * temperature * tau_nhc**2
-        self.xi1  = 0.0;  self.xi2  = 0.0
-        self.vxi1 = 0.0;  self.vxi2 = 0.0
+        # M-link particle chain (ADR-0044); the barostat chain below
+        # stays at two links.
+        self._init_nhc_chain(nhc_chain, temperature, tau_nhc)
 
         self.W     = (self.n_dof + 3) * K_B * temperature * tau_baro**2
         self.p_eps = 0.0
@@ -2231,8 +2370,8 @@ class NPTSimulation(_BaseMDSimulation):
         NPT conserved quantity [eV]:
         H_NPT = E_kin + E_pot + P_ext V
               + 0.5 W epsilon_dot^2
-              + NHC kinetic (0.5 Q1 vxi1^2 + 0.5 Q2 vxi2^2)   [already eV]
-              + NHC potential (n_dof k_B T xi1 + k_B T xi2)
+              + NHC kinetic (sum_j 0.5 Q_j vxi_j^2)            [already eV]
+              + NHC potential (n_dof k_B T xi_1 + sum_{j>1} k_B T xi_j)
         """
         if not self._iso:
             return self._npt_conserved_g(e_pot)
@@ -2242,12 +2381,8 @@ class NPTSimulation(_BaseMDSimulation):
         eps_dot = self.p_eps / self.W   # [fs^-1]
         h_baro  = 0.5 * self.W * eps_dot**2
 
-        # NHC KE  [eV]  (same formula as NVT._nhc_conserved)
-        h_nhc_k = (0.5 * self.Q1 * self.vxi1**2
-                   + 0.5 * self.Q2 * self.vxi2**2)   # already eV
-        # NHC PE  [eV]
-        h_nhc_p = (self.n_dof * K_B * self.temperature * self.xi1
-                   + K_B * self.temperature * self.xi2)
+        # NHC KE and PE [eV]  (same formula as NVT._nhc_conserved)
+        h_nhc_k, h_nhc_p = self._nhc_chain_energy()
         # Barostat chain (1 DoF, so kT rather than n_dof kT)
         kT      = K_B * self.temperature
         h_bnhc  = (0.5 * self.Q1_b * self.vxi1_b**2
@@ -2363,7 +2498,10 @@ class NPTSimulation(_BaseMDSimulation):
     # ------------------------------------------------------------------
 
     def _ck_arrays(self) -> dict:
-        out = {} if self._iso else {"p_g": self.p_g}
+        out = {"xi_nhc": np.array(self.xi_nhc, dtype=float),
+               "vxi_nhc": np.array(self.vxi_nhc, dtype=float)}
+        if not self._iso:
+            out["p_g"] = self.p_g
         if self._baro_lv:
             out["baro_heat"] = self.baro_heat
         return out
@@ -2425,8 +2563,8 @@ class NPTSimulation(_BaseMDSimulation):
     def _npt_conserved_g(self, e_pot: float) -> float:
         kT = K_B * self.temperature
         h_baro = 0.5 * float(np.sum(self.p_g ** 2)) / self.W
-        h_nhc = (0.5 * self.Q1 * self.vxi1**2 + 0.5 * self.Q2 * self.vxi2**2
-                 + self.n_dof * kT * self.xi1 + kT * self.xi2)
+        h_nhc_k, h_nhc_p = self._nhc_chain_energy()
+        h_nhc = h_nhc_k + h_nhc_p
         h_bnhc = (0.5 * self.Q1_b * self.vxi1_b**2
                   + 0.5 * self.Q2_b * self.vxi2_b**2
                   + self.n_baro * kT * self.xi1_b + kT * self.xi2_b)
