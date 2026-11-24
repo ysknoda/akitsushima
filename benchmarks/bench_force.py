@@ -29,6 +29,9 @@ Parameter sources
     EAM Ni      Zhou, Johnson and Wadley, Phys. Rev. B 69, 144113 (2004),
                 Table III (akitsushima.engine.published_parameters)
     MgO         Lewis and Catlow, J. Phys. C 18, 1149 (1985), formal charges
+    SW GeSn     Tomita et al., Jpn. J. Appl. Phys. 57, 04FB04 (2018), Table I
+    EAM Cu-Ni   Zhou, Johnson and Wadley (2004), as EAM Ni
+    Tersoff X-Y test values (not a material), see TERSOFF_XY
 Lattice constants (Si 5.431, Ni 3.52, MgO 4.212 A) and the 0.05 A rattle
 only define the benchmark geometry; nothing is fitted to them.  The MgO
 cutoff of 6.0 A is a benchmark setting, not a converged value.
@@ -94,6 +97,43 @@ TERSOFF_SI = {
     },
 }
 EAM_NI = {"type": "EAM", "form": "zhou2004", "elements": ["Ni"], "species": ["Ni"]}
+# Multi-species cases (ADR-0047): the multi-species kernels are separate
+# code paths from the single-species ones above.
+EAM_CUNI = {"type": "EAM", "form": "zhou2004", "elements": ["Cu", "Ni"],
+            "species": ["Cu", "Ni"]}
+_TOMITA_KEYS = ("i", "j", "k", "sigma", "a", "lambda", "gamma", "A", "B", "p", "q")
+_TOMITA_ROWS = [  # Tomita et al., Jpn. J. Appl. Phys. 57, 04FB04 (2018), Table I
+    ("Ge", "Ge", "Ge", 2.181, 1.8110, 32.101, 1.1718, 10.093, 0.6862, 4.6973, 0.6588),
+    ("Sn", "Sn", "Sn", 2.503, 1.7825, 28.747, 1.1610, 9.4315, 0.7012, 4.9827, 0.6252),
+    ("Ge", "Ge", "Sn", 2.337, 1.7988, 29.858, 1.8136, 0.0, 0.0, 0.0, 0.0),
+    ("Ge", "Sn", "Ge", 2.337, 1.7988, 29.858, 0.7232, 0.0, 0.0, 0.0, 0.0),
+    ("Ge", "Sn", "Sn", 2.337, 1.7988, 24.460, 1.1484, 9.8864, 0.7021, 4.8537, 0.6482),
+    ("Sn", "Ge", "Ge", 2.337, 1.7988, 24.460, 1.1484, 9.8864, 0.7021, 4.8537, 0.6482),
+    ("Sn", "Ge", "Sn", 2.337, 1.7988, 26.074, 1.3564, 0.0, 0.0, 0.0, 0.0),
+    ("Sn", "Sn", "Ge", 2.337, 1.7988, 26.074, 1.0924, 0.0, 0.0, 0.0, 0.0),
+]
+SW_GESN = {
+    "type": "SW",
+    "species": ["Ge", "Sn"],
+    "params": [dict(zip(_TOMITA_KEYS, r), epsilon=1.0, costheta0=-0.333333)
+               for r in _TOMITA_ROWS],
+}
+# Two-species Tersoff on the two diamond sublattices (X, Y): Si(C) values
+# for X-Y-Y and deliberately different test values for Y-X-X, as in
+# tests/test_engine_forces.py.  Not a material: it times the multi-species
+# Tersoff kernels with Si's four-neighbour cutoff.
+TERSOFF_XY = {
+    "type": "Tersoff",
+    "species": ["X", "Y"],
+    "params": [
+        {"i": "X", "j": "Y", "k": "Y", "A": 1830.8, "B": 471.18, "lambda1": 2.4799,
+         "lambda2": 1.7322, "R": 2.85, "D": 0.15, "beta": 1.1e-6, "n": 0.78734,
+         "c": 100390.0, "d": 16.217, "h": -0.59825, "lambda3": 1.7322},
+        {"i": "Y", "j": "X", "k": "X", "A": 1500.0, "B": 400.0, "lambda1": 2.2,
+         "lambda2": 1.5, "R": 2.85, "D": 0.15, "beta": 0.9e-6, "n": 0.7,
+         "c": 90000.0, "d": 14.0, "h": -0.55, "lambda3": 1.5},
+    ],
+}
 BUCK_MGO = {
     frozenset({"Mg", "O"}): {"A": 1428.5, "rho": 0.2945, "C": 0.0},
     frozenset({"O"}): {"A": 22764.0, "rho": 0.1490, "C": 27.88},
@@ -180,11 +220,26 @@ def build_cases(args):
     mgo = [
         cubic(ROCKSALT, 4.212, n, ["Mg"] * 4 + ["O"] * 4) for n in args.cells_rocksalt
     ]
+    rng = np.random.default_rng(1)
+    gesn = []
+    for n in args.cells_diamond:
+        # Ge0.875Sn0.125 at random, Vegard lattice constant (Ge 5.658, Sn 6.489 A)
+        lat, pos, types = cubic(DIAMOND, 5.762, n, ["Ge"] * 8)
+        gesn.append((lat, pos, [str(x) for x in rng.choice(["Ge", "Sn"], len(types),
+                                                           p=[0.875, 0.125])]))
+    xy = [(lat, pos, ["X"] * 4 + ["Y"] * 4) for lat, pos, _ in si]
+    xy = [(lat, pos, t * (len(pos) // 8)) for lat, pos, t in xy]
+    cuni = []
+    for lat, pos, types in (cubic(FCC, 3.58, n, ["Cu"] * 4) for n in args.cells_fcc):
+        cuni.append((lat, pos, [str(x) for x in rng.choice(["Cu", "Ni"], len(types))]))
     cases = []
     for name, cfg, structs in (
         ("sw_si", SW_SI, si),
         ("tersoff_si", TERSOFF_SI, si),
         ("eam_ni", EAM_NI, ni),
+        ("sw_gesn_tomita", SW_GESN, gesn),
+        ("tersoff_xy", TERSOFF_XY, xy),
+        ("eam_cuni", EAM_CUNI, cuni),
     ):
         fn = ak.force_fn_from_config(cfg)
         cases.append((name, fn, float(fn.r_cut), structs))

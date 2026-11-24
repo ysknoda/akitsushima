@@ -167,6 +167,14 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.3.0a10 (ADR-0047): Stillinger-Weber three-body forces are analytic
+> instead of finite differences (energies unchanged, forces within
+> ~1e-9 eV/A of before), the multi-species SW and Tersoff kernels run on
+> numba's threads, and pair potentials group their pairs with numpy (bit
+> for bit as before).  One force call, one thread: SW GeSn 1.7-2.6 times
+> and Buckingham MgO 3.8 times faster; SW GeSn at 13608 atoms on ten
+> threads 5 times faster than 0.3.0a9 on one.
+>
 > 0.3.0a9 (ADR-0045): `anneal` md_quench uses CSVR by default at nvt
 > (damping 50 fs; npt keeps the Nose-Hoover chain).  After each step down
 > of the schedule T relaxes with a time constant of 2 damping whatever the
