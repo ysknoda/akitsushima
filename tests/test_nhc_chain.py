@@ -75,8 +75,10 @@ def _old_two_link_step(sim):
 
 def test_two_links_repeat_the_former_propagator_bit_for_bit(tmp_path):
     lat, pos, types = _si()
-    a = NVTSimulation(lat, pos, types, output_dir=str(tmp_path), n_steps=1, **_kw())
-    b = NVTSimulation(lat, pos, types, output_dir=str(tmp_path), n_steps=1, **_kw())
+    a = NVTSimulation(lat, pos, types, output_dir=str(tmp_path), n_steps=1,
+                      nhc_chain=2, **_kw())
+    b = NVTSimulation(lat, pos, types, output_dir=str(tmp_path), n_steps=1,
+                      nhc_chain=2, **_kw())
     rng = np.random.default_rng(3)
     for sim in (a, b):
         sim.vxi_nhc = [1e-3, -2e-3]
@@ -97,6 +99,14 @@ def test_bad_chain_length_is_refused(tmp_path, bad):
         NVTSimulation(
             lat, pos, types, output_dir=str(tmp_path), n_steps=1, nhc_chain=bad, **_kw()
         )
+
+
+def test_default_chain_has_three_links(tmp_path):
+    lat, pos, types = _si()
+    for cls, extra in ((NVTSimulation, {}), (NPTSimulation, dict(pressure=0.0))):
+        sim = cls(lat, pos, types, output_dir=str(tmp_path), n_steps=1, **_kw(), **extra)
+        assert sim.nhc_chain == 3 and len(sim.vxi_nhc) == 3
+        assert sim._ck_settings()["nhc_chain"] == 3
 
 
 def test_scalar_aliases_address_the_first_two_links(tmp_path):

@@ -762,7 +762,8 @@ class NVTSimulation(_BaseMDSimulation):
     equil_steps  : equilibration steps (excluded from trajectory / averages).
     tau_nhc      : NHC thermostat time constant [fs]  (50--200 fs typical).
     nhc_chain    : number of links M of the Nose-Hoover chain (>= 2;
-                   ADR-0044).  With 2 links the second caps the first
+                   default 3, ADR-0044; 2 reproduces 0.3.0a7 and earlier
+                   bit for bit).  With 2 links the second caps the first
                    thermostat velocity near 1/(tau sqrt(n_dof)), so a run
                    far from the target temperature approaches it only
                    over ~ln(1.9) tau sqrt(n_dof) (about 14 ps for 13608
@@ -813,7 +814,7 @@ class NVTSimulation(_BaseMDSimulation):
                  timestep        : float = 1.0,
                  n_steps         : int   = 10000,
                  tau_nhc         : float = 100.0,
-                 nhc_chain       : int   = 2,
+                 nhc_chain       : int   = 3,
                  output_dir      : str   = ".",
                  traj_every      : int   = 10,
                  traj_format     : str   = "xdatcar",
@@ -2128,8 +2129,8 @@ class NPTSimulation(_BaseMDSimulation):
     n_steps      : production steps.
     equil_steps  : equilibration steps (not written to trajectory / averages).
     tau_nhc      : NHC thermostat time constant [fs].  Default 100 fs.
-    nhc_chain    : links of the particle Nose-Hoover chain (>= 2; ADR-0044,
-                   see NVTSimulation).  The barostat chain has two links.
+    nhc_chain    : links of the particle Nose-Hoover chain (>= 2, default 3;
+                   ADR-0044, see NVTSimulation).  The barostat chain has two links.
     tau_baro     : barostat time constant [fs].  Default 1000 fs.
                    Should be >= 5--10 x tau_nhc for stability.
     cell_dof     : "iso" (default, volume only) | "aniso" (Lx, Ly, Lz) |
@@ -2195,7 +2196,7 @@ class NPTSimulation(_BaseMDSimulation):
                  n_steps        : int   = 10000,
                  equil_steps    : int   = 0,
                  tau_nhc        : float = 100.0,
-                 nhc_chain      : int   = 2,
+                 nhc_chain      : int   = 3,
                  tau_baro       : float = 1000.0,
                  traj_every     : int   = 10,
                  traj_format    : str   = "xdatcar",
