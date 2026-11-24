@@ -167,6 +167,15 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.3.0a8 (ADR-0044): the Nose-Hoover thermostat of NVT and NPT is a
+> chain of `nhc_chain` links, three by default (`md`, the `anneal` md
+> section and the Python API).  With the former two links a run started
+> at a minimum took about ln(1.9) tau sqrt(n_dof) to reach its target
+> (14.7 ps at 13608 atoms with tau 100 fs); three links take about 1 ps,
+> and anneal segments now follow the schedule within 1 % in their second
+> half.  `nhc_chain: 2` reproduces 0.3.0a7 bit for bit, and 0.3.0a7
+> checkpoints load as two links.
+>
 > 0.3.0a7 (ADR-0043): EAM (Zhou and setfl tables) in numba, PPPM on the
 > real FFT with numba charge assignment, and ESM Green functions applied
 > in O(Nz) without matrices: one force call, one thread, Zhou Ni 4000
