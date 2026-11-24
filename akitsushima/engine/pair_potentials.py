@@ -105,7 +105,7 @@ class BasePairPotential(ABC):
                        sorted).
         rij_all      : (P,3)  r_j - r_i, minimum-image convention [A].
         r_all        : (P,)   |rij| [A].
-        groups       : dict {(sp1,sp2) sorted: [pair-index,...]}.
+        groups       : dict {(sp1,sp2) sorted: pair indices (ascending)}.
         """
         N = len(positions)
 
@@ -164,21 +164,31 @@ class BasePairPotential(ABC):
         if len(idx_i) == 0:
             return idx_i, idx_j, rij_all, r_all, {}
 
-        # Build a type-pair key per pair: frozenset({si, sj})
-        # We sort type strings so (A,B) and (B,A) map to the same key.
-        types_arr = np.array(atom_types)
-        si_arr = types_arr[idx_i]
-        sj_arr = types_arr[idx_j]
-
-        # Unique type-pair keys: use sorted (si,sj) tuple as dict key
-        type_pair_key = [
-            (s1, s2) if s1 <= s2 else (s2, s1)
-            for s1, s2 in zip(si_arr, sj_arr)
-        ]
-        # Group indices by key
+        # Group the pairs by their sorted species pair (s1 <= s2), keys in
+        # order of first appearance and pair indices ascending within a
+        # group -- the order of the former per-pair Python loop, which took
+        # 88 % of a 4096-atom MgO call (ADR-0047), so results are bit for
+        # bit the same.  np.unique sorts species names as Python compares
+        # str, so the smaller code is the smaller name.
+        names, codes = np.unique(np.asarray(atom_types), return_inverse=True)
+        names = [str(x) for x in names]
+        n_sp = len(names)
+        ci = codes[idx_i]
+        cj = codes[idx_j]
+        key = np.minimum(ci, cj) * n_sp + np.maximum(ci, cj)
+        if n_sp * n_sp <= np.iinfo(np.int16).max:
+            key = key.astype(np.int16)  # numpy's stable sort is a radix sort here
+        # One stable sort: within a key the pairs keep ascending order, and
+        # the first entry of each key's block is its first appearance.
+        order = np.argsort(key, kind="stable")
+        counts = np.bincount(key, minlength=n_sp * n_sp)
+        starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+        present = np.nonzero(counts)[0]
         groups: dict = {}
-        for k, key in enumerate(type_pair_key):
-            groups.setdefault(key, []).append(k)
+        for k in present[np.argsort(order[starts[present]], kind="stable")]:
+            k = int(k)
+            groups[(names[k // n_sp], names[k % n_sp])] = (
+                order[starts[k]:starts[k] + counts[k]])
 
         return idx_i, idx_j, rij_all, r_all, groups
 

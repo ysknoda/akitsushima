@@ -1,9 +1,13 @@
-"""Threaded multi-species SW / Tersoff kernels (ADR-0047).
+"""Threaded multi-species SW / Tersoff kernels and numpy pair grouping (ADR-0047).
 
 - The multi-species SW three-body kernel and both multi-species Tersoff
   kernels have prange versions with per-thread buffers.  One thread runs
   the serial kernels (bit for bit the former path); more threads must
   agree with one to a relative 1e-12 (summation order only).
+- BasePairPotential._build_pair_groups groups pairs with numpy instead of
+  a per-pair Python loop.  Keys, their order and the pair indices must be
+  those of the former loop, so every pair potential is bit for bit
+  unchanged.
 """
 
 import numpy as np
@@ -88,3 +92,34 @@ def test_multi_species_tersoff_threads_agree():
     types = (["X"] * 4 + ["Y"] * 4) * (len(pos) // 8)
     pot = TersoffPotential(TERSOFF_XY, species=["X", "Y"])
     _assert_close(*_threads(lambda: pot.compute(lat, pos, types, use_numba=True)))
+
+
+def _former_groups(idx_i, idx_j, atom_types):
+    """The per-pair loop that _build_pair_groups used before ADR-0047."""
+    types_arr = np.array(atom_types)
+    groups = {}
+    for k, (s1, s2) in enumerate(zip(types_arr[idx_i], types_arr[idx_j])):
+        groups.setdefault((s1, s2) if s1 <= s2 else (s2, s1), []).append(k)
+    return groups
+
+
+def test_pair_groups_are_the_former_ones():
+    from akitsushima.engine.pair_potentials import BuckinghamPotential
+
+    rng = np.random.default_rng(5)
+    lat = np.eye(3) * 12.0
+    pos = rng.uniform(0.0, 12.0, (300, 3))
+    # names out of alphabetical order, one species rare
+    types = list(rng.choice(["O", "Mg", "Al", "Zn"], 300, p=[0.4, 0.3, 0.28, 0.02]))
+    params = {
+        frozenset({a, b}): {"A": 1000.0, "rho": 0.3, "C": 1.0}
+        for a in ("O", "Mg", "Al", "Zn")
+        for b in ("O", "Mg", "Al", "Zn")
+    }
+    pot = BuckinghamPotential(params, r_cut=5.0)
+    idx_i, idx_j, _, _, groups = pot._build_pair_groups(lat, pos, types)
+    ref = _former_groups(idx_i, idx_j, types)
+    assert list(groups) == list(ref)
+    for key in ref:
+        assert all(isinstance(x, str) for x in key)
+        np.testing.assert_array_equal(groups[key], np.array(ref[key]))
