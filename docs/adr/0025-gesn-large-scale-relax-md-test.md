@@ -405,5 +405,62 @@ with 0, stayed finite and wrote the expected rows and frames.
 7. Threads do not speed up multi-species SW (ladder finding 4, still
    open); MPI does, 2.2 times at four ranks.
 
-Findings 1-4 (ladder) and 7 still wait for the separate grilling of
-decision 12; finding 5 is closed by ADR-0044 and ADR-0045.
+Findings 1-4 (ladder) and 7 went to the separate grilling of decision
+12 (2026-11-25); finding 5 is closed by ADR-0044 and ADR-0045.
+
+### Addendum: relax re-measured on 0.3.0a10 (findings 1, 2; 2026-11-25)
+
+Agreed in the grilling of the open findings (Q4, Q11): the relax runs
+that did not converge are run again on the current code, with the
+ladder's own start structures and settings (`relax_cell`, fmax 0.01
+eV/A, pmax 0.1 GPa, 2000 steps, one thread).  Since the ladder the cell
+moves in strain coordinates by default (ADR-0041, 0.3.0a5) and the SW
+three-body forces are analytic (ADR-0047, 0.3.0a10).  Script
+`example/GeSn/large/adr0047/relax_recheck.py`, ledger
+`relax_recheck_ledger.jsonl`; load 4.5-7.6 (another project's jobs held
+two cores), so the times are indicative.
+
+| Run | Ladder (0.2.0b1) | 0.3.0a10 |
+|---|---|---|
+| L-BFGS, MLIP 4032 | not converged, 1843 s | 119 steps, 38 s |
+| L-BFGS, MLIP 13608 | not converged, 8778 s | 188 steps, 166 s |
+| L-BFGS, SW 13608 | not converged, 3644 s | 237 steps, 90 s |
+| L-BFGS, SW 32256 | not converged, 11942 s | 513 steps, 368 s |
+| L-BFGS, SW 108864 | not converged, 31632 s | 673 steps, 1878 s |
+| FIRE, SW 108864 | not converged, fmax 0.121, 15192 s | not converged, fmax 0.153, 4046 s |
+| FIRE, SW 108864, cell fixed | - | 904 steps, 2250 s (P stays 1.83 GPa) |
+
+**Finding 1 (L-BFGS) is closed.**  All five L-BFGS runs that stalled
+now converge.  The cause is the strain cell coordinates of ADR-0041,
+not ADR-0047: the 4032-atom MLIP run (no SW) with `cell_coordinates:
+lattice` on 0.3.0a10 stops moving after about 250 steps at fmax 0.354
+eV/A and stays there (E -16137.135 eV to within 1e-5 eV up to step
+2000), as in the ladder.  Where both
+methods converge the minima differ slightly: L-BFGS ends 0.23 and 1.24
+meV/atom above the ladder's FIRE for the MLIP at 4032 and 13608 atoms,
+0.007 above for SW at 13608, and 0.089 below for SW at 32256; at 108864
+atoms it ends 0.145 meV/atom below where FIRE stops.
+
+**Finding 2 (FIRE) is not closed; its cause is the cell coordinate.**
+FIRE on SW at 108864 atoms still stops at 2000 steps, much as in the
+ladder (173 time-step resets against 175, energy still falling by about
+0.006 eV per step over the last 100 steps; 16 eV above the L-BFGS minimum).  Facts:
+- The median FIRE time step on SW falls with the cell edge L as
+  L^(-1/2): 0.116, 0.089, 0.071, 0.059, 0.048 fs at 504 to 108864
+  atoms (ratios to 504 atoms 1.97 at 32256 and 2.42 at 108864, against
+  sqrt(4) = 2 and sqrt(6) = 2.45).
+- With the cell fixed the median is 0.118 fs at 108864 atoms, the
+  504-atom value, and FIRE converges in 904 steps.
+- The cell coordinate is x = L eps (ADR-0041 decision 4), so its
+  force is about sigma L^2 and its stiffness about B L, while the
+  atoms' stiffness does not depend on N.  FIRE gives every coordinate
+  the same mass, so above a few thousand atoms the cell is the stiffest
+  coordinate and sets the time step.  Raw lattice coordinates (the
+  ladder) scale the same way.
+- Tersoff (128 steps at 108864 atoms) starts at about 1 GPa, SW at
+  about 4 GPa, so SW needs a much larger cell change.
+- Even with the cell fixed FIRE needs 904 steps against 193 at 504
+  atoms: the atoms alone also relax more slowly in the large cell.
+
+The fix was grilled on 2026-11-25 (Q2): a mass for the cell coordinates
+of FIRE is prototyped and measured before an ADR is written.
