@@ -565,6 +565,103 @@ def _sw_multi_3body_numpy(n_start, n_end,
                 stress[2, 1] += fj2 * rijy + fk2 * riky
                 stress[2, 2] += fj2 * rijz + fk2 * rikz
     return energy
+
+
+def _sw_multi_3body_numpy_par(n_start, n_end,
+                          nb_start, nb_idx, nb_rij, nb_r, type_ids,
+                          forces, stress,
+                          tri_valid, tri_eps, tri_lam, tri_cos,
+                          leg_sig, leg_a, leg_gam, n_threads):
+    """Parallel version of _sw_multi_3body_numpy (ADR-0047): the loop
+    over central atoms is a prange, and each thread adds its forces and
+    stress to buffers of its own (contributions to neighbours j, k of
+    different centres would race otherwise), summed at the end.  See
+    _sw_3body_numpy_par for ``n_threads``."""
+    N = forces.shape[0]
+    forces_t = np.zeros((n_threads, N, 3))
+    stress_t = np.zeros((n_threads, 3, 3))
+    energy = 0.0
+    for i in _numba.prange(n_start, n_end):
+        tid = _numba.get_thread_id()
+        si = nb_start[i]
+        ei = nb_start[i + 1]
+        if ei - si < 2:
+            continue
+        i_sp = type_ids[i]
+        for pj in range(si, ei):
+            j_at = nb_idx[pj]
+            j_sp = type_ids[j_at]
+            rijx = nb_rij[pj, 0]
+            rijy = nb_rij[pj, 1]
+            rijz = nb_rij[pj, 2]
+            for pk in range(si, ei):
+                if pk == pj:
+                    continue
+                k_at = nb_idx[pk]
+                k_sp = type_ids[k_at]
+                if not tri_valid[i_sp, j_sp, k_sp]:
+                    continue
+                rikx = nb_rij[pk, 0]
+                riky = nb_rij[pk, 1]
+                rikz = nb_rij[pk, 2]
+
+                sj_t    = leg_sig[i_sp, j_sp]
+                aj_t    = leg_a[i_sp, j_sp]
+                gj_t    = leg_gam[i_sp, j_sp]
+                sk_t    = leg_sig[i_sp, k_sp]
+                ak_t    = leg_a[i_sp, k_sp]
+                gk_t    = leg_gam[i_sp, k_sp]
+                eps_t   = tri_eps[i_sp, j_sp, k_sp]
+                # Both orders (j, k) and (k, j) are visited, each with its
+                # own record, so each weighs one half: an unordered pair
+                # contributes (h_ijk + h_ikj) / 2, which is Stillinger &
+                # Weber's single h when the two records agree and does not
+                # depend on neighbour order when they do not.
+                lam_t   = 0.5 * tri_lam[i_sp, j_sp, k_sp]
+                costh0_t = tri_cos[i_sp, j_sp, k_sp]
+
+                h3, dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _sw_h3_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz,
+                    sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t * lam_t, costh0_t)
+                if h3 == 0.0:
+                    continue
+                energy += h3
+
+                fj0 = -dzj0
+                fj1 = -dzj1
+                fj2 = -dzj2
+                fk0 = -dzk0
+                fk1 = -dzk1
+                fk2 = -dzk2
+                fi0 = dzj0 + dzk0
+                fi1 = dzj1 + dzk1
+                fi2 = dzj2 + dzk2
+
+                forces_t[tid, i, 0] += fi0
+                forces_t[tid, i, 1] += fi1
+                forces_t[tid, i, 2] += fi2
+                forces_t[tid, j_at, 0] += fj0
+                forces_t[tid, j_at, 1] += fj1
+                forces_t[tid, j_at, 2] += fj2
+                forces_t[tid, k_at, 0] += fk0
+                forces_t[tid, k_at, 1] += fk1
+                forces_t[tid, k_at, 2] += fk2
+
+                stress_t[tid, 0, 0] += fj0 * rijx + fk0 * rikx
+                stress_t[tid, 0, 1] += fj0 * rijy + fk0 * riky
+                stress_t[tid, 0, 2] += fj0 * rijz + fk0 * rikz
+                stress_t[tid, 1, 0] += fj1 * rijx + fk1 * rikx
+                stress_t[tid, 1, 1] += fj1 * rijy + fk1 * riky
+                stress_t[tid, 1, 2] += fj1 * rijz + fk1 * rikz
+                stress_t[tid, 2, 0] += fj2 * rijx + fk2 * rikx
+                stress_t[tid, 2, 1] += fj2 * rijy + fk2 * riky
+                stress_t[tid, 2, 2] += fj2 * rijz + fk2 * rikz
+    for t in range(n_threads):
+        forces += forces_t[t]
+        stress += stress_t[t]
+    return energy
+
+
 if _HAS_NUMBA:
     # _sw_3body_numpy_par references _sw_h3_scalar as a module-level global;
     # numba's nopython mode requires that global to already be a compiled
@@ -585,7 +682,15 @@ if _HAS_NUMBA:
 
     _sw_h3_scalar_multi = _numba_njit(_sw_h3_scalar_multi)  # noqa: F811
     _sw_multi_2body_jit = _numba_njit(_sw_multi_2body_numpy)
-    _sw_multi_3body_jit = _numba_njit(_sw_multi_3body_numpy)
+    _sw_multi_3body_serial = _numba_njit(_sw_multi_3body_numpy)
+    _sw_multi_3body_kernel = _numba_par(_sw_multi_3body_numpy_par)
+
+    def _sw_multi_3body_jit(*args):
+        """One thread: the serial kernel, bit for bit the former path.  More
+        threads: the prange kernel with per-thread buffers (ADR-0047)."""
+        if _numba.get_num_threads() == 1:
+            return _sw_multi_3body_serial(*args)
+        return _sw_multi_3body_kernel(*args, _max_threads())
 else:
     _sw_2body_jit = _sw_2body_numpy
     _sw_3body_jit = _sw_3body_numpy
