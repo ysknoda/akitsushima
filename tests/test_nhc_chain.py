@@ -366,7 +366,7 @@ def test_anneal_md_section_takes_nhc_chain(tmp_path):
     assert "nhc_chain" in _MD_KEYS
     lat, pos, types = _si()
     opt = GlobalOptimiser(lat, pos, types, _sw_si_force_fn(), _SW_SI_RCUT,
-                          output_dir=str(tmp_path), md=dict(nhc_chain=4),
+                          output_dir=str(tmp_path), md=dict(thermostat="nhc", nhc_chain=4),
                           relax=dict(max_steps=5), verbose=False, plot=False,
                           schedule=dict(type="constant", n_segments=1, T_start=600.0),
                           segment_steps=20, quench_every=20)

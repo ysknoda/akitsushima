@@ -167,6 +167,16 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.3.0a9 (ADR-0045): `anneal` md_quench uses CSVR by default at nvt
+> (damping 50 fs; npt keeps the Nose-Hoover chain).  After each step down
+> of the schedule T relaxes with a time constant of 2 damping whatever the
+> system size, while the Nose-Hoover chain with its standard masses slows
+> down with the number of atoms and with tau_nhc.  An anneal input that
+> sets `tau_nhc` or `nhc_chain` without `thermostat` is refused (add
+> `thermostat: nhc` to keep the former behaviour), and a restart refuses a
+> thermostat other than the checkpoint's.  The `md` NVT template gives the
+> response times of the three thermostats.
+>
 > 0.3.0a8 (ADR-0044): the Nose-Hoover thermostat of NVT and NPT is a
 > chain of `nhc_chain` links, three by default (`md`, the `anneal` md
 > section and the Python API).  With the former two links a run started

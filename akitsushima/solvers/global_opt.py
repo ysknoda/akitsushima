@@ -72,6 +72,8 @@ __all__ = ["GlobalOptimiser", "enthalpy_force_fn", "temperature_schedule"]
 
 LEDGER = "anneal_log.jsonl"
 CHECKPOINT = "checkpoint.npz"
+# md_quench CSVR coupling time when none is given (fs, ADR-0045).
+CSVR_DAMPING_DEFAULT = 50.0
 
 
 # ----------------------------------------------------------------------
@@ -180,7 +182,9 @@ class GlobalOptimiser:
     relax : keyword arguments for GeometryOptimiser (method, relax_cell,
         fmax, max_steps, ...); output_dir / verbose are set here.
     md : md_quench only -- ``ensemble`` (nvt | npt), ``thermostat``
-        (nhc | langevin | csvr, nvt only; ADR-0039) plus keyword arguments
+        (nhc | langevin | csvr, the latter two nvt only; ADR-0039; default
+        csvr with damping 50 fs at nvt, nhc at npt, ADR-0045; tau_nhc or
+        nhc_chain without a thermostat is an error) plus keyword arguments
         for NVTSimulation / LangevinSimulation / CSVRSimulation /
         NPTSimulation (timestep, tau_nhc, nhc_chain, damping, tau_baro, traj_every,
         thermo_every, masses, ...).
@@ -291,7 +295,23 @@ class GlobalOptimiser:
                 )
         # Particle thermostat of the MD chunks (ADR-0039).  NPT keeps the
         # Nose-Hoover chain on the particles; baro_thermostat sets the cell.
-        self.thermostat = str(self.md_kw.pop("thermostat", "nhc")).lower()
+        # The nvt default is CSVR (ADR-0045): after a step in the target
+        # the whole system relaxes in 2 damping whatever its size, while a
+        # Nose-Hoover chain with the standard masses slows down with n_dof
+        # and tau_nhc.
+        if "thermostat" in self.md_kw:
+            self.thermostat = str(self.md_kw.pop("thermostat")).lower()
+        else:
+            nhc_keys = sorted({"tau_nhc", "nhc_chain"} & set(self.md_kw))
+            if self.ensemble == "nvt" and nhc_keys:
+                keys = ", ".join(nhc_keys)
+                raise ValueError(
+                    f"anneal md: {keys} given without thermostat; the nvt "
+                    "default is csvr since 0.3.0a9 (ADR-0045).  Add "
+                    f"'thermostat: nhc' to keep the Nose-Hoover chain, or "
+                    f"remove {keys} to use csvr"
+                )
+            self.thermostat = "csvr" if self.ensemble == "nvt" else "nhc"
         if self.thermostat not in ("nhc", "langevin", "csvr"):
             raise ValueError(
                 "anneal md: thermostat must be nhc, langevin or csvr, got "
@@ -308,6 +328,11 @@ class GlobalOptimiser:
                 "anneal md: damping needs thermostat langevin or csvr "
                 "(nhc uses tau_nhc)"
             )
+        if self.thermostat == "csvr":
+            # 2 damping = 100 fs: the fastest coupling for which the 2
+            # damping rule holds on SW GeSn (ADR-0045; at 25 fs the
+            # response is held back by the ~40 fs energy exchange).
+            self.md_kw.setdefault("damping", CSVR_DAMPING_DEFAULT)
         self.seed = int(seed)
         self.restart = bool(restart)
         self.max_fail = int(max_consecutive_failures)
@@ -384,6 +409,8 @@ class GlobalOptimiser:
         arrays = {k: v for k, v in state.items() if isinstance(v, np.ndarray)}
         meta = {k: v for k, v in state.items() if not isinstance(v, np.ndarray)}
         meta.update(cycle=cycle, method=self.method, minima=self.minima)
+        if self.method == "md_quench":
+            meta["thermostat"] = self.thermostat
         tmp = self._path(CHECKPOINT + ".tmp.npz")
         np.savez(tmp, meta=np.array(json.dumps(meta)), **arrays)
         os.replace(tmp, self._path(CHECKPOINT))
@@ -399,6 +426,13 @@ class GlobalOptimiser:
             raise ValueError(
                 f"anneal restart: checkpoint is for {meta.get('method')!r}, "
                 f"the config asks for {self.method!r}"
+            )
+        # Checkpoints written before 0.3.0a9 carry no thermostat.
+        th = meta.get("thermostat")
+        if self.method == "md_quench" and th is not None and th != self.thermostat:
+            raise ValueError(
+                f"anneal restart: checkpoint ran thermostat {th!r}, the "
+                f"config asks for {self.thermostat!r}"
             )
         meta.update(arrays)
         return meta

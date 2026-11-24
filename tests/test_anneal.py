@@ -232,6 +232,7 @@ def test_md_quench_heals_a_defected_silicon_cell(tmp_path):
         relax={"method": "fire", "fmax": 0.05, "max_steps": 3000},
         md={
             "ensemble": "nvt",
+            "thermostat": "nhc",  # fixed numbers below (ADR-0045 default is csvr)
             "timestep": 1.0,
             "tau_nhc": 20.0,
             "traj_every": 100,
@@ -544,7 +545,8 @@ def test_md_collapse_below_the_energy_floor_rewinds_the_trajectory(tmp_path, mon
         lat, pos, ["Si"] * 64, deep, rc, method="md_quench",
         output_dir=str(tmp_path / "mq"),
         relax={"method": "fire", "fmax": 0.05},
-        md={"ensemble": "nvt", "traj_every": 10, "thermo_every": 10},
+        # NVTSimulation.run is patched above: pin the chain (ADR-0045).
+        md={"ensemble": "nvt", "thermostat": "nhc", "traj_every": 10, "thermo_every": 10},
         schedule={"type": "constant", "n_segments": 1, "T_start": 300.0},
         segment_steps=60, quench_every=20, seed=2,
         min_energy_per_atom=-10.0, verbose=False, plot=False,
@@ -651,12 +653,53 @@ def test_thermostat_settings_are_refused():
     with pytest.raises(ValueError, match="needs ensemble nvt"):
         GlobalOptimiser(*args, md={"ensemble": "npt", "thermostat": "csvr"})
     with pytest.raises(ValueError, match="damping needs"):
-        GlobalOptimiser(*args, md={"damping": 50.0})
-    assert GlobalOptimiser(*args).thermostat == "nhc"
+        GlobalOptimiser(*args, md={"thermostat": "nhc", "damping": 50.0})
+
+
+def test_default_thermostat_is_csvr_at_nvt_and_nhc_at_npt():
+    """ADR-0045: CSVR follows a step in the target in 2 damping whatever
+    the size; damping defaults to 50 fs.  NPT keeps the chain."""
+    fn, rc = _lj_unshifted()
+    lat, pos = _lj13_start()
+    args = (lat, pos, ["X"] * 13, fn, rc)
+    g = GlobalOptimiser(*args)
+    assert g.thermostat == "csvr" and g.md_kw["damping"] == 50.0
+    g = GlobalOptimiser(*args, md={"thermostat": "csvr", "damping": 120.0})
+    assert g.md_kw["damping"] == 120.0
+    g = GlobalOptimiser(*args, md={"ensemble": "npt"})
+    assert g.thermostat == "nhc" and "damping" not in g.md_kw
+    g = GlobalOptimiser(*args, md={"ensemble": "npt", "tau_nhc": 50.0})
+    assert g.thermostat == "nhc"
+    g = GlobalOptimiser(*args, md={"thermostat": "nhc", "tau_nhc": 20.0})
+    assert g.thermostat == "nhc" and "damping" not in g.md_kw
+    g = GlobalOptimiser(*args, md={"thermostat": "langevin"})
+    assert "damping" not in g.md_kw  # LangevinSimulation's own default
+
+
+@pytest.mark.parametrize("md", [{"tau_nhc": 20.0}, {"nhc_chain": 3},
+                                {"tau_nhc": 20.0, "nhc_chain": 4}])
+def test_nhc_settings_without_thermostat_are_refused(md):
+    """An input written for the former nhc default must not switch to
+    csvr silently (ADR-0045)."""
+    fn, rc = _lj_unshifted()
+    lat, pos = _lj13_start()
+    with pytest.raises(ValueError, match="thermostat: nhc") as err:
+        GlobalOptimiser(lat, pos, ["X"] * 13, fn, rc, md=md)
+    for key in md:
+        assert key in str(err.value)
+
+
+def test_restart_refuses_another_thermostat(tmp_path):
+    """The checkpoint records the thermostat (ADR-0045), so a restart
+    cannot switch it -- e.g. an input without one, resumed after the
+    default changed."""
+    _mq_thermostat(tmp_path, "th", "csvr", segment_steps=30).run()
+    with pytest.raises(ValueError, match="checkpoint ran thermostat 'csvr'"):
+        _mq_thermostat(tmp_path, "th", "nhc", restart=True, segment_steps=30).run()
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("thermostat", ["nhc", "langevin"])
+@pytest.mark.parametrize("thermostat", ["csvr", "nhc", "langevin"])
 def test_cli_md_quench_from_the_template(tmp_path, thermostat):
     """The template as shipped: every MD chunk must run.  Its NPT-only
     tau_baro used to reach NVTSimulation and fail every cycle while the
@@ -666,10 +709,14 @@ def test_cli_md_quench_from_the_template(tmp_path, thermostat):
     from akitsushima.cli.parser import _DISPATCH
 
     path, cfg = _cli_cfg(tmp_path, "md_quench", segment_steps=40, quench_every=20)
-    assert cfg["anneal"]["md"]["thermostat"] == "nhc"  # the template's default
+    assert cfg["anneal"]["md"]["thermostat"] == "csvr"  # the template's default
+    assert cfg["anneal"]["md"]["damping"] == 50.0
     assert "tau_baro" in cfg["anneal"]["md"]
-    if thermostat != "nhc":
-        cfg["anneal"]["md"].update(thermostat=thermostat, damping=50.0)
+    if thermostat == "nhc":
+        cfg["anneal"]["md"].pop("damping")
+        cfg["anneal"]["md"].update(thermostat="nhc", tau_nhc=20.0)
+    elif thermostat == "langevin":
+        cfg["anneal"]["md"].update(thermostat="langevin")
     cfg["anneal"]["schedule"]["n_segments"] = 1
     path.write_text(yaml.safe_dump(cfg))
     assert _DISPATCH["anneal"](_ns(path)) == 0
