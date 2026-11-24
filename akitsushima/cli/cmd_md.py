@@ -51,6 +51,10 @@ def cmd_md(args) -> int:
         raise ValueError(
             f"md: thermostat: {thermostat} is available for ensemble: nvt only, "
             f"not {ens!r} (ADR-0032, ADR-0039).")
+    # Links of the particle Nose-Hoover chain (ADR-0044); default 3.  Like
+    # tau_nhc it is not used by nve, langevin or csvr, so a template keeps
+    # working when only `thermostat` is changed.
+    nhc_chain = md_cfg.get("nhc_chain", 3)
     # Only rank 0 prints anything and runs with verbose=True; every other
     # MPI rank stays silent. Without this guard, `mpirun -n N` would have
     # ALL N ranks independently execute cmd_md() and print the SAME
@@ -96,6 +100,7 @@ def cmd_md(args) -> int:
             # NPT run that then ran at 100.0 was simply a false report.
             _tau_default = 100.0
             print(f"  Tau NHC      : {md_cfg.get('tau_nhc', _tau_default)} fs")
+            print(f"  NHC chain    : {nhc_chain} links")
         if ens == "npt":
             print(f"  Tau baro     : {md_cfg.get('tau_baro', 1000.0)} fs")
             print(f"  Pressure     : {md_cfg.get('pressure', 0.0)} GPa")
@@ -145,6 +150,7 @@ def cmd_md(args) -> int:
                             temperature=md_cfg.get("temperature",300.0),
                             pressure   =md_cfg.get("pressure",   0.0),
                             tau_nhc    =md_cfg.get("tau_nhc",    100.0),
+                            nhc_chain  =nhc_chain,
                             tau_baro   =md_cfg.get("tau_baro",   1000.0),
                             cell_dof   =md_cfg.get("cell_dof",   "iso"),
                             baro_thermostat=md_cfg.get("baro_thermostat", "nhc"),
@@ -162,6 +168,7 @@ def cmd_md(args) -> int:
         sim = NVTSimulation(**common,
                             temperature=md_cfg.get("temperature",300.0),
                             tau_nhc    =md_cfg.get("tau_nhc",    100.0),
+                            nhc_chain  =nhc_chain,
                             velocity_rescale_steps=md_cfg.get(
                                 "velocity_rescale_steps", 0))
 
