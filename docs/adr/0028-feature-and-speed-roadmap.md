@@ -779,3 +779,23 @@ symmetry of non-orthogonal crystals by about 1e-5 A.
   bit.  The only exception is the corrected `vasp` scheme.
 
 This is not a tier B item; it is a follow-up finding of item 5.
+
+
+## Addendum 8: displacement-based spectroscopy plan (grilling 2026-11-24, after 0.3.0a8)
+
+The user asked for Raman and other spectra derived from atomic
+displacements.  The plan is ADR-0046 (Q1-Q17, all agreed as
+recommended).  It is a new block of work after tier B, in five stages:
+
+- S1: `raman`, 0.3.0a10;
+- S2: VASP finite differences and the BPM fit;
+- S3: IR eps(omega) in `dielectric`;
+- S4: BTE linewidths;
+- S5: the two-phonon DOS and ADPs, 0.3.0a14.
+
+All stages start after ADR-0045 is settled.  The following go to the
+planned port of nozuchi (its own grilling): spectra from MD time
+correlations (VDOS on the CLI, MD IR, SED, MD Raman) and the ML charge
+model.  Inelastic neutron scattering is added to tier C, together with
+an ML polarisability and Lanczos / KPM Raman spectra for very large
+cells.
