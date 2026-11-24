@@ -256,6 +256,13 @@ md:
                                    # velocity_rescale_steps: 0
   # damping:    100.0              # fs, langevin (1/gamma; K relaxes in
                                    # damping/2) and csvr (K relaxes in damping)
+  # How fast T follows a target it is far from (ADR-0045, SW GeSn): the
+  # whole system, potential energy included, relaxes with a time constant
+  # of 2 damping (csvr), damping (langevin) or about 2 tau_nhc (nhc), and
+  # is within 5 % of the target after that times ln(|dT| / 0.05 T).  The
+  # Nose-Hoover chain drifts from 2 tau_nhc with the size and tau_nhc
+  # (0.8x at 504 atoms, 1.1x at 4032 atoms for 100 fs; 1.5x at 4032 atoms
+  # for 200 fs): use csvr to reach a target quickly and predictably.
   output_dir:   ./nvt_output
   temperature:  300.0              # K
   timestep:     1.0                # fs
@@ -1289,11 +1296,19 @@ anneal:
   quench_every:  500               # MD steps between quenches
   md:
     ensemble:     nvt              # nvt | npt (npt uses `pressure`)
-    thermostat:   nhc              # nhc | langevin | csvr (nvt only; ADR-0039)
-    # damping:    100.0            # fs, langevin / csvr (instead of tau_nhc)
+    thermostat:   csvr             # csvr | nhc | langevin (csvr and langevin
+                                   # nvt only; ADR-0039).  Left out: csvr at
+                                   # nvt, nhc at npt (ADR-0045).
+    damping:      50.0             # fs, csvr / langevin.  After each step down
+                                   # of the schedule T relaxes with a time
+                                   # constant of 2 damping (csvr; damping for
+                                   # langevin): 50 fs puts T within 5 % of the
+                                   # new target ~0.2 ps into a segment of this
+                                   # schedule (ADR-0045).
     timestep:     1.0              # fs
-    tau_nhc:      20.0             # fs
-    nhc_chain:    3                # nhc: chain links (ADR-0044); each MD
+    # tau_nhc:    20.0             # fs, nhc (~2 tau_nhc, but slower for many
+                                   # atoms or a long tau_nhc; ADR-0045)
+    # nhc_chain:  3                # nhc: chain links (ADR-0044); each MD
                                    # chunk restarts the chain
     tau_baro:     1000.0           # fs (npt)
     cell_dof:     iso              # npt: iso | aniso | tri | xy | xy_iso | z
