@@ -291,6 +291,14 @@ md:
   n_steps:      10000
   equil_steps:  1000               # steps with velocity rescaling active
   tau_nhc:      100.0              # fs  NHC thermostat time constant (50-200 typical)
+  nhc_chain:    3                  # links of the Nose-Hoover chain (>= 2; ADR-0044).
+                                   # With 2 links (the default before 0.3.0a8)
+                                   # a run far from the target -- e.g. from a
+                                   # minimum, where equipartition halves T at
+                                   # once -- recovers only over ~ln(1.9) tau_nhc
+                                   # sqrt(3N): 8 ps at 4032 atoms, 15 ps at
+                                   # 13608 atoms for tau_nhc 100 fs.  3 links:
+                                   # under 1 ps.  2 reproduces older runs.
   velocity_rescale_steps: 1000     # = equil_steps: VS active during equilibration
   traj_every:   10                 # write trajectory every N steps
   traj_format:  xdatcar            # xdatcar | extxyz | lammps-dump (ADR-0034)
@@ -390,6 +398,9 @@ md:
   n_steps:     20000
   equil_steps: 2000
   tau_nhc:     100.0               # fs
+  nhc_chain:   3                   # particle Nose-Hoover chain links
+                                   # (ADR-0044; see the NVT template); the
+                                   # barostat chain has 2
   tau_baro:    200.0               # fs
   cell_dof:    iso                 # ADR-0036; x, y, z are Cartesian:
                                    #   iso    volume only (cell shape kept)
@@ -1282,6 +1293,8 @@ anneal:
     # damping:    100.0            # fs, langevin / csvr (instead of tau_nhc)
     timestep:     1.0              # fs
     tau_nhc:      20.0             # fs
+    nhc_chain:    3                # nhc: chain links (ADR-0044); each MD
+                                   # chunk restarts the chain
     tau_baro:     1000.0           # fs (npt)
     cell_dof:     iso              # npt: iso | aniso | tri | xy | xy_iso | z
     baro_thermostat: nhc           # npt: nhc | langevin

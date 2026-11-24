@@ -322,3 +322,64 @@ def test_three_links_heat_from_the_halved_start_faster(tmp_path):
     est = np.log(1.9) * 100.0 * np.sqrt(3 * 512 - 3) / 1000.0
     assert t[2] > 0.8 * est, t
     assert t[3] < 0.5 * t[2], t
+
+
+# ------------------------------------------------------------------ CLI
+
+
+def _ck_settings(out):
+    import json
+
+    z = np.load(os.path.join(out, "md_checkpoint.npz"))
+    return json.loads(str(z["meta"]))["settings"]
+
+
+def test_md_cli_passes_nhc_chain_and_refuses_a_changed_one(tmp_path, capsys):
+    from test_cli_restart import _md_cfg
+    from test_cli_smoke import _ns
+
+    from akitsushima.cli.cmd_md import cmd_md
+
+    three = tmp_path / "three"
+    assert cmd_md(_ns(_md_cfg(tmp_path, three, 10, verbose=True))) == 0
+    assert "NHC chain    : 3 links" in capsys.readouterr().out
+    assert _ck_settings(three)["nhc_chain"] == 3
+    two = tmp_path / "two"
+    assert cmd_md(_ns(_md_cfg(tmp_path, two, 10, nhc_chain=2))) == 0
+    assert "nhc_chain" not in _ck_settings(two)  # 2 links: as before ADR-0044
+    with pytest.raises(ValueError, match="nhc_chain"):
+        cmd_md(_ns(_md_cfg(tmp_path, three, 20, nhc_chain=2)))
+    npt = tmp_path / "npt"
+    assert cmd_md(_ns(_md_cfg(tmp_path, npt, 10, ensemble="npt", nhc_chain=4))) == 0
+    assert _ck_settings(npt)["nhc_chain"] == 4
+    # Like tau_nhc, nhc_chain is not used by csvr: switching only
+    # `thermostat` in a template keeps working.
+    csvr = tmp_path / "csvr"
+    assert cmd_md(_ns(_md_cfg(tmp_path, csvr, 10, thermostat="csvr", nhc_chain=3))) == 0
+    assert "nhc_chain" not in _ck_settings(csvr)
+
+
+def test_anneal_md_section_takes_nhc_chain(tmp_path):
+    from akitsushima.cli.cmd_anneal import _MD_KEYS
+    from akitsushima.solvers.global_opt import GlobalOptimiser
+
+    assert "nhc_chain" in _MD_KEYS
+    lat, pos, types = _si()
+    opt = GlobalOptimiser(lat, pos, types, _sw_si_force_fn(), _SW_SI_RCUT,
+                          output_dir=str(tmp_path), md=dict(nhc_chain=4),
+                          relax=dict(max_steps=5), verbose=False, plot=False,
+                          schedule=dict(type="constant", n_segments=1, T_start=600.0),
+                          segment_steps=20, quench_every=20)
+    seen = []
+    orig = NVTSimulation._init_nhc_chain
+
+    def spy(self, M, T, tau):
+        seen.append(M)
+        return orig(self, M, T, tau)
+
+    NVTSimulation._init_nhc_chain = spy
+    try:
+        opt.run()
+    finally:
+        NVTSimulation._init_nhc_chain = orig
+    assert seen == [4]

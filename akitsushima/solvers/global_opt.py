@@ -182,7 +182,7 @@ class GlobalOptimiser:
     md : md_quench only -- ``ensemble`` (nvt | npt), ``thermostat``
         (nhc | langevin | csvr, nvt only; ADR-0039) plus keyword arguments
         for NVTSimulation / LangevinSimulation / CSVRSimulation /
-        NPTSimulation (timestep, tau_nhc, damping, tau_baro, traj_every,
+        NPTSimulation (timestep, tau_nhc, nhc_chain, damping, tau_baro, traj_every,
         thermo_every, masses, ...).
     schedule : md_quench only -- dict for :func:`temperature_schedule`
         (type, n_segments, T_start, T_end, temperatures).

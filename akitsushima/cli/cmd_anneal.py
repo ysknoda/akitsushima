@@ -59,6 +59,7 @@ _MD_KEYS = {
     "damping",
     "timestep",
     "tau_nhc",
+    "nhc_chain",
     "tau_baro",
     "cell_dof",
     "baro_thermostat",
