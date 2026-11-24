@@ -1,5 +1,5 @@
 ---
-status: accepted (plan 2026-10-29; size ladder done 2026-11-21; parallel matrix and durability runs pending)
+status: accepted (plan 2026-10-29; size ladder 2026-11-21; parallel matrix and durability runs 2026-11-22/23; all results written 2026-11-25)
 ---
 
 # Large-scale GeSn test of relax and md: scaling and durability
@@ -294,3 +294,116 @@ grilling).**
    multi-species Tersoff and 0.018 s for single-species SW Si at 4096
    atoms (`bench_force`, one thread): 64 us per atom in md, 17 times
    Tersoff.  A candidate for tier B item 8 (speed-ups).
+
+### Parallel matrix (decision 8; 2026-11-22, 0.3.0a7)
+
+`example/GeSn/large/campaign.py`, ledger `campaign_ledger.jsonl`, stage
+`parallel`.  NVT 300 K, 200 steps from the FIRE-relaxed 13608-atom cell
+(n = 12), as the ladder's md runs; time per step from the CLI, memory
+from `ps` on the process tree.  Load average 2.0-4.2 (macOS background
+work), tagged `loaded`.
+
+| Model | Run | time per step | speed-up | peak RSS, one process / tree |
+|---|---|---|---|---|
+| SW (`fit_sw`) | 1 thread | 0.520 s | 1 | 0.40 / 0.38 GB |
+| | 4 threads | 0.520 s | 1.00 | 0.42 / 0.36 GB |
+| | 10 threads | 0.518 s | 1.00 | 0.44 / 0.43 GB |
+| | `mpirun -n 1`, 10 threads | 0.517 s | 1.01 | 0.44 / 0.43 GB |
+| | `mpirun -n 2`, 5 threads each | 0.279 s | 1.86 | 0.34 / 0.59 GB |
+| | `mpirun -n 4`, 2 threads each | 0.239 s | 2.18 | 0.46 / 1.63 GB |
+| MLIP (`ac_elm_iso_r2`) | 1 thread | 0.641 s | 1 | 1.08 / 1.01 GB |
+| | 4 threads | 0.268 s | 2.39 | 1.07 / 1.05 GB |
+| | 10 threads | 0.227 s | 2.82 | 1.11 / 1.08 GB |
+
+- All nine runs pass decision 13 (exit 0, finite, 20 rows, 2 frames,
+  RSS under 20 GB).  T_mean is the same to every printed digit across
+  the six SW runs (144.13 K) and across the three MLIP runs (138.85 K),
+  so neither threads nor ranks change the trajectory at this length.
+- SW gains nothing from threads: the multi-species SW kernel is a serial
+  `njit` (ladder finding 4).  Only MPI splits it, 2.2 times at four
+  ranks; replicated data costs about 0.4 GB per rank.
+- The MLIP's `prange` ACSF kernel gives 2.4 times on four threads and
+  2.8 times on ten (the M4 has four performance cores).
+- The ladder's 13608-atom md timings (SW 0.93 s, MLIP 1.43 s per step)
+  were inflated by a load of 5-8; at a load of about 2 the same runs
+  take 0.52 s and 0.64 s.
+
+### Durability (decision 10; 2026-11-22 to 2026-11-24, 0.3.0a7)
+
+Stage `durability` of `campaign.py`: one run at a time, one thread, md
+checkpoints every chunk (ADR-0031, which replaced the "no restart" of
+decision 11), `ps` every 60 s.  Figure `durability.png` (RSS against wall
+time, NVE E_tot, T of the thermostatted runs, unit 2's P and V; checked
+as PNG), made by `plot_durability.py`.
+
+| Unit | Run | wall | per step | peak RSS | Result | Verdict |
+|---|---|---|---|---|---|---|
+| 1 | SW 4032, NVE, 100 ps | 4.2 h | 0.153 s | 0.30 GB | E_tot drift -1.2e-6 meV/atom/ps, largest deviation 0.010 meV/atom | pass |
+| 2 | SW 4032, NPT 300 K / 0 GPa, 50 ps | 2.1 h | 0.149 s | 0.28 GB | T_mean 298.0 K, P_mean -0.0018 GPa, V 25.08 A^3/atom | pass |
+| 3 | SW 13608, NVT 900 K, 20 ps | 2.7 h | 0.481 s | 0.45 GB | T_mean 774.2 K | **fail** |
+| 3b | as 3, template burn-in (ADR-0044) | 3.2 h | 0.519 s | 0.49 GB | T_mean 899.7 K over the 20 ps production | pass |
+| 4 | MLIP 4032, NVT 600 K, 200 ps | 9.3 h | 0.168 s | 0.49 GB | T_mean 600.01 K, d_min 2.149 A, lowest E_pot 0.1 meV/atom above relaxed | pass |
+| 5 | MLIP 4032, NVE, 5 ps | 0.24 h | 0.171 s | 0.49 GB | E_tot drift -5.6e-5 meV/atom/ps, largest deviation 0.023 meV/atom, d_min 2.253 A | pass |
+
+Verdicts leave out the RSS-growth criterion (below).  Unit 4 was planned
+"as far as 12 h allows" and set to 200 ps by the user.  Every run exited
+with 0, stayed finite and wrote the expected rows and frames.
+
+- **NVE.**  Both drifts are three to five orders of magnitude below the
+  0.1 meV/atom/ps of decision 13, so the UNCERTAIN bound is not tight
+  for SW or for the fastmath ELM.  The largest deviation is set by the
+  first 0.2 ps (panel b): E_tot steps by 0.008 (SW) / 0.013 (MLIP)
+  meV/atom while the start at a minimum halves the kinetic energy, the
+  O(dt^2) offset of velocity Verlet's conserved energy following T.
+  Afterwards it is flat.
+- **NPT.**  The volume settles within about 8 ps, 0.6 % above the 0 K
+  relaxed cell (24.93 A^3/atom), and stays there.
+- **Unit 3: slow heating.**  The campaign started every thermostatted run
+  at the relaxed cell without the template's burn-in (`equil_steps` 0,
+  `velocity_rescale_steps` 0).  Equipartition halves T at once, and the
+  two-link Nose-Hoover chain then took 7.8 / 13.9 / 8.1 ps to reach
+  0.95 T0 in units 2 / 3 / 4 (panel c).  20 ps of unit 3 was too short
+  to average it out.  Cause and remedy: ADR-0044 (three links by default
+  from 0.3.0a8; unit 3b with the burn-in passes on 0.3.0a7), and for
+  anneal ADR-0045.
+- **RSS growth.**  The criterion "less than 5 % growth after the first
+  10 %" (the largest sample after 10 % against the sample at 10 %)
+  fails on units 1-4 and 3b (8.4 / 7.7 / 31.8 / 12.2 / 21.7 %) and passes
+  on unit 5 (0.5 %).  The samples are noise, not growth (panel a): macOS
+  resident memory jumps between 0.13 and 0.18 GB (units 1, 2), 0.22 and
+  0.41 GB (3, 3b) and 0.17 and 0.41 GB (4) as pages are compressed and
+  brought back.  Least-squares trends over the same windows are -10 /
+  +17 / +11 / -6 / +7 / +9 % (units 1, 2, 3, 3b, 4, 5): both signs, and
+  no run ends above 0.49 GB.  No leak is seen; the criterion as written
+  measures paging, not use.  A leak check on macOS should sample the
+  physical footprint (`footprint` / `phys_footprint`), not RSS.
+- **Driver.**  `campaign.py` stopped once in its own judge (a numpy bool
+  that `json` could not write) after unit 1 had finished.  It was fixed
+  and restarted from unit 2 without rerunning unit 1.  Later it was
+  swapped while unit 2 ran, attaching to the running process.  Neither
+  touched akitsushima.
+
+### Pass criteria, all stages
+
+- exit 0, finite values, rows and frames: every run of the ladder (41),
+  the parallel matrix (9) and the durability stage (6): **pass**.
+- Replicas: **pass**.  Scaling slope at most 1.15: **pass** (1.00-1.01).
+  Peak RSS under 20 GB: **pass** (largest 1.63 GB, four MPI ranks).
+- NVE drift, NPT pressure, MLIP not collapsed: **pass**.
+- NVT mean T within 2 %: **fail** for unit 3 as run, **pass** for 3b and
+  unit 4 (ADR-0044).
+- relax within `max_steps`: **fail** for L-BFGS on large cells and FIRE
+  on SW at 108864 atoms (ladder findings 1 and 2).
+- RSS growth under 5 %: not met as written; no growth seen (above).
+
+### Findings of the parallel and durability stages
+
+5. The two-link Nose-Hoover chain heats a cold start in about
+   ln(1.9) tau sqrt(n_dof): fixed in ADR-0044 (0.3.0a8).
+6. The RSS-growth criterion measures macOS paging; a future leak check
+   should use the physical footprint.
+7. Threads do not speed up multi-species SW (ladder finding 4, still
+   open); MPI does, 2.2 times at four ranks.
+
+Findings 1-4 (ladder) and 7 still wait for the separate grilling of
+decision 12; finding 5 is closed by ADR-0044 and ADR-0045.

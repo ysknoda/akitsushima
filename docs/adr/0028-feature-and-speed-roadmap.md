@@ -744,6 +744,9 @@ needing two or more cores waits for the user's word.
   slower per atom than Tersoff.  They wait for a separate grilling.
 - Still held: the parallel matrix, the idle baseline and the durability
   runs.
+- Later: the parallel matrix (2026-11-22) and the durability runs
+  (2026-11-22 to 2026-11-24) are done, results in ADR-0025.  The idle
+  baseline was not run.
 
 
 ## Addendum 6: tier B item 5 re-scoped (grilling 2026-11-22, after 0.3.0a3)
