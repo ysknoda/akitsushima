@@ -145,7 +145,12 @@ def test_legacy_checkpoint_continues_like_the_uninterrupted_run(
     tmp_path, name, cls, extra
 ):
     """A 0.3.0a7 checkpoint (chain as scalars xi1 .. vxi2) at step 150,
-    carried on to step 300, lands on the uninterrupted 0.3.0a7 run."""
+    carried on to step 300, lands on the uninterrupted 0.3.0a7 run.
+
+    To a relative 1e-9, not 1e-12: since ADR-0047 the SW three-body forces
+    are analytic instead of central differences, which moves them by up to
+    ~1e-9 eV/A and the step-300 state by ~3e-12 (relative).  A wrong
+    restore of the chain or the cell is off by orders of magnitude more."""
     d = tmp_path / name
     shutil.copytree(os.path.join(LEGACY, name), d)
     lat, pos, types = _si()
@@ -160,7 +165,7 @@ def test_legacy_checkpoint_continues_like_the_uninterrupted_run(
         ("lat", sim.lattice),
     ):
         want = ref[f"{name}_{key}"]
-        assert np.max(np.abs(got - want)) <= 1e-12 * np.max(np.abs(want)), key
+        assert np.max(np.abs(got - want)) <= 1e-9 * np.max(np.abs(want)), key
 
 
 def test_legacy_checkpoint_refuses_another_chain_length(tmp_path):

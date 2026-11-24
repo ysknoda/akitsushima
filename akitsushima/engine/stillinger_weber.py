@@ -93,6 +93,67 @@ def _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
     return lam * eps * exp_ij * exp_ik * dcos * dcos
 
 
+def _sw_h3_grad(rijx, rijy, rijz, rikx, riky, rikz,
+                sig_j, a_j, gam_j, sig_k, a_k, gam_k, c3, costh0):
+    """
+    SW three-body term of one triple and its analytic gradient (ADR-0047).
+
+        h = c3 exp(gam_j / (x_ij - a_j)) exp(gam_k / (x_ik - a_k))
+               (cos theta_jik - cos theta0)^2,     x = r / sigma,
+
+    with c3 = lambda epsilon (single species) or epsilon lambda_t (one
+    ordered record of the multi-species path).  Returns (h, dh/dr_ij,
+    dh/dr_ik) as 7 floats, where r_ij = r_j - r_i and r_ik = r_k - r_i;
+    all zero outside either leg's cutoff.  h is evaluated with the same
+    operations, in the same order, as _sw_h3_scalar / _sw_h3_scalar_multi,
+    so the energy is bit for bit the former one.
+
+    Gradient, with u = r / |r| and D = cos theta - cos theta0:
+        dh/dr_ij = c3 E_ij E_ik D [ D dlnE_ij/dr u_ij
+                                    + 2 (u_ik - cos theta u_ij) / r_ij ],
+        dlnE_ij/dr = -gam_j / (sigma_j (x_ij - a_j)^2),
+    and the same with j and k exchanged.  It replaces central finite
+    differences of h (12 extra evaluations per triple).  A hand-derived
+    formula used before those differences was wrong in a way a perfect
+    crystal cannot show (all forces vanish by symmetry); this one is
+    checked against energy differences on distorted, asymmetric cells
+    (tests/test_sw_analytic.py).
+    """
+    r_ij = math.sqrt(rijx * rijx + rijy * rijy + rijz * rijz)
+    r_ik = math.sqrt(rikx * rikx + riky * riky + rikz * rikz)
+    xij = r_ij / sig_j
+    xik = r_ik / sig_k
+    if xij >= a_j or xik >= a_k:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    dj = xij - a_j
+    dk = xik - a_k
+    exp_ij = _nb_exp(gam_j / dj)
+    exp_ik = _nb_exp(gam_k / dk)
+    cos_th = (rijx * rikx + rijy * riky + rijz * rikz) / (r_ij * r_ik)
+    dcos = cos_th - costh0
+    h = c3 * exp_ij * exp_ik * dcos * dcos
+    pre = c3 * exp_ij * exp_ik * dcos
+    inv_ij = 1.0 / r_ij
+    inv_ik = 1.0 / r_ik
+    uijx = rijx * inv_ij
+    uijy = rijy * inv_ij
+    uijz = rijz * inv_ij
+    uikx = rikx * inv_ik
+    uiky = riky * inv_ik
+    uikz = rikz * inv_ik
+    rad_j = pre * dcos * (-gam_j / (sig_j * dj * dj))
+    rad_k = pre * dcos * (-gam_k / (sig_k * dk * dk))
+    ang_j = 2.0 * pre * inv_ij
+    ang_k = 2.0 * pre * inv_ik
+    gj0 = rad_j * uijx + ang_j * (uikx - cos_th * uijx)
+    gj1 = rad_j * uijy + ang_j * (uiky - cos_th * uijy)
+    gj2 = rad_j * uijz + ang_j * (uikz - cos_th * uijz)
+    gk0 = rad_k * uikx + ang_k * (uijx - cos_th * uikx)
+    gk1 = rad_k * uiky + ang_k * (uijy - cos_th * uiky)
+    gk2 = rad_k * uikz + ang_k * (uijz - cos_th * uikz)
+    return h, gj0, gj1, gj2, gk0, gk1, gk2
+
+
 def _sw_3body_numpy(n_start, n_end,
                      nb_start, nb_idx, nb_rij, nb_r,
                      forces, stress,
@@ -101,16 +162,15 @@ def _sw_3body_numpy(n_start, n_end,
     SW 3-body energy and forces.  Returns energy; modifies forces/stress
     in-place.  Iterates over central atoms in [n_start, n_end).
 
-    Forces are obtained via central finite differences of the scalar
-    h3 term (_sw_h3_scalar) with respect to the 6 components of the two
-    relative-displacement vectors r_ij, r_ik, rather than a hand-derived
-    analytic chain-rule expression. A previous version of this kernel
-    used such an analytic formula, which was found (via a
+    Forces come from the analytic gradient of h3 (_sw_h3_grad, ADR-0047).
+    History: an early hand-derived formula was found (via a
     finite-difference check against the total energy on a displaced,
     symmetry-broken structure) to be INCORRECT -- the bug had gone
     undetected because it only manifests for a genuinely asymmetric
     local environment, and pristine-crystal validation has zero force by
-    symmetry regardless of the sign/magnitude error.
+    symmetry regardless of the sign/magnitude error.  Central finite
+    differences of h3 replaced it until ADR-0047; the NumPy fallback in
+    compute() still uses them and serves as the reference in the tests.
 
     Bug-fix note (stress sign): an earlier version accumulated
     ``stress -= outer(Fj, rij) + outer(Fk, rik)`` (matching the sign used
@@ -131,7 +191,7 @@ def _sw_3body_numpy(n_start, n_end,
     3-body bond-order force correction (tersoff.py).
     """
     energy = 0.0
-    hh = 1e-6
+    c3 = lam * eps
     for i in range(n_start, n_end):
         si = nb_start[i]
         ei = nb_start[i + 1]
@@ -158,22 +218,10 @@ def _sw_3body_numpy(n_start, n_end,
                 riky = nb_rij[pk, 1]
                 rikz = nb_rij[pk, 2]
 
-                h3 = _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
-                                    sig, a_sw, gam, lam, eps, costh0)
+                h3, dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _sw_h3_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz,
+                    sig, a_sw, gam, sig, a_sw, gam, c3, costh0)
                 energy += h3
-
-                dzj0 = (_sw_h3_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzj1 = (_sw_h3_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzj2 = (_sw_h3_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzk0 = (_sw_h3_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzk1 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzk2 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
 
                 fj0 = -dzj0
                 fj1 = -dzj1
@@ -277,7 +325,7 @@ def _sw_3body_numpy_par(n_start, n_end,
     forces_t = np.zeros((n_threads, N, 3))
     stress_t = np.zeros((n_threads, 3, 3))
     energy = 0.0
-    hh = 1e-6
+    c3 = lam * eps
 
     for i in _numba.prange(n_start, n_end):
         tid = _numba.get_thread_id()
@@ -306,22 +354,10 @@ def _sw_3body_numpy_par(n_start, n_end,
                 riky = nb_rij[pk, 1]
                 rikz = nb_rij[pk, 2]
 
-                h3 = _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz,
-                                    sig, a_sw, gam, lam, eps, costh0)
+                h3, dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _sw_h3_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz,
+                    sig, a_sw, gam, sig, a_sw, gam, c3, costh0)
                 energy += h3
-
-                dzj0 = (_sw_h3_scalar(rijx + hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx - hh, rijy, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzj1 = (_sw_h3_scalar(rijx, rijy + hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy - hh, rijz, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzj2 = (_sw_h3_scalar(rijx, rijy, rijz + hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz - hh, rikx, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzk0 = (_sw_h3_scalar(rijx, rijy, rijz, rikx + hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx - hh, riky, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzk1 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky + hh, rikz, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky - hh, rikz, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
-                dzk2 = (_sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz + hh, sig, a_sw, gam, lam, eps, costh0)
-                        - _sw_h3_scalar(rijx, rijy, rijz, rikx, riky, rikz - hh, sig, a_sw, gam, lam, eps, costh0)) / (2 * hh)
 
                 fj0 = -dzj0
                 fj1 = -dzj1
@@ -449,13 +485,11 @@ def _sw_multi_3body_numpy(n_start, n_end,
     the pair record (i, j, j), used for the leg i-j (LAMMPS pair_sw;
     Tomita et al. 2018, eq. 4).  tri_valid is True where (i, j, k),
     (i, j, j) and (i, k, k) all exist.
-    Same central-finite-difference force/stress derivation as
-    _sw_3body_numpy (see that function's docstring for why), and the
-    same early `if h3 == 0.0: continue` skip the existing multi-species
-    NumPy path uses to avoid 6 wasted finite-difference evaluations once
-    a triple is out of its (per-triple) cutoff."""
+    Same analytic force/stress derivation as _sw_3body_numpy
+    (_sw_h3_grad, ADR-0047), and the same early `if h3 == 0.0: continue`
+    skip the multi-species NumPy path uses once a triple is out of its
+    (per-triple) cutoff."""
     energy = 0.0
-    hh = 1e-6
     for i in range(n_start, n_end):
         si = nb_start[i]
         ei = nb_start[i + 1]
@@ -494,24 +528,12 @@ def _sw_multi_3body_numpy(n_start, n_end,
                 lam_t   = 0.5 * tri_lam[i_sp, j_sp, k_sp]
                 costh0_t = tri_cos[i_sp, j_sp, k_sp]
 
-                h3 = _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz,
-                                         sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
+                h3, dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _sw_h3_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz,
+                    sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t * lam_t, costh0_t)
                 if h3 == 0.0:
                     continue
                 energy += h3
-
-                dzj0 = (_sw_h3_scalar_multi(rijx + hh, rijy, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx - hh, rijy, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzj1 = (_sw_h3_scalar_multi(rijx, rijy + hh, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy - hh, rijz, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzj2 = (_sw_h3_scalar_multi(rijx, rijy, rijz + hh, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz - hh, rikx, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzk0 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx + hh, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx - hh, riky, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzk1 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky + hh, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky - hh, rikz, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
-                dzk2 = (_sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz + hh, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)
-                        - _sw_h3_scalar_multi(rijx, rijy, rijz, rikx, riky, rikz - hh, sj_t, aj_t, gj_t, sk_t, ak_t, gk_t, eps_t, lam_t, costh0_t)) / (2 * hh)
 
                 fj0 = -dzj0
                 fj1 = -dzj1
@@ -543,14 +565,13 @@ def _sw_multi_3body_numpy(n_start, n_end,
                 stress[2, 1] += fj2 * rijy + fk2 * riky
                 stress[2, 2] += fj2 * rijz + fk2 * rikz
     return energy
-
-
 if _HAS_NUMBA:
     # _sw_3body_numpy_par references _sw_h3_scalar as a module-level global;
     # numba's nopython mode requires that global to already be a compiled
     # (njit) callable at the time _sw_3body_numpy_par itself gets compiled,
     # so _sw_h3_scalar must be JIT-compiled and reassigned FIRST.
     _sw_h3_scalar = _numba_njit(_sw_h3_scalar)  # noqa: F811
+    _sw_h3_grad = _numba_njit(_sw_h3_grad)  # noqa: F811
     _sw_2body_kernel = _numba_par(_sw_2body_numpy_par)
     _sw_3body_kernel = _numba_par(_sw_3body_numpy_par)
 
