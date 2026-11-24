@@ -520,14 +520,10 @@ def _te_zeta_numpy_par(P, idx_i, idx_j, rij_arr, r_arr,
 # (n_sp, n_sp, n_sp) triple table (c, d, h, lambda3, m, gamma -- from
 # self._three_body(si, sj, sk)), since the zeta sum and the 3-body force
 # correction both need a triple's angular parameters AND its k-neighbour
-# pair's own (R, D) cutoff simultaneously. Scope note: unlike the legacy
-# single-species kernels (_te_zeta_jit/_te_3body_force_jit), these are
-# JIT-compiled WITHOUT numba.prange multi-threading (a deliberate,
-# smaller-scope choice given the added complexity two interacting
-# per-species-id tables would add on top of thread-safe accumulator
-# buffers) -- still a substantial speed-up over pure Python/dict lookups
-# from JIT compilation alone, matching the same scope decision made for
-# stillinger_weber.py's multi-species kernels.
+# pair's own (R, D) cutoff simultaneously.  Threads: these kernels were
+# serial until ADR-0047; each now has a prange twin (_te_multi_zeta_numpy_par,
+# _te_multi_pass3_numpy_par) used when numba runs more than one thread, and
+# one thread keeps the serial kernels (bit for bit the former path).
 
 def _te_multi_zeta_numpy(P, idx_i, idx_j, rij_arr, r_arr, type_ids,
                          nb_start, nb_idx, nb_rij, nb_r,
@@ -543,6 +539,82 @@ def _te_multi_zeta_numpy(P, idx_i, idx_j, rij_arr, r_arr, type_ids,
     only on the (j,k) pair. This is a property of the EXISTING NumPy
     path being replicated exactly, not something introduced here."""
     for p in range(P):
+        ii = idx_i[p]
+        jj = idx_j[p]
+        si = type_ids[ii]
+        sj = type_ids[jj]
+        if not tb_valid[si, sj]:
+            continue
+        r_ij = r_arr[p]
+        rijx = rij_arr[p, 0]
+        rijy = rij_arr[p, 1]
+        rijz = rij_arr[p, 2]
+
+        # zeta_ij: sum over k neighbouring i (excluding j)
+        for nb in range(nb_start[ii], nb_start[ii + 1]):
+            kk = nb_idx[nb]
+            if kk == jj:
+                continue
+            sk = type_ids[kk]
+            if not tb_valid[si, sk] or not tri_valid[si, sj, sk]:
+                continue
+            R_ik = tb_R[si, sk]
+            D_ik = tb_D[si, sk]
+            r_ik = nb_r[nb]
+            fc_ik = _te_fc(r_ik, R_ik, D_ik)
+            if fc_ik == 0.0:
+                continue
+            dot = 0.0
+            for d in range(3):
+                dot += rij_arr[p, d] * nb_rij[nb, d]
+            cos_t = dot / (r_ij * r_ik)
+            c_t = tri_c[si, sj, sk]
+            d_t = tri_d[si, sj, sk]
+            h_t = tri_h[si, sj, sk]
+            l3 = tri_l3[si, sj, sk]
+            m_t = tri_m[si, sj, sk]
+            gam = tri_gam[si, sj, sk]
+            g_t = 1.0 + c_t * c_t / (d_t * d_t) - c_t * c_t / (d_t * d_t + (h_t - cos_t)**2)
+            zeta_ij[p] += gam * fc_ik * g_t * _nb_exp(l3**m_t * (r_ij - r_ik)**m_t)
+
+        # zeta_ji: sum over k neighbouring j (excluding i)
+        rjix = -rijx
+        rjiy = -rijy
+        rjiz = -rijz
+        for nb in range(nb_start[jj], nb_start[jj + 1]):
+            kk = nb_idx[nb]
+            if kk == ii:
+                continue
+            sk = type_ids[kk]
+            if not tb_valid[sj, sk] or not tri_valid[sj, si, sk]:
+                continue
+            R_jk = tb_R[sj, sk]
+            D_jk = tb_D[sj, sk]
+            r_jk = nb_r[nb]
+            fc_jk = _te_fc(r_jk, R_jk, D_jk)
+            if fc_jk == 0.0:
+                continue
+            dot = rjix * nb_rij[nb, 0] + rjiy * nb_rij[nb, 1] + rjiz * nb_rij[nb, 2]
+            cos_t = dot / (r_ij * r_jk)
+            c_t = tri_c[sj, si, sk]
+            d_t = tri_d[sj, si, sk]
+            h_t = tri_h[sj, si, sk]
+            l3 = tri_l3[sj, si, sk]
+            m_t = tri_m[sj, si, sk]
+            gam = tri_gam[sj, si, sk]
+            g_t = 1.0 + c_t * c_t / (d_t * d_t) - c_t * c_t / (d_t * d_t + (h_t - cos_t)**2)
+            zeta_ji[p] += gam * fc_jk * g_t * _nb_exp(l3**m_t * (r_ij - r_jk)**m_t)
+
+
+def _te_multi_zeta_numpy_par(P, idx_i, idx_j, rij_arr, r_arr, type_ids,
+                         nb_start, nb_idx, nb_rij, nb_r,
+                         zeta_ij, zeta_ji,
+                         tb_valid, tb_R, tb_D,
+                         tri_valid, tri_c, tri_d, tri_h, tri_l3, tri_m, tri_gam):
+    """Parallel version of _te_multi_zeta_numpy (ADR-0047): pair p writes
+    only zeta_ij[p] and zeta_ji[p], so a prange over pairs needs no
+    buffers."""
+    for p in _numba.prange(P):
         ii = idx_i[p]
         jj = idx_j[p]
         si = type_ids[ii]
@@ -784,6 +856,186 @@ def _te_multi_pass3_numpy(p_start, p_end,
     return energy
 
 
+def _te_multi_pass3_numpy_par(p_start, p_end,
+                          idx_i, idx_j, rij_arr, r_arr, type_ids,
+                          bij_ij, bij_ji, dbij_ij, dbij_ji,
+                          nb_start, nb_idx, nb_rij, nb_r,
+                          forces, stress,
+                          tb_valid, tb_A, tb_B, tb_l1, tb_l2, tb_R, tb_D,
+                          tri_valid, tri_c, tri_d, tri_h, tri_l3, tri_m, tri_gam, n_threads):
+    """Parallel version of _te_multi_pass3_numpy (ADR-0047): prange over
+    pairs, forces and stress added to per-thread buffers (pairs sharing
+    an atom would race otherwise) and summed at the end.  ``n_threads``
+    as in _te_3body_force_numpy_par."""
+    N = forces.shape[0]
+    forces_t = np.zeros((n_threads, N, 3))
+    stress_t = np.zeros((n_threads, 3, 3))
+    energy = 0.0
+    for p in _numba.prange(p_start, p_end):
+        tid = _numba.get_thread_id()
+        ii = idx_i[p]
+        jj = idx_j[p]
+        si = type_ids[ii]
+        sj = type_ids[jj]
+        if not tb_valid[si, sj]:
+            continue
+        A_t = tb_A[si, sj]
+        B_t = tb_B[si, sj]
+        l1 = tb_l1[si, sj]
+        l2 = tb_l2[si, sj]
+        R_t = tb_R[si, sj]
+        D_t = tb_D[si, sj]
+        r_ij = r_arr[p]
+        rijx = rij_arr[p, 0]
+        rijy = rij_arr[p, 1]
+        rijz = rij_arr[p, 2]
+        fc_ij = _te_fc(r_ij, R_t, D_t)
+        dfc_ij = _te_dfc_scalar(r_ij, R_t, D_t)
+        if fc_ij == 0.0 and dfc_ij == 0.0:
+            continue
+        fr = A_t * _nb_exp(-l1 * r_ij)
+        fa = -B_t * _nb_exp(-l2 * r_ij)
+        b_avg = 0.5 * (bij_ij[p] + bij_ji[p])
+
+        energy += fc_ij * (fr + b_avg * fa)
+        dEdr = (dfc_ij * (fr + b_avg * fa)
+                + fc_ij * (-l1 * fr + b_avg * (-l2 * fa)))
+        cx = dEdr / r_ij
+        for d in range(3):
+            fv = cx * rij_arr[p, d]
+            forces_t[tid, ii, d] += fv
+            forces_t[tid, jj, d] += -fv
+        for di in range(3):
+            for dj in range(3):
+                stress_t[tid, di, dj] -= cx * rij_arr[p, di] * rij_arr[p, dj]
+
+        dbi = dbij_ij[p]
+        dbj = dbij_ji[p]
+
+        if abs(dbi) > 1e-30:
+            for nb in range(nb_start[ii], nb_start[ii + 1]):
+                kk = nb_idx[nb]
+                if kk == jj:
+                    continue
+                sk = type_ids[kk]
+                if not tb_valid[si, sk] or not tri_valid[si, sj, sk]:
+                    continue
+                R_ik = tb_R[si, sk]
+                D_ik = tb_D[si, sk]
+                rikx = nb_rij[nb, 0]
+                riky = nb_rij[nb, 1]
+                rikz = nb_rij[nb, 2]
+                r_ik = nb_r[nb]
+                fc_ik = _te_fc(r_ik, R_ik, D_ik)
+                if fc_ik == 0.0:
+                    continue
+                c_t = tri_c[si, sj, sk]
+                d_t = tri_d[si, sj, sk]
+                h_t = tri_h[si, sj, sk]
+                l3 = tri_l3[si, sj, sk]
+                m_t = tri_m[si, sj, sk]
+                gam = tri_gam[si, sj, sk]
+                coeff = 0.5 * fc_ij * fa * dbi
+
+                dzj0, dzj1, dzj2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rijx, rijy, rijz, rikx, riky, rikz, R_ik, D_ik, c_t, d_t, h_t, l3, m_t, gam)
+
+                Fj0 = -coeff * dzj0
+                Fj1 = -coeff * dzj1
+                Fj2 = -coeff * dzj2
+                Fk0 = -coeff * dzk0
+                Fk1 = -coeff * dzk1
+                Fk2 = -coeff * dzk2
+                Fi0 = coeff * (dzj0 + dzk0)
+                Fi1 = coeff * (dzj1 + dzk1)
+                Fi2 = coeff * (dzj2 + dzk2)
+
+                forces_t[tid, ii, 0] += Fi0
+                forces_t[tid, ii, 1] += Fi1
+                forces_t[tid, ii, 2] += Fi2
+                forces_t[tid, jj, 0] += Fj0
+                forces_t[tid, jj, 1] += Fj1
+                forces_t[tid, jj, 2] += Fj2
+                forces_t[tid, kk, 0] += Fk0
+                forces_t[tid, kk, 1] += Fk1
+                forces_t[tid, kk, 2] += Fk2
+
+                stress_t[tid, 0, 0] += Fj0 * rijx + Fk0 * rikx
+                stress_t[tid, 0, 1] += Fj0 * rijy + Fk0 * riky
+                stress_t[tid, 0, 2] += Fj0 * rijz + Fk0 * rikz
+                stress_t[tid, 1, 0] += Fj1 * rijx + Fk1 * rikx
+                stress_t[tid, 1, 1] += Fj1 * rijy + Fk1 * riky
+                stress_t[tid, 1, 2] += Fj1 * rijz + Fk1 * rikz
+                stress_t[tid, 2, 0] += Fj2 * rijx + Fk2 * rikx
+                stress_t[tid, 2, 1] += Fj2 * rijy + Fk2 * riky
+                stress_t[tid, 2, 2] += Fj2 * rijz + Fk2 * rikz
+
+        if abs(dbj) > 1e-30:
+            rjix = -rijx
+            rjiy = -rijy
+            rjiz = -rijz
+            for nb in range(nb_start[jj], nb_start[jj + 1]):
+                kk = nb_idx[nb]
+                if kk == ii:
+                    continue
+                sk = type_ids[kk]
+                if not tb_valid[sj, sk] or not tri_valid[sj, si, sk]:
+                    continue
+                R_jk = tb_R[sj, sk]
+                D_jk = tb_D[sj, sk]
+                rjkx = nb_rij[nb, 0]
+                rjky = nb_rij[nb, 1]
+                rjkz = nb_rij[nb, 2]
+                r_jk = nb_r[nb]
+                fc_jk = _te_fc(r_jk, R_jk, D_jk)
+                if fc_jk == 0.0:
+                    continue
+                c_t = tri_c[sj, si, sk]
+                d_t = tri_d[sj, si, sk]
+                h_t = tri_h[sj, si, sk]
+                l3 = tri_l3[sj, si, sk]
+                m_t = tri_m[sj, si, sk]
+                gam = tri_gam[sj, si, sk]
+                coeff = 0.5 * fc_ij * fa * dbj
+
+                dzi0, dzi1, dzi2, dzk0, dzk1, dzk2 = _te_zterm_grad(
+                    rjix, rjiy, rjiz, rjkx, rjky, rjkz, R_jk, D_jk, c_t, d_t, h_t, l3, m_t, gam)
+
+                Fi0 = -coeff * dzi0
+                Fi1 = -coeff * dzi1
+                Fi2 = -coeff * dzi2
+                Fk0 = -coeff * dzk0
+                Fk1 = -coeff * dzk1
+                Fk2 = -coeff * dzk2
+                Fj0 = coeff * (dzi0 + dzk0)
+                Fj1 = coeff * (dzi1 + dzk1)
+                Fj2 = coeff * (dzi2 + dzk2)
+
+                forces_t[tid, jj, 0] += Fj0
+                forces_t[tid, jj, 1] += Fj1
+                forces_t[tid, jj, 2] += Fj2
+                forces_t[tid, ii, 0] += Fi0
+                forces_t[tid, ii, 1] += Fi1
+                forces_t[tid, ii, 2] += Fi2
+                forces_t[tid, kk, 0] += Fk0
+                forces_t[tid, kk, 1] += Fk1
+                forces_t[tid, kk, 2] += Fk2
+
+                stress_t[tid, 0, 0] += Fi0 * rjix + Fk0 * rjkx
+                stress_t[tid, 0, 1] += Fi0 * rjiy + Fk0 * rjky
+                stress_t[tid, 0, 2] += Fi0 * rjiz + Fk0 * rjkz
+                stress_t[tid, 1, 0] += Fi1 * rjix + Fk1 * rjkx
+                stress_t[tid, 1, 1] += Fi1 * rjiy + Fk1 * rjky
+                stress_t[tid, 1, 2] += Fi1 * rjiz + Fk1 * rjkz
+                stress_t[tid, 2, 0] += Fi2 * rjix + Fk2 * rjkx
+                stress_t[tid, 2, 1] += Fi2 * rjiy + Fk2 * rjky
+                stress_t[tid, 2, 2] += Fi2 * rjiz + Fk2 * rjkz
+    for t in range(n_threads):
+        forces += forces_t[t]
+        stress += stress_t[t]
+    return energy
+
+
 if _HAS_NUMBA:
     _te_zeta_jit = _numba_par(_te_zeta_numpy_par)
     _te_3body_force_kernel = _numba_par(_te_3body_force_numpy_par)
@@ -792,8 +1044,22 @@ if _HAS_NUMBA:
         """_te_3body_force_numpy_par with this process's thread bound."""
         return _te_3body_force_kernel(*args, _max_threads())
 
-    _te_multi_zeta_jit = _numba_njit(_te_multi_zeta_numpy)
-    _te_multi_pass3_jit = _numba_njit(_te_multi_pass3_numpy)
+    _te_multi_zeta_serial = _numba_njit(_te_multi_zeta_numpy)
+    _te_multi_zeta_kernel = _numba_par(_te_multi_zeta_numpy_par)
+    _te_multi_pass3_serial = _numba_njit(_te_multi_pass3_numpy)
+    _te_multi_pass3_kernel = _numba_par(_te_multi_pass3_numpy_par)
+
+    # One thread: the serial kernels, bit for bit the former path.  More
+    # threads: the prange kernels (ADR-0047).
+    def _te_multi_zeta_jit(*args):
+        if _numba.get_num_threads() == 1:
+            return _te_multi_zeta_serial(*args)
+        return _te_multi_zeta_kernel(*args)
+
+    def _te_multi_pass3_jit(*args):
+        if _numba.get_num_threads() == 1:
+            return _te_multi_pass3_serial(*args)
+        return _te_multi_pass3_kernel(*args, _max_threads())
 else:
     _te_zeta_jit = _te_zeta_numpy
     _te_3body_force_jit = _te_3body_force_numpy
@@ -862,10 +1128,8 @@ class TersoffPotential:
     resolves its dict-keyed parameter tables into dense, per-species-id
     NumPy arrays once per ``compute()`` call before dispatching (see
     ``_compute_multi_species``'s own docstring), rather than JIT-
-    compiling the dict lookups themselves. Unlike the legacy path's
-    JIT kernels, the multi-species ones are not additionally
-    multi-threaded (``numba.prange``) -- a smaller-scope choice, see
-    ``_te_multi_pass3_numpy``'s module-level comment.
+    compiling the dict lookups themselves.  Like the legacy path's JIT
+    kernels, the multi-species ones run on numba's threads (ADR-0047).
     """
 
     def __init__(self,
