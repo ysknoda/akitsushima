@@ -29,6 +29,7 @@ __all__ = [
     "_YAML_QHA_DEFAULT",
     "_YAML_DIELECTRIC_DEFAULT",
     "_YAML_RAMAN_DEFAULT",
+    "_YAML_MDSPEC_DEFAULT",
     "_YAML_PIEZO_DEFAULT",
     "_YAML_NEMD_DEFAULT",
     "_YAML_ANNEAL_DEFAULT",
@@ -1258,6 +1259,56 @@ raman:
   masses: {}
 """
 
+_YAML_MDSPEC_DEFAULT = """\
+# akitsushima  --  spectra from MD trajectories (ADR-0050, ADR-0051)
+# Usage: akitsushima mdspec mdspec.yaml          (--check: run diagnostics)
+#        akitsushima mdspec nozuchi.yaml --convert-nozuchi > mdspec.yaml
+# eps(omega) = eps' - i eps'' from the total dipole M(t) by the
+# fluctuation-dissipation theorem (ported from nozuchi 0.2.0a2).  Relative
+# paths are read against this file's directory.
+
+born:                        # shared with phonon / dielectric / raman
+  epsilon_inf: 1.0           # rigid ion: no electronic part (MgO: 2.95)
+  # epsilon_inf: {outcar: dfpt/OUTCAR}
+  # born_charges:            # with mdspec.dipole.model born_tensor
+  #   outcar: dfpt/OUTCAR
+  #   unit_cell: dfpt/POSCAR
+  #   supercell: [3, 3, 3]   # the MD cell = S x unit_cell
+  #   map_tolerance: 0.6     # A
+
+mdspec:
+  trajectory:
+    files: [md_output/XDATCAR_nvt]   # from akitsushima md (traj_format xdatcar)
+    mode: concatenate        # concatenate | independent (one run per file)
+    timestep_fs: 1.0         # MD time step
+    frame_every: 2           # MD steps between frames (md traj_every)
+    skip_frames: 0
+    stride: 1
+  temperature: auto          # K, or auto from temperature_source
+  temperature_source: [md_output/thermo.log]
+  masses: {}                 # optional override [amu]
+  dipole:
+    model: point_charge      # point_charge | born_tensor | external
+    charges: {Mg: 2.0, O: -2.0}   # the potential's charges (Lewis-Catlow MgO)
+  spectrum:
+    max_lag_ps: auto         # a quarter of the run
+    window: hann             # hann | boxcar | none
+    zero_pad_factor: 4
+    freq_unit: THz           # THz | cm-1 | meV
+    freq_max: 30
+    kk_check: true
+    n_blocks: 5
+    estimator: auto          # auto | mode | fsum | raw
+  # modes: {phonopy: qpoints.yaml, unit_cell: POSCAR_unit, supercell: [3, 3, 3]}
+  # forces: {files: [forces.npy]}  # force-based static value (reported only)
+  # fit: {model: additive, terms: [{type: lorentz, f0: 12.0}], freq_range: [1.0, 30.0]}
+  output:
+    dir: mdspec_output
+    prefix: mgo
+    plot: true
+    dipole_cache: true
+"""
+
 _YAML_PIEZO_DEFAULT = """\
 # akitsushima  --  Relaxed-ion piezoelectric tensors (rigid ion, ADR-0019)
 # Usage: akitsushima piezo piezo.yaml
@@ -1619,6 +1670,7 @@ _DUMP_MAP = {
     "qha":    _YAML_QHA_DEFAULT,
     "dielectric": _YAML_DIELECTRIC_DEFAULT,
     "raman":  _YAML_RAMAN_DEFAULT,
+    "mdspec": _YAML_MDSPEC_DEFAULT,
     "piezo":  _YAML_PIEZO_DEFAULT,
     "nemd":   _YAML_NEMD_DEFAULT,
     "bte":    _YAML_BTE_DEFAULT,

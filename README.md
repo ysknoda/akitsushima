@@ -167,6 +167,14 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.4.0a1 (ADR-0050, ADR-0051): new `mdspec` command -- spectra from MD
+> trajectories, starting with the complex permittivity eps(omega) from the
+> total dipole M(t) by the fluctuation-dissipation theorem (point charges,
+> Born tensors or an external dipole series; raw / f-sum / mode
+> estimators; optics, mode table, fits, `--check`).  Ported from nozuchi
+> 0.2.0a2 without behaviour changes; `--convert-nozuchi` translates a
+> nozuchi input.
+>
 > 0.3.0a11 (ADR-0049): new `raman` command -- first-order Raman spectra
 > in the harmonic approximation: Gamma modes of any cell (primitive or
 > alloy supercell), Raman / IR activity from characters (spglib), and with
@@ -474,6 +482,7 @@ print(result["energy"] / 64, "eV/atom after relaxation")
 | `qha`    | Quasi-harmonic thermal expansion, B(T), C_p, thermodynamic γ(T) |
 | `dielectric` | Static dielectric tensor, LO-TO splitting, IR modes (Born charges) |
 | `raman`  | Raman spectra: activity from characters, polarisation geometries, powder average (ADR-0049) |
+| `mdspec` | MD spectra: permittivity eps(omega) from M(t) by FDT, optics, fits, run diagnostics (ADR-0051) |
 | `piezo`  | Relaxed-ion piezoelectric e, d and coupling k (rigid ion) |
 | `nemd`   | Non-equilibrium MD: T profile, local heat flux, kappa, Kapitza resistance |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
@@ -589,6 +598,36 @@ raman_spectrum.png.  With `born:` the LO frequencies along x, y, z are
 listed (the electro-optic LO intensity term is not included).  VASP
 finite-difference Raman tensors and the BPM fit follow in the next stage
 (ADR-0046).
+
+### MD spectra: permittivity from M(t) (ADR-0050, ADR-0051)
+
+```yaml
+born:
+  epsilon_inf: 1.0                      # or {outcar: dfpt/OUTCAR}
+  # born_charges: {outcar: dfpt/OUTCAR, unit_cell: dfpt/POSCAR, supercell: [3, 3, 2]}
+mdspec:
+  trajectory: {files: [md_output/XDATCAR_nvt], timestep_fs: 1.0, frame_every: 2}
+  temperature: auto
+  temperature_source: [md_output/thermo.log]
+  dipole: {model: point_charge, charges: {Mg: 2.0, O: -2.0}}   # | born_tensor | external
+  spectrum: {freq_unit: THz, freq_max: 30, estimator: auto}  # auto | mode | fsum | raw
+  # modes: {file: gamma_modes.npz, unit_cell: POSCAR_unit, supercell: [8, 8, 8]}
+  # forces: {files: [forces.npy]}       # force-based static value, reported only
+  output: {dir: mdspec_output, prefix: mgo}
+```
+
+`akitsushima mdspec input.yaml` reads the trajectory once (streaming
+XDATCAR reader, optional numba) and gives eps_ab(omega) = eps' - i eps''
+with eps_inf + [<dM_a dM_b> - i w int <dM_a(0) dM_b(t)> e^{-iwt} dt] /
+(eps0 V kB T), the static value by the raw, f-sum and mode estimators
+(the last needs the Gamma eigenvectors), optics (n, kappa, R, absorption,
+loss function, TO / LO, LST), the mode table, fits (Debye ... Lorentz,
+Gervais-Piriou) and a Kramers-Kronig check.  `--check` diagnoses the runs
+(equilibration, drift, statistics) and exits 1 on any WARN.  Relative
+paths are read against the YAML file's directory.  Validated in nozuchi
+(Tier 2a / 3a within 1.5 % of a force-based reference); the port
+reproduces nozuchi 0.2.0a2 on those inputs (ADR-0051).  VDOS, SED and the
+Raman temperature shift follow (ADR-0050 stages P2-P6).
 
 ### NEMD and the decomposition of kappa (ADR-0020)
 
@@ -1048,6 +1087,7 @@ Which solvers take an MLIP (ADR-0007):
 | `relax`, `md`, `neb`, `tsa`, `phonon`, `elastic`, `gruneisen`, `qha` | yes | yes | need E, F, S only |
 | `dielectric`, `piezo` | with `born:` | with `born:` | Z* and eps_inf must be given (no charges of its own) |
 | `raman` | yes | yes | frequencies from the MLIP; intensities from `polarizability:` |
+| `mdspec` | -- | -- | post-processing of a trajectory (charges from `mdspec.dipole` / `born:`) |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
 | `kappa`, `nemd` (local flux) | refused | yes | exact heat flux from the site terms |
 | `osmc` | refused | yes | CFCMC couples the fractional atom through total energies (ADR-0009): as `gcmc` |

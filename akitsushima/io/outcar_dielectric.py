@@ -23,6 +23,12 @@ __all__ = ["map_to_unit_cell", "read_outcar_born", "read_outcar_eps_inf", "rigid
 _EPS_HEAD = (
     "MACROSCOPIC STATIC DIELECTRIC TENSOR (including local field effects in DFT)"
 )
+# LCALCEPS (finite field) prints the tensor without "in DFT" according to
+# the VASP wiki LCALCEPS page (read 2026-11-25; ADR-0050 decision 7).  The
+# DFPT header is preferred when both are present.
+_EPS_HEAD_LCALCEPS = (
+    "MACROSCOPIC STATIC DIELECTRIC TENSOR (including local field effects)"
+)
 
 
 def _last_block(text: str, head: str, n_lines: int) -> list:
@@ -34,10 +40,12 @@ def _last_block(text: str, head: str, n_lines: int) -> list:
 
 def read_outcar_eps_inf(path) -> np.ndarray:
     """Electronic dielectric tensor (local field effects in DFT), last
-    occurrence in the OUTCAR."""
+    occurrence in the OUTCAR; the LCALCEPS header without "in DFT" is
+    accepted when the DFPT one is absent."""
     text = Path(path).read_text(errors="replace")
+    head = _EPS_HEAD if _EPS_HEAD in text else _EPS_HEAD_LCALCEPS
     try:
-        lines = _last_block(text, _EPS_HEAD, 4)
+        lines = _last_block(text, head, 4)
     except ValueError:
         raise ValueError(
             f"{path}: no '{_EPS_HEAD}' block (LEPSILON or LCALCEPS run?)"
@@ -110,11 +118,7 @@ def map_to_unit_cell(
     lat_u_sc = np.linalg.inv(S) @ np.asarray(lattice_sc, dtype=float)
     rel = np.abs(lat_u_sc - lattice_u).max() / np.abs(lattice_u).max()
     if rel > 0.01:
-        warnings.warn(
-            f"site mapping: the unit cell implied by this cell "
-            f"differs from the DFT cell by {rel:.1%}",
-            stacklevel=2,
-        )
+        warnings.warn(f"MD unit cell differs from the DFPT cell by {rel:.1%}", stacklevel=2)
     if len(symbols_sc) != n_cells * len(symbols_u):
         raise ValueError(
             f"site mapping: {len(symbols_sc)} atoms != {n_cells} cells x "
@@ -127,7 +131,7 @@ def map_to_unit_cell(
     if np.linalg.norm(shift @ lat_u_sc) > 0.1:
         warnings.warn(
             f"site mapping: removed a rigid translation of the whole crystal "
-            f"of {np.linalg.norm(shift @ lat_u_sc):.2f} A",
+            f"of {np.linalg.norm(shift @ lat_u_sc):.2f} A (e.g. from a Langevin NVT)",
             stacklevel=2,
         )
     g = g - shift

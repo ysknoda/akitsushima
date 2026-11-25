@@ -15,6 +15,7 @@ from .cmd_gcmc import cmd_gcmc
 from .cmd_gruneisen import cmd_gruneisen
 from .cmd_kappa import cmd_kappa
 from .cmd_md import cmd_md
+from .cmd_mdspec import cmd_mdspec
 from .cmd_mlip import cmd_mlip
 from .cmd_neb import cmd_neb
 from .cmd_nemd import cmd_nemd
@@ -39,6 +40,7 @@ __all__ = ["build_parser", "main"]
 _DISPATCH = {
     "relax":   cmd_relax,
     "md":      cmd_md,
+    "mdspec":  cmd_mdspec,
     "gcmc":    cmd_gcmc,
     "neb":     cmd_neb,
     "tsa":     cmd_tsa,
@@ -87,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  qha       Quasi-harmonic thermal expansion, B(T), Cp\n"
             "  dielectric Static dielectric tensor, LO-TO, IR modes (Born charges)\n"
             "  raman     Raman spectra: activity, polarisation geometries, powder\n"
+            "  mdspec    MD spectra: permittivity eps(omega) from M(t) (FDT), optics\n"
             "  piezo     Relaxed-ion piezoelectric e, d and coupling k\n"
             "  nemd      Non-equilibrium MD: T profile, local heat flux, Kapitza\n"
             "  bte       Lattice thermal conductivity from fc3 (RTA, phonon BTE)\n"
@@ -107,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | raman | piezo | mlip | dataset | anneal | build | active"))
+              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | raman | mdspec | piezo | mlip | dataset | anneal | build | active"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -133,6 +136,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add("qha",    "Quasi-harmonic thermal expansion, bulk modulus, Cp")
     _add("dielectric", "Static dielectric tensor, LO-TO splitting, IR modes")
     _add("raman",  "Raman spectra in the harmonic approximation (ADR-0049)")
+    p_mds = _add("mdspec", "Spectra from MD trajectories: eps(omega) by FDT (ADR-0051)")
+    p_mds.add_argument("--check", action="store_true",
+                       help="diagnose the runs (equilibration, drift, statistics); "
+                            "exit 1 if any item is WARN")
+    p_mds.add_argument("--energy", nargs="+", metavar="FILE",
+                       help="with --check: OSZICAR or thermo.log files for the energy drift")
+    p_mds.add_argument("--target", type=float, default=0.02,
+                       help="with --check: target relative error of eps_s (default 0.02)")
+    p_mds.add_argument("--convert-nozuchi", action="store_true",
+                       help="print the akitsushima YAML of a nozuchi input file and exit")
     _add("piezo",  "Relaxed-ion piezoelectric tensors e, d and coupling k")
     _add("nemd",   "Non-equilibrium MD with Langevin heat baths (kappa, Kapitza)")
     _add("bte",    "Lattice thermal conductivity from third-order force constants (RTA)")
