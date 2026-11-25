@@ -80,7 +80,8 @@ def test_md_cli_restart_false_starts_afresh(tmp_path):
     assert cmd_md(_ns(_md_cfg(tmp_path, out, 20, restart=False))) == 0
     assert np.array_equal(_final(out), first)
     rows = [ln for ln in (out / "thermo.log").read_text().splitlines()]
-    assert len(rows) == 1 + 25 // 5  # header + steps 0, 5, ..., 20
+    # header + completed steps 0, 5, ..., 25 (ADR-0048; 0, 5, ..., 20 before)
+    assert len(rows) == 1 + 25 // 5 + 1
 
 
 def test_md_cli_refuses_a_changed_potential(tmp_path):

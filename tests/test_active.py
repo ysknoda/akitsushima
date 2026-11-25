@@ -441,7 +441,11 @@ def test_select_fills_from_failed_frames_without_duplicates(sw_case, tmp_path):
     assert res["status"] == "waiting_for_labels"
     rows = [json.loads(x) for x in open(tmp_path / "out" / "active_ledger.jsonl")]
     sel = next(r for r in rows if r.get("stage") == "select")
-    assert sel["n_candidate"] == 0 and sel["n_failed"] == sel["n_frames"]
+    # every frame fails except the two explorers' frame 0, the perfect
+    # start crystal (zero forces for every model, sigma 0; written since
+    # ADR-0048 labels frames by completed steps)
+    assert sel["n_candidate"] == 0 and sel["n_accurate"] == 2
+    assert sel["n_failed"] == sel["n_frames"] - 2
     assert sel["n_selected"] == 3 and sel["n_filled_from_failed"] == 3
     assert sel["sigma_selected"] == sorted(sel["sigma_selected"])
     # both explorers' frame 0 is the start structure: only one is taken

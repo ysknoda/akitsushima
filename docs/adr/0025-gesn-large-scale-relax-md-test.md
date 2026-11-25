@@ -289,6 +289,8 @@ grilling).**
    0, time 0) is the state after one step and the last row is
    `n_steps - thermo_every`.  The same holds for all four integrators.
    Not a crash; changing it changes every thermo file.
+   Closed by ADR-0048 (0.4.0a4): rows labelled by completed steps,
+   row 0 the initial state.
 4. The multi-species SW kernel (`_compute_multi_species`, serial
    `njit`) takes 0.24 s for 4032 GeSn atoms, against 0.011 s for the
    multi-species Tersoff and 0.018 s for single-species SW Si at 4096

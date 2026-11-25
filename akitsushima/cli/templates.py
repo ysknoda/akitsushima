@@ -322,6 +322,10 @@ md:
   traj_velocities: false           # true: velocities in extxyz (A/fs) /
                                    # lammps-dump (A/ps), for mdspec (ADR-0052)
   thermo_every: 50                 # write thermo log every N steps
+                                   # Rows and frames are labelled by
+                                   # completed steps, as in LAMMPS: row 0
+                                   # is the initial state, then N, 2N, ...;
+                                   # frames from equil_steps on (ADR-0048)
   skin_width:   0.5
   seed:         42
   timing:       true

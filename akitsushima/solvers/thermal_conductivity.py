@@ -544,7 +544,7 @@ class ThermalConductivityCalculator:
         acc_factor = EV_ANG_TO_AMU_ANG_FS2 / masses[:, None]   # [A/fs^2] per [eV/A]
 
         # Initial forces
-        E_pot, forces, _ = self.force_fn(lat, pos, self.atom_types)
+        E_pot, forces, stress = self.force_fn(lat, pos, self.atom_types)
         acc = forces * acc_factor
 
         J_list      : List[np.ndarray] = []
@@ -575,6 +575,41 @@ class ThermalConductivityCalculator:
             t_fh.write(hdr + "\n")
             j_fh.write("step  Jx_eV_Ang2_fs  Jy  Jz\n")
 
+            def _emit(c, E_pot, stress):
+                """Thermo row and trajectory frame of the state after c
+                completed steps (ADR-0048: c = 0 is the initial state;
+                the row labelled k used to hold the state after k + 1
+                steps)."""
+                if c % thermo_every == 0:
+                    # Bug-fix note: e_kin was amu A^2/fs^2 read as eV (the
+                    # log showed 0.48 K for a 50 K run), and P carried the
+                    # tensile-positive sign; the engine's stress is
+                    # compressive-positive (ADR-0001), so P = +tr(sigma)/3.
+                    e_kin = (0.5 * np.sum(masses * np.sum(vel**2, axis=1))
+                             / EV_ANG_TO_AMU_ANG_FS2)
+                    T_inst= e_kin * 2.0 / (3.0 * N * K_B)
+                    e_tot = float(E_pot) + e_kin
+                    P_gpa = np.trace(stress) / 3.0 * GPa
+                    row = (f"{c:8d}  {T_inst:9.2f}  {float(E_pot):14.6f}  "
+                           f"{e_tot:14.6f}  {P_gpa:9.4f}")
+                    t_fh.write(row + "\n")
+                    if verbose and c % (thermo_every * 10) == 0:
+                        drift = e_tot - e_tot_ref
+                        print(f"  step={c:7d}  T={T_inst:7.1f} K  "
+                              f"drift={drift:+.4e} eV")
+                if c % traj_every == 0:
+                    x_fh.write(f"{N}\n")
+                    a, b, cc = lat[0], lat[1], lat[2]
+                    x_fh.write(
+                        f"Lattice=\"{a[0]:.6f} {a[1]:.6f} {a[2]:.6f} "
+                        f"{b[0]:.6f} {b[1]:.6f} {b[2]:.6f} "
+                        f"{cc[0]:.6f} {cc[1]:.6f} {cc[2]:.6f}\" "
+                        f"Properties=species:S:1:pos:R:3 "
+                        f"step={c}\n")
+                    for ia, (sp, p) in enumerate(zip(self.atom_types, pos)):
+                        x_fh.write(f"{sp}  {p[0]:.8f}  {p[1]:.8f}  {p[2]:.8f}\n")
+
+            _emit(0, E_pot, stress)
             for step in range(n_steps):
                 # Velocity Verlet
                 vel  += 0.5 * dt * acc
@@ -608,39 +643,12 @@ class ThermalConductivityCalculator:
                             g = np.zeros((len(names), 3))
                             np.add.at(g, lab, Ji)
                             G_lists.setdefault(name, [names, []])[1].append(g)
-                    j_fh.write(f"{step}  {J[0]:.8e}  {J[1]:.8e}  {J[2]:.8e}\n")
+                    # The flux is sampled after steps 1, 1 + heat_flux_every,
+                    # ... as before ADR-0048 (kappa unchanged bit for bit);
+                    # the label is the number of completed steps.
+                    j_fh.write(f"{step + 1}  {J[0]:.8e}  {J[1]:.8e}  {J[2]:.8e}\n")
 
-                # Thermo
-                if step % thermo_every == 0:
-                    # Bug-fix note: e_kin was amu A^2/fs^2 read as eV (the
-                    # log showed 0.48 K for a 50 K run), and P carried the
-                    # tensile-positive sign; the engine's stress is
-                    # compressive-positive (ADR-0001), so P = +tr(sigma)/3.
-                    e_kin = (0.5 * np.sum(masses * np.sum(vel**2, axis=1))
-                             / EV_ANG_TO_AMU_ANG_FS2)
-                    T_inst= e_kin * 2.0 / (3.0 * N * K_B)
-                    e_tot = float(E_pot) + e_kin
-                    P_gpa = np.trace(stress) / 3.0 * GPa
-                    row = (f"{step:8d}  {T_inst:9.2f}  {float(E_pot):14.6f}  "
-                           f"{e_tot:14.6f}  {P_gpa:9.4f}")
-                    t_fh.write(row + "\n")
-                    if verbose and step % (thermo_every * 10) == 0:
-                        drift = e_tot - e_tot_ref
-                        print(f"  step={step:7d}  T={T_inst:7.1f} K  "
-                              f"drift={drift:+.4e} eV")
-
-                # Trajectory
-                if step % traj_every == 0:
-                    x_fh.write(f"{N}\n")
-                    a, b, c = lat[0], lat[1], lat[2]
-                    x_fh.write(
-                        f"Lattice=\"{a[0]:.6f} {a[1]:.6f} {a[2]:.6f} "
-                        f"{b[0]:.6f} {b[1]:.6f} {b[2]:.6f} "
-                        f"{c[0]:.6f} {c[1]:.6f} {c[2]:.6f}\" "
-                        f"Properties=species:S:1:pos:R:3 "
-                        f"step={step}\n")
-                    for ia, (sp, p) in enumerate(zip(self.atom_types, pos)):
-                        x_fh.write(f"{sp}  {p[0]:.8f}  {p[1]:.8f}  {p[2]:.8f}\n")
+                _emit(step + 1, E_pot, stress)
 
         J_series = np.array(J_list)   # (n_frames, 3)
         self._J_series = J_series

@@ -892,6 +892,28 @@ class GCMCMDSimulation(_BaseMDSimulation):
             n_fh.write("# cycle  N\n")
             self._xdatcar_frame_idx = 1
 
+            def _emit(c, e_pot, rho, T_inst, acc_i, acc_d, acc_m):
+                """Thermo row, N line and trajectory frame of the state
+                after c completed cycles (ADR-0048: c = 0 is the initial
+                state; the row labelled k used to hold the state after
+                k + 1 cycles)."""
+                n_fh.write(f"{c}  {self.N}\n")
+                if c % self.thermo_every == 0:
+                    ai = f"{acc_i:.4f}" if np.isfinite(acc_i) else "  n/a "
+                    ad = f"{acc_d:.4f}" if np.isfinite(acc_d) else "  n/a "
+                    am = f"{acc_m:.4f}" if np.isfinite(acc_m) else "  n/a "
+                    row = (f"{c:8d}  {self.N:6d}  {rho:10.6f}  "
+                           f"{e_pot:14.6f}  {T_inst:10.2f}  "
+                           f"{ai:>8}  {ad:>8}  {am:>8}")
+                    thermo_fh.write(row + "\n")
+                    if self.verbose and c % max(1, self.n_cycles // 20) == 0:
+                        print("  " + row)
+                if c % self.traj_every == 0:
+                    self._write_xyz_frame(traj_fh, c, e_pot)
+
+            nan = float("nan")  # no move tried yet
+            _emit(0, float(self._get_energy()), self.N / V,
+                  self._temperature_inst(), nan, nan, nan)
             for cycle in range(self.n_cycles):
                 self._tc.start("step")  # timing
                 # 1. MD segment
@@ -908,27 +930,14 @@ class GCMCMDSimulation(_BaseMDSimulation):
                 rho    = self.N / V
                 acc_i, acc_d, acc_m = self._acceptance_rates()
 
-                n_fh.write(f"{cycle}  {self.N}\n")
                 self._thermo_log.append({
-                    "cycle": cycle, "N": self.N, "rho": rho,
+                    "cycle": cycle + 1, "N": self.N, "rho": rho,
                     "e_pot": e_pot, "T_inst": T_inst,
                     "acc_ins": acc_i, "acc_del": acc_d, "acc_disp": acc_m,
                 })
 
                 self._tc.lap("step")  # timing
-                if cycle % self.thermo_every == 0:
-                    ai = f"{acc_i:.4f}" if np.isfinite(acc_i) else "  n/a "
-                    ad = f"{acc_d:.4f}" if np.isfinite(acc_d) else "  n/a "
-                    am = f"{acc_m:.4f}" if np.isfinite(acc_m) else "  n/a "
-                    row = (f"{cycle:8d}  {self.N:6d}  {rho:10.6f}  "
-                           f"{e_pot:14.6f}  {T_inst:10.2f}  "
-                           f"{ai:>8}  {ad:>8}  {am:>8}")
-                    thermo_fh.write(row + "\n")
-                    if self.verbose and cycle % max(1, self.n_cycles // 20) == 0:
-                        print("  " + row)
-
-                if cycle % self.traj_every == 0:
-                    self._write_xyz_frame(traj_fh, cycle, e_pot)
+                _emit(cycle + 1, e_pot, rho, T_inst, acc_i, acc_d, acc_m)
 
                 # Push this cycle's output to disk for real-time
                 # monitoring (n_fh is written every cycle already, so
@@ -1485,7 +1494,8 @@ class CFCMCSimulation(GCMCMDSimulation):
             )
             with open(os.path.join(self.output_dir, "lambda_vs_cycle.dat"), "w") as fh:
                 fh.write("# cycle  lambda\n")
-                fh.writelines(f"{c}  {x:.6f}\n" for c, x in enumerate(self._lam_log))
+                # labelled by completed cycles (ADR-0048)
+                fh.writelines(f"{c}  {x:.6f}\n" for c, x in enumerate(self._lam_log, 1))
             import json
 
             with open(os.path.join(self.output_dir, "cfcmc_estimates.json"), "w") as fh:

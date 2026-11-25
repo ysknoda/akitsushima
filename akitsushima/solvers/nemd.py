@@ -177,6 +177,12 @@ class NEMDSimulation:
         th = open(thermo_path, "a") if thermo_path else None
         if th is not None and st["step"] == 0:
             th.write("# step T_hot_K T_cold_K Q_hot_eV Q_cold_eV E_minus_Q_drift_eV\n")
+            # ADR-0048: a row for the initial state (step 0), as in md;
+            # the rows are labelled by completed steps.
+            drift = float(E) + self._ke(vel) - st["E0"] - st["Q_hot"] - st["Q_cold"]
+            th.write(f"0 {self._temp(vel, self.hot):.3f} "
+                     f"{self._temp(vel, self.cold):.3f} {st['Q_hot']:.8e} "
+                     f"{st['Q_cold']:.8e} {drift:.6e}\n")
         inv = np.linalg.inv(self.lattice)
         try:
             while st["step"] < total:
