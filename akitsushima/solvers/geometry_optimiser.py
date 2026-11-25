@@ -129,6 +129,15 @@ class GeometryOptimiser:
         keeps its space group whatever lattice vectors describe it.
     cell_coordinates='lattice': the 9 raw lattice components (before
         0.3.0a5); reproduces older results bit for bit.
+    fire_cell_mass: mass of the 9 cell coordinates in FIRE (method='fire'
+        with relax_cell=True only; ADR-0053).  The atoms have mass 1.
+        The cell coordinate's stiffness grows with the cell edge L (about
+        B L for x = L eps), so with mass 1 the cell is the stiffest
+        coordinate of a large cell and sets FIRE's time step.  'auto'
+        (default) is N^(1/3), N the number of atoms, which makes the
+        cell's stiffness over mass about B Omega^(1/3) whatever N.
+        A positive number sets the mass; 1 reproduces 0.4.0a2 and
+        earlier bit for bit.
     fix_volume: relax_cell=True only -- keep the cell volume at its
                 starting value and relax shape and ions (ADR-0018).  The
                 cell force is projected orthogonal to dV/dh (prop. to
@@ -211,6 +220,7 @@ class GeometryOptimiser:
         cell_update_scheme: str = "generalized_force",
         lattice_constraints: object | None = None,
         cell_coordinates: str = "strain",
+        fire_cell_mass: float | str = "auto",
         # -- real-time output control ---------------------------
         flush_every_step: bool = True,
         fsync_every_step: bool = False,
@@ -300,6 +310,22 @@ class GeometryOptimiser:
             self._DT_START = float(dt_start)
         if dt_max is not None:
             self._DT_MAX = float(dt_max)
+        # FIRE mass of the cell coordinates (ADR-0053)
+        if isinstance(fire_cell_mass, str):
+            if fire_cell_mass.strip().lower() != "auto":
+                raise ValueError(
+                    f"GeometryOptimiser: fire_cell_mass must be 'auto' or a "
+                    f"positive number, got {fire_cell_mass!r}"
+                )
+            self.fire_cell_mass = float(self.N) ** (1.0 / 3.0)
+        else:
+            m = float(fire_cell_mass)
+            if not (np.isfinite(m) and m > 0.0):
+                raise ValueError(
+                    f"GeometryOptimiser: fire_cell_mass must be 'auto' or a "
+                    f"positive number, got {fire_cell_mass!r}"
+                )
+            self.fire_cell_mass = m
 
         # -- Cell update scheme (relax_cell=True only) -----------------
         # 'generalized_force' (default): physically-derived Parrinello-
@@ -1122,6 +1148,9 @@ class GeometryOptimiser:
             out["traj_format"] = self.traj_format
         if self.relax_cell:  # ADR-0041; absent in older checkpoints = lattice
             out["cell_coordinates"] = self.cell_coordinates
+        # ADR-0053; absent in older checkpoints (and for mass 1) = mass 1
+        if self.method == "fire" and self.relax_cell and self.fire_cell_mass != 1.0:
+            out["fire_cell_mass"] = float(self.fire_cell_mass)
         out.update(self._ck_meta or {})
         return out
 
@@ -1550,6 +1579,14 @@ class GeometryOptimiser:
             n_pos = 0
             ndof = self.N * 3 + (9 if self.relax_cell else 0)
             v = np.zeros(ndof)
+            # Inverse masses (ADR-0053): atoms 1, the 9 cell coordinates
+            # 1 / fire_cell_mass.  Only the two half-kicks use them; the
+            # power P = v . g, the velocity mixing and the step clamp are
+            # as in Bitzek et al.  With mass 1 the products below are
+            # exact, so the former path is reproduced bit for bit.
+            m_inv = np.ones(ndof)
+            if self.relax_cell:
+                m_inv[self.N * 3 :] = 1.0 / self.fire_cell_mass
 
             e, forces, stress = self._get_forces_and_stress()
             g = self._generalised_force(forces, stress)
@@ -1600,7 +1637,7 @@ class GeometryOptimiser:
                     break
                 e_prev = e
 
-                v += 0.5 * dt * g
+                v += 0.5 * dt * g * m_inv
                 disp = self._clamp_step(dt * v)
                 # v is NOT rescaled when _clamp_step shortens the step
                 # (as in Bitzek et al. and ASE's FIRE).  A rescale was
@@ -1617,7 +1654,7 @@ class GeometryOptimiser:
                 self._apply_generalised_displacement(disp)
                 e, forces, stress = self._get_forces_and_stress()
                 g = self._generalised_force(forces, stress)
-                v += 0.5 * dt * g
+                v += 0.5 * dt * g * m_inv
                 self._tc.stop("step")  # timing (covers the force evaluation)
 
             # file lengths before the summary line: a continued run
