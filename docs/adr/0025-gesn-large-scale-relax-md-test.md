@@ -464,3 +464,5 @@ ladder (173 time-step resets against 175, energy still falling by about
 
 The fix was grilled on 2026-11-25 (Q2): a mass for the cell coordinates
 of FIRE is prototyped and measured before an ADR is written.
+Closed by ADR-0053 (0.4.0a3): with `fire_cell_mass: auto` (N^(1/3))
+the 108864-atom run converges in 816 steps.

@@ -63,6 +63,9 @@ def cmd_relax(args) -> int:
             print(f"  cell_update_scheme : {rel_cfg.get('cell_update_scheme', 'generalized_force')}")
             print(f"  lattice_constraints: {rel_cfg.get('lattice_constraints', None)} (null=all free)")
             print(f"  fix_volume : {rel_cfg.get('fix_volume', False)}")
+            if rel_cfg.get("method", "fire").lower() == "fire":
+                print(f"  fire_cell_mass     : {rel_cfg.get('fire_cell_mass', 'auto')}"
+                      " (auto = N^(1/3))")
 
     # Initial energy.
     #
@@ -127,6 +130,7 @@ def cmd_relax(args) -> int:
         save_best    = rel_cfg.get("save_best",    False),
         dt_start     = rel_cfg.get("dt_start",     None),
         dt_max       = rel_cfg.get("dt_max",       None),
+        fire_cell_mass = rel_cfg.get("fire_cell_mass", "auto"),
         cell_update_scheme = rel_cfg.get("cell_update_scheme", "generalized_force"),
         lattice_constraints = rel_cfg.get("lattice_constraints", None),
         cell_coordinates = rel_cfg.get("cell_coordinates", "strain"),

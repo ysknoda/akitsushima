@@ -167,6 +167,13 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.4.0a3 (ADR-0053): FIRE gives the 9 cell coordinates a mass,
+> `relax.fire_cell_mass` (default `auto` = N^(1/3)), so the cell no longer
+> sets FIRE's time step in large cells: a 108864-atom GeSn SW cell that
+> stopped at 2000 steps now converges in 816.  Every FIRE variable-cell
+> relaxation takes a new path; `fire_cell_mass: 1` restores the old one
+> (and continues 0.4.0a2 checkpoints).
+>
 > 0.4.0a2 (ADR-0052): `mdspec` reads extxyz and LAMMPS-dump trajectories
 > (forces too: `forces: trajectory`), computes the Gamma modes of the
 > mode estimator with the MD's own potential, and takes `dipole.model:

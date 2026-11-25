@@ -174,6 +174,14 @@ relax:
   #   Default: 1.0 fs.  Reduce to limit maximum step size in later stages.
   dt_start:      null                # null = use default (0.1 fs)
   dt_max:        null                # null = use default (1.0 fs)
+  # fire_cell_mass: mass of the 9 cell coordinates in FIRE (relax_cell:
+  #   true only; ADR-0053).  The atoms have mass 1.  The cell's stiffness
+  #   grows with the cell edge, so with mass 1 the cell sets FIRE's time
+  #   step in large cells: a 108864-atom GeSn SW cell stopped at 2000
+  #   steps (median dt 0.048 fs) and converged in 816 with auto (0.12 fs).
+  #   auto = N^(1/3) (N atoms) keeps the cell's frequency independent of
+  #   N; 1 reproduces 0.4.0a2 and earlier (and their checkpoints).
+  fire_cell_mass: auto               # auto | positive number
 
   # -- Cell coordinates (relax_cell: true only, ADR-0041) ----------------
   # 'strain' (default): the cell moves by a deformation gradient F

@@ -42,6 +42,7 @@ _RELAX_KEYS = {
     "max_displacement",
     "dt_start",
     "dt_max",
+    "fire_cell_mass",
     "cell_update_scheme",
     "lattice_constraints",
     "cell_coordinates",
