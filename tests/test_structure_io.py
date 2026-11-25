@@ -379,7 +379,8 @@ def test_trajectory_frames_hold_the_frame_energy_forces_and_stress(tmp_path):
 
     _make("npt", tmp_path, n_steps=10, traj_format="extxyz").run()
     frames = read_extxyz(tmp_path / "traj_npt.extxyz")
-    assert [int(f["info"]["step"]) for f in frames] == [20, 25]
+    # completed steps 20 (end of equilibration), 25, 30 (ADR-0048)
+    assert [int(f["info"]["step"]) for f in frames] == [20, 25, 30]
     ff = ak.force_fn_from_config(SW_SI)
     for f in frames:
         E, F, S = ff(f["lattice"], f["positions"], f["atom_types"])

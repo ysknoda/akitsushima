@@ -109,10 +109,35 @@ class _BaseMDSimulation:
     # then passes need_stress=False.  NPT never sets it.
     _want_stress = True
 
-    def _stress_due(self, step: int, thermo_has_pressure: bool) -> bool:
-        is_prod = step >= self.equil_steps
-        return bool((is_prod and step % self.traj_every == 0)
-                    or (thermo_has_pressure and step % self.thermo_every == 0))
+    def _stress_due(self, c: int, thermo_has_pressure: bool) -> bool:
+        """Whether the state after ``c`` completed steps needs the stress."""
+        return bool(self._frame_due(c)
+                    or (thermo_has_pressure and self._row_due(c)))
+
+    # ADR-0048: thermo rows and trajectory frames are labelled by the
+    # number of completed steps c, as in LAMMPS: c = 0 is the initial
+    # state, then every thermo_every (traj_every) completed steps.  The
+    # row labelled k used to hold the state after k + 1 steps (k the
+    # 0-based loop index), so time 0 was the state after one step.
+    # Production frames start at c = equil_steps (the end of
+    # equilibration).  The integration and the running averages are
+    # unchanged.
+    def _row_due(self, c: int) -> bool:
+        return c % self.thermo_every == 0
+
+    def _frame_due(self, c: int) -> bool:
+        return c >= self.equil_steps and c % self.traj_every == 0
+
+    _LEGACY_LABEL_NOTE = (
+        "# ADR-0048: rows below are labelled by completed steps (row 0 = "
+        "initial state); rows above, written before 0.4.0a4, by completed "
+        "steps - 1\n")
+
+    def _note_legacy_labels(self, ck, thermo_fh) -> None:
+        """A restart from a checkpoint written before ADR-0048 continues
+        with the new labels; one comment line marks the change."""
+        if ck is not None and ck.get("labels") != "completed":
+            thermo_fh.write(self._LEGACY_LABEL_NOTE)
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -506,7 +531,8 @@ class _BaseMDSimulation:
         if self.verbose:
             print(f"  {cls}: continuing from {checkpoint} at step {meta['step']}")
         return {"step": int(meta["step"]), "lists": lists,
-                "extra": meta["extra"], "frame": int(meta["frame"])}
+                "extra": meta["extra"], "frame": int(meta["frame"]),
+                "labels": meta.get("labels")}
 
     def _ck_save(self, checkpoint, checkpoint_meta, step_next, lists: dict,
                  extra: dict, handles: dict) -> None:
@@ -520,6 +546,7 @@ class _BaseMDSimulation:
             "sizes": sizes,
             "extra": extra,
             "frame": int(self._xdatcar_frame_idx),
+            "labels": "completed",  # ADR-0048; absent before 0.4.0a4
         }
         arrays = {"positions": self.positions, "velocities": self.velocities,
                   "lattice": self.lattice}
@@ -1041,19 +1068,53 @@ class NVTSimulation(_BaseMDSimulation):
         with (open(_traj_path_use,   mode) as traj_fh,
               open(_thermo_path_use, mode) as thermo_fh):
 
+            def _emit(c, e_pot, forces, stress, e_kin, e_tot, T_inst, H_nhc):
+                """Thermo row and trajectory frame of the state after c
+                completed steps (ADR-0048)."""
+                t_ps = c * self.dt * 1e-3
+                row_due, frame_due = self._row_due(c), self._frame_due(c)
+                if row_due:
+                    row = (f"{c:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
+                           f"{e_kin:12.6f}  {e_tot:12.6f}  "
+                           f"{T_inst:10.2f}  {H_nhc:14.6f}  "
+                           f"{self._nl.rebuild_count:10d}")
+                    row += self._unc_cell()
+                    self._sigma_check(c)
+                    thermo_fh.write(row + "\n")
+                    if self.verbose:
+                        print("  " + row)
+                    self._thermo_log.append({
+                        "step"      : c, "time_ps": t_ps,
+                        "e_pot"     : e_pot, "e_kin": e_kin, "e_tot": e_tot,
+                        "T_inst"    : T_inst, "H_nhc": H_nhc,
+                        "nl_builds" : self._nl.rebuild_count,
+                    })
+                if frame_due:
+                    self._write_trajectory_frame(traj_fh, c, e_pot, forces, stress)
+                # Push this step's output to disk for real-time
+                # monitoring during a long-running MD calculation.
+                if self.flush_every_step and (row_due or frame_due):
+                    self._flush_outputs([thermo_fh, traj_fh],
+                                        fsync=self.fsync_every_step)
+
             if ck is None:
                 thermo_fh.write(header + self._unc_header() + "\n")
                 self._traj_header(traj_fh, self.lattice, self.atom_types,
                                      comment=f"akitsushima.py NVT-MD  T={self.temperature}K")
                 self._xdatcar_frame_idx = 1
+                e_kin = self._kinetic_energy()
+                _emit(0, e_pot, forces, stress, e_kin, e_pot + e_kin,
+                      self._instantaneous_temperature(),
+                      self._nhc_conserved(e_pot))
             else:
                 self._xdatcar_frame_idx = ck["frame"]
+                self._note_legacy_labels(ck, thermo_fh)
             handles = {"thermo": thermo_fh, "traj": traj_fh}
 
             for step in range(start, total_steps):
+                if self.stopped is not None:  # stopped on the initial row
+                    break
                 self._tc.start("step")  # timing
-                t_sim  = step * self.dt
-                t_ps   = t_sim * 1e-3
 
                 # --- NHC half-step (before velocity half-step) ------------
                 self._nhc_step()   # MTTK propagator; also rescales velocities
@@ -1078,7 +1139,7 @@ class NVTSimulation(_BaseMDSimulation):
                 # --- Force evaluation at new positions -------------------
                 # The NVT thermo row has no pressure: the stress is read
                 # only on trajectory steps (ADR-0043).
-                self._want_stress = self._stress_due(step, False)
+                self._want_stress = self._stress_due(step + 1, False)
                 e_pot, forces, stress = self._compute_forces()
                 self._want_stress = True
                 acc = (forces * EV_ANG_TO_AMU_ANG_FS2
@@ -1118,36 +1179,8 @@ class NVTSimulation(_BaseMDSimulation):
                     e_kin_list.append(e_kin)
 
                 # --- Output ----------------------------------------------
-                is_prod = step >= self.equil_steps
-
                 self._tc.lap("step")  # timing
-                if step % self.thermo_every == 0:
-                    row = (f"{step:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
-                           f"{e_kin:12.6f}  {e_tot:12.6f}  "
-                           f"{T_inst:10.2f}  {H_nhc:14.6f}  "
-                           f"{self._nl.rebuild_count:10d}")
-                    row += self._unc_cell()
-                    self._sigma_check(step)
-                    thermo_fh.write(row + "\n")
-                    if self.verbose:
-                        print("  " + row)
-                    self._thermo_log.append({
-                        "step"      : step, "time_ps": t_ps,
-                        "e_pot"     : e_pot, "e_kin": e_kin, "e_tot": e_tot,
-                        "T_inst"    : T_inst, "H_nhc": H_nhc,
-                        "nl_builds" : self._nl.rebuild_count,
-                    })
-
-                if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh, step, e_pot, forces, stress)
-
-                # Push this step's output to disk for real-time
-                # monitoring during a long-running MD calculation.
-                if self.flush_every_step and (
-                        step % self.thermo_every == 0
-                        or (is_prod and step % self.traj_every == 0)):
-                    self._flush_outputs([thermo_fh, traj_fh],
-                                        fsync=self.fsync_every_step)
+                _emit(step + 1, e_pot, forces, stress, e_kin, e_tot, T_inst, H_nhc)
 
                 if self.stopped is not None:
                     break
@@ -1366,20 +1399,52 @@ class _StochasticNVTSimulation(NVTSimulation):
         _thermo_path_use = thermo_path if _mpi_rank == 0 else os.devnull
         with (open(_traj_path_use,   mode) as traj_fh,
               open(_thermo_path_use, mode) as thermo_fh):
+            def _emit(c, e_pot, forces, stress, e_kin, e_tot, T_inst, Q):
+                """Thermo row and trajectory frame of the state after c
+                completed steps (ADR-0048)."""
+                t_ps = c * self.dt * 1e-3
+                row_due, frame_due = self._row_due(c), self._frame_due(c)
+                if row_due:
+                    row = (f"{c:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
+                           f"{e_kin:12.6f}  {e_tot:12.6f}  "
+                           f"{T_inst:10.2f}  {e_tot - Q:14.6f}  "
+                           f"{self._nl.rebuild_count:10d}")
+                    row += self._unc_cell()
+                    self._sigma_check(c)
+                    thermo_fh.write(row + "\n")
+                    if self.verbose:
+                        print("  " + row)
+                    self._thermo_log.append({
+                        "step": c, "time_ps": t_ps, "e_pot": e_pot,
+                        "e_kin": e_kin, "e_tot": e_tot, "T_inst": T_inst,
+                        "e_minus_q": e_tot - Q,
+                        "nl_builds": self._nl.rebuild_count,
+                    })
+                if frame_due:
+                    self._write_trajectory_frame(traj_fh, c, e_pot, forces, stress)
+                if self.flush_every_step and (row_due or frame_due):
+                    self._flush_outputs([thermo_fh, traj_fh],
+                                        fsync=self.fsync_every_step)
+
             if ck is None:
                 thermo_fh.write(header + self._unc_header() + "\n")
                 self._traj_header(
                     traj_fh, self.lattice, self.atom_types,
                     comment=f"{self._TRAJ_COMMENT}  T={self.temperature}K")
                 self._xdatcar_frame_idx = 1
+                e_kin = self._kinetic_energy()
+                _emit(0, e_pot, forces, stress, e_kin, e_pot + e_kin,
+                      self._instantaneous_temperature(), Q)
             else:
                 self._xdatcar_frame_idx = ck["frame"]
+                self._note_legacy_labels(ck, thermo_fh)
             handles = {"thermo": thermo_fh, "traj": traj_fh}
 
             for step in range(start, total_steps):
+                if self.stopped is not None:  # stopped on the initial row
+                    break
                 self._tc.start("step")  # timing
-                t_ps = step * self.dt * 1e-3
-                self._want_stress = self._stress_due(step, False)  # ADR-0043
+                self._want_stress = self._stress_due(step + 1, False)  # ADR-0043
                 e_pot, forces, stress, acc, dQ = self._step(acc)
                 self._want_stress = True
                 Q += dQ
@@ -1394,29 +1459,7 @@ class _StochasticNVTSimulation(NVTSimulation):
                     lists["e_kin"].append(e_kin)
 
                 self._tc.lap("step")  # timing
-                if step % self.thermo_every == 0:
-                    row = (f"{step:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
-                           f"{e_kin:12.6f}  {e_tot:12.6f}  "
-                           f"{T_inst:10.2f}  {e_tot - Q:14.6f}  "
-                           f"{self._nl.rebuild_count:10d}")
-                    row += self._unc_cell()
-                    self._sigma_check(step)
-                    thermo_fh.write(row + "\n")
-                    if self.verbose:
-                        print("  " + row)
-                    self._thermo_log.append({
-                        "step": step, "time_ps": t_ps, "e_pot": e_pot,
-                        "e_kin": e_kin, "e_tot": e_tot, "T_inst": T_inst,
-                        "e_minus_q": e_tot - Q,
-                        "nl_builds": self._nl.rebuild_count,
-                    })
-                if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh, step, e_pot, forces, stress)
-                if self.flush_every_step and (
-                        step % self.thermo_every == 0
-                        or (is_prod and step % self.traj_every == 0)):
-                    self._flush_outputs([thermo_fh, traj_fh],
-                                        fsync=self.fsync_every_step)
+                _emit(step + 1, e_pot, forces, stress, e_kin, e_tot, T_inst, Q)
                 if self.stopped is not None:
                     break
                 if (checkpoint and checkpoint_every
@@ -1882,18 +1925,51 @@ class NVESimulation(_BaseMDSimulation):
         _thermo_path_use = thermo_path if _mpi_rank == 0 else os.devnull
         with (open(_traj_path_use,   mode) as traj_fh,
               open(_thermo_path_use, mode) as thermo_fh):
+            def _emit(c, e_pot, forces, stress, e_kin, e_tot, T_inst, drift):
+                """Thermo row and trajectory frame of the state after c
+                completed steps (ADR-0048)."""
+                t_ps = c * self.dt * 1e-3
+                row_due, frame_due = self._row_due(c), self._frame_due(c)
+                if row_due:
+                    # Shared helper: kinetic + virial, with the sign
+                    # this codebase's stress convention actually
+                    # implies.  This line used to read
+                    # -np.trace(stress)/3.0, which flipped the sign
+                    # and dropped 2*E_kin/(3V) entirely.
+                    P_gpa = self._pressure_inst(stress) * GPa_fac
+                    row = (f"{c:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
+                           f"{e_kin:12.6f}  {e_tot:14.6f}  "
+                           f"{T_inst:10.2f}  {P_gpa:12.4f}  {drift:14.6f}")
+                    row += self._unc_cell()
+                    self._sigma_check(c)
+                    thermo_fh.write(row + "\n")
+                    if self.verbose:
+                        print("  " + row)
+                if frame_due:
+                    self._write_trajectory_frame(traj_fh, c, e_pot, forces, stress)
+                # Push this step's output to disk for real-time
+                # monitoring during a long-running MD calculation.
+                if self.flush_every_step and (row_due or frame_due):
+                    self._flush_outputs([thermo_fh, traj_fh],
+                                        fsync=self.fsync_every_step)
+
             if ck is None:
                 thermo_fh.write(header + self._unc_header() + "\n")
                 self._traj_header(traj_fh, self.lattice, self.atom_types,
                                      comment="akitsushima.py NVE-MD")
                 self._xdatcar_frame_idx = 1
+                e_kin = self._kinetic_energy()
+                _emit(0, e_pot, forces, stress, e_kin, e_pot + e_kin,
+                      self._temperature_inst(), e_pot + e_kin - e_tot_ref)
             else:
                 self._xdatcar_frame_idx = ck["frame"]
+                self._note_legacy_labels(ck, thermo_fh)
             handles = {"thermo": thermo_fh, "traj": traj_fh}
 
             for step in range(start, total_steps):
+                if self.stopped is not None:  # stopped on the initial row
+                    break
                 self._tc.start("step")  # timing
-                t_ps = step * self.dt * 1e-3
 
                 # ---- Velocity Verlet ------------------------------------
                 # v half-step
@@ -1911,7 +1987,7 @@ class NVESimulation(_BaseMDSimulation):
                 frac[frac >= 1.0] = 0.0
                 self.positions   = frac @ self.lattice
                 # new forces; the NVE thermo row shows the pressure
-                self._want_stress = self._stress_due(step, True)  # ADR-0043
+                self._want_stress = self._stress_due(step + 1, True)  # ADR-0043
                 e_pot, forces, stress = self._compute_forces()
                 self._want_stress = True
                 acc = forces * EV_ANG_TO_AMU_ANG_FS2 / self.masses[:, None]
@@ -1944,32 +2020,7 @@ class NVESimulation(_BaseMDSimulation):
                     ek_list.append(e_kin)
 
                 self._tc.lap("step")  # timing
-                if step % self.thermo_every == 0:
-                    # Shared helper: kinetic + virial, with the sign
-                    # this codebase's stress convention actually
-                    # implies.  This line used to read
-                    # -np.trace(stress)/3.0, which flipped the sign
-                    # and dropped 2*E_kin/(3V) entirely.
-                    P_gpa = self._pressure_inst(stress) * GPa_fac
-                    row = (f"{step:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
-                           f"{e_kin:12.6f}  {e_tot:14.6f}  "
-                           f"{T_inst:10.2f}  {P_gpa:12.4f}  {drift:14.6f}")
-                    row += self._unc_cell()
-                    self._sigma_check(step)
-                    thermo_fh.write(row + "\n")
-                    if self.verbose:
-                        print("  " + row)
-
-                if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh, step, e_pot, forces, stress)
-
-                # Push this step's output to disk for real-time
-                # monitoring during a long-running MD calculation.
-                if self.flush_every_step and (
-                        step % self.thermo_every == 0
-                        or (is_prod and step % self.traj_every == 0)):
-                    self._flush_outputs([thermo_fh, traj_fh],
-                                        fsync=self.fsync_every_step)
+                _emit(step + 1, e_pot, forces, stress, e_kin, e_tot, T_inst, drift)
 
                 if self.stopped is not None:
                     break
@@ -2777,16 +2828,49 @@ class NPTSimulation(_BaseMDSimulation):
         _thermo_path_use = thermo_path if _mpi_rank == 0 else os.devnull
         with (open(_traj_path_use,   mode) as traj_fh,
               open(_thermo_path_use, mode) as thermo_fh):
+            def _emit(c, e_pot, forces, stress, e_kin, T_inst, P_gpa, V_inst, H_NPT):
+                """Thermo row and trajectory frame of the state after c
+                completed steps (ADR-0048)."""
+                t_ps = c * self.dt * 1e-3
+                row_due, frame_due = self._row_due(c), self._frame_due(c)
+                if row_due:
+                    row = (f"{c:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
+                           f"{e_kin:12.6f}  {T_inst:10.2f}  "
+                           f"{P_gpa:12.4f}  {V_inst:12.4f}  "
+                           f"{H_NPT:14.6f}")
+                    if not self._iso:
+                        xv = self._extra_values(stress)
+                        row += "".join(f"  {xv[k]:10.4f}"
+                                       for k in self._extra_cols())
+                    row += self._unc_cell()
+                    self._sigma_check(c)
+                    thermo_fh.write(row + "\n")
+                    if self.verbose:
+                        print("  " + row)
+                if frame_due:
+                    self._write_trajectory_frame(traj_fh, c, e_pot, P_gpa, forces, stress)
+                # Push this step's output to disk for real-time
+                # monitoring during a long-running MD calculation.
+                if self.flush_every_step and (row_due or frame_due):
+                    self._flush_outputs([thermo_fh, traj_fh],
+                                        fsync=self.fsync_every_step)
+
             if ck is None:
                 thermo_fh.write(header + self._unc_header() + "\n")
                 self._xdatcar_frame_idx = 1
+                _emit(0, e_pot, forces, stress, self._kinetic_energy(),
+                      self._temperature_inst(),
+                      self._pressure_inst(stress) * self._EV_ANG3_TO_GPA,
+                      self._volume(), H_ref)
             else:
                 self._xdatcar_frame_idx = ck["frame"]
+                self._note_legacy_labels(ck, thermo_fh)
             handles = {"thermo": thermo_fh, "traj": traj_fh}
 
             for step in range(start, total_steps):
+                if self.stopped is not None:  # stopped on the initial row
+                    break
                 self._tc.start("step")  # timing
-                t_ps    = step * self.dt * 1e-3
                 P_inst  = self._pressure_inst(stress)   # [eV/A^3]
                 P_gpa   = P_inst * self._EV_ANG3_TO_GPA
 
@@ -2866,31 +2950,8 @@ class NPTSimulation(_BaseMDSimulation):
                             lists[k].append(xv[k])
 
                 self._tc.lap("step")  # timing
-                if step % self.thermo_every == 0:
-                    row = (f"{step:8d}  {t_ps:10.4f}  {e_pot:14.6f}  "
-                           f"{e_kin:12.6f}  {T_inst:10.2f}  "
-                           f"{P_gpa:12.4f}  {V_inst:12.4f}  "
-                           f"{H_NPT:14.6f}")
-                    if not self._iso:
-                        xv = self._extra_values(stress)
-                        row += "".join(f"  {xv[k]:10.4f}"
-                                       for k in self._extra_cols())
-                    row += self._unc_cell()
-                    self._sigma_check(step)
-                    thermo_fh.write(row + "\n")
-                    if self.verbose:
-                        print("  " + row)
-
-                if is_prod and step % self.traj_every == 0:
-                    self._write_trajectory_frame(traj_fh, step, e_pot, P_gpa, forces, stress)
-
-                # Push this step's output to disk for real-time
-                # monitoring during a long-running MD calculation.
-                if self.flush_every_step and (
-                        step % self.thermo_every == 0
-                        or (is_prod and step % self.traj_every == 0)):
-                    self._flush_outputs([thermo_fh, traj_fh],
-                                        fsync=self.fsync_every_step)
+                _emit(step + 1, e_pot, forces, stress, e_kin, T_inst, P_gpa,
+                      V_inst, H_NPT)
 
                 if self.stopped is not None:
                     break

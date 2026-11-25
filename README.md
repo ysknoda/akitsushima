@@ -167,6 +167,13 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.4.0a4 (ADR-0048): thermo rows and trajectory frames are labelled by
+> completed steps, as in LAMMPS: row 0 is the initial state, the row
+> labelled c the state after c steps (it used to be the state after c + 1),
+> frames from `equil_steps` on.  `md`, `kappa`, NEMD, GCMC and `osmc`;
+> the dynamics and every returned number are unchanged.  Older checkpoints
+> continue with the new labels after a comment line.
+>
 > 0.4.0a3 (ADR-0053): FIRE gives the 9 cell coordinates a mass,
 > `relax.fire_cell_mass` (default `auto` = N^(1/3)), so the cell no longer
 > sets FIRE's time step in large cells: a 108864-atom GeSn SW cell that

@@ -315,9 +315,11 @@ def test_md_skips_the_stress_only_where_nobody_reads_it(tmp_path):
         res.append(sim.run())
     a, b = res
     assert np.array_equal(a["positions"], b["positions"])
-    # one call before the loop, then steps 0..11; trajectory at 0, 4, 8
+    # one call before the loop (the initial state, frame c = 0), then
+    # loop steps 0..11; frames after c = 4, 8, 12 completed steps, i.e.
+    # loop steps 3, 7, 11 (ADR-0048; loop steps 0, 4, 8 before)
     assert asked[0] is True
-    assert [i for i, v in enumerate(asked[1:]) if v] == [0, 4, 8]
+    assert [i for i, v in enumerate(asked[1:]) if v] == [3, 7, 11]
 
 
 @pytest.mark.parametrize("M", [16, 17])
