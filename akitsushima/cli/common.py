@@ -227,7 +227,8 @@ def _cli_force_fn(pot_cfg: dict, caller: str):
     return force_fn, r_cut
 
 
-def _born_setup(cfg: dict, atom_types, pot_cfg: dict, required: bool = False):
+def _born_setup(cfg: dict, atom_types, pot_cfg: dict, required: bool = False,
+                lattice=None, positions=None):
     """Born charges and eps_inf for this run (ADR-0019): the YAML ``born:``
     block, completed by the potential's point charges (Buckingham JSON).
 
@@ -235,7 +236,9 @@ def _born_setup(cfg: dict, atom_types, pot_cfg: dict, required: bool = False):
     is present.  required=True (dielectric, piezo): the rigid-ion default
     Z* = q, eps_inf = 1 applies without it, and the run is refused when
     there are no charges at all.  Prints the rigid-ion warning.  Returns
-    the dict of solvers.dielectric.born_from_config, or None.
+    the dict of solvers.dielectric.born_from_config, or None.  ``lattice``
+    and ``positions`` (the cell the charges are for) are needed by
+    born_charges.outcar, which maps each atom onto a site of the DFT cell.
     """
     from ..solvers.dielectric import born_from_config
     if "born" not in cfg and not required:
@@ -245,7 +248,8 @@ def _born_setup(cfg: dict, atom_types, pot_cfg: dict, required: bool = False):
         from ..fitting.io_utils import _load_potential_json
         charges = _load_potential_json(
             pot_cfg.get("potential_json", "./fitting_output/fitted_potential.json"))[1]
-    born = born_from_config(cfg.get("born") or {}, atom_types, charges)
+    born = born_from_config(cfg.get("born") or {}, atom_types, charges,
+                            lattice=lattice, positions=positions)
     if born is None:
         raise ValueError(
             "no Born charges: the potential has no point charges and there is "

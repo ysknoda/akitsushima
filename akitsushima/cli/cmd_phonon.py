@@ -78,7 +78,8 @@ def cmd_phonon(args) -> int:
         calc.compute_ifc(n_jobs=ph_cfg.get("n_jobs",1), verbose=verbose)
         t_sections.append(("Compute IFC", _time.perf_counter()-t0))
 
-    born = _born_setup(cfg, calc.atom_types, pot_cfg)
+    born = _born_setup(cfg, calc.atom_types, pot_cfg,
+                       lattice=calc.lattice_prim, positions=calc.positions)
     if born is not None:
         calc.set_nac(born["Z"], born["epsilon_inf"])
         print(f"  NAC        : Gonze-Lee, {calc._nac['n_G']} G-vectors")

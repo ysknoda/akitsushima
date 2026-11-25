@@ -167,6 +167,14 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.3.0a11 (ADR-0049): new `raman` command -- first-order Raman spectra
+> in the harmonic approximation: Gamma modes of any cell (primitive or
+> alloy supercell), Raman / IR activity from characters (spglib), and with
+> a `polarizability:` block (bond polarisability model) relative
+> intensities for named polarisation geometries and the powder average,
+> several configurations averaged.  `born:` reads Z* and eps_inf from a
+> VASP OUTCAR (site mapping ported from nozuchi).
+>
 > 0.3.0a10 (ADR-0047): Stillinger-Weber three-body forces are analytic
 > instead of finite differences (energies unchanged, forces within
 > ~1e-9 eV/A of before), the multi-species SW and Tersoff kernels run on
@@ -465,6 +473,7 @@ print(result["energy"] / 64, "eV/atom after relaxation")
 | `gruneisen` | Mode Grüneisen parameters (q-path, mesh, C_v-weighted mean γ(T)) |
 | `qha`    | Quasi-harmonic thermal expansion, B(T), C_p, thermodynamic γ(T) |
 | `dielectric` | Static dielectric tensor, LO-TO splitting, IR modes (Born charges) |
+| `raman`  | Raman spectra: activity from characters, polarisation geometries, powder average (ADR-0049) |
 | `piezo`  | Relaxed-ion piezoelectric e, d and coupling k (rigid ion) |
 | `nemd`   | Non-equilibrium MD: T profile, local heat flux, kappa, Kapitza resistance |
 | `mlip`   | Fit a machine-learning potential (ELM / QELM / NN / linear) |
@@ -531,6 +540,13 @@ born:                         # top level; also turns on NAC in phonon/gruneisen
   clamped_ion_piezo: [[...6...], [...], [...]]   # C/m^2, piezo only
 ```
 
+Z* and eps_inf can also come from a VASP LEPSILON / LCALCEPS run
+(ADR-0049): `epsilon_inf: {outcar: OUTCAR}` and `born_charges: {outcar:
+OUTCAR, unit_cell: POSCAR_of_that_run, supercell: [2, 2, 2]}`, which maps
+every atom onto a site of the DFT cell by position (rigid translations
+removed).  Per atom the priority is per_atom > per_species > outcar >
+the potential's point charges.
+
 Z[k, a, b] = dP_a / du_kb (phonopy's and VASP's order); the sum rule is
 imposed.  `akitsushima dielectric` gives eps_0 = eps_inf + (4 pi / V)
 sum_m S_m / w_m^2 with the per-mode oscillator strengths, mode effective
@@ -540,6 +556,39 @@ gives e (C/m^2), d (pC/N) and k.  The model is rigid ion: with point
 charges only, eps_inf = 1 and the electronic (clamped-ion) piezoelectric
 term is zero unless given.  Without charges or a `born:` block (MLIP,
 EAM, Tersoff, SW) both commands refuse.
+
+### Raman spectra (ADR-0049)
+
+```yaml
+polarizability:               # top level; omit for frequencies + activity only
+  source: bpm                 # bond polarisability model, per species pair:
+  bonds:                      #   alpha_l - alpha_p = alpha_diff
+    Si-Si: {r_cut: 2.8, r0: 2.35, alpha_diff: 1.0,   #   + (d_alpha_l - d_alpha_p)(R - r0)
+            d_alpha_l: 2.0, d_alpha_p: 0.5}
+raman:
+  supercell: auto             # Gamma is exact from any valid supercell
+  structures: [cfg1.vasp, cfg2.vasp]   # optional: averaged per atom, with std
+  geometries:
+    - {name: "z(xy)-z", incident: [1, 0, 0], scattered: [0, 1, 0]}
+    - {name: "110", incident: [1, 1, 0], scattered: [0, 0, 1], basis: lattice}
+  temperature: 300.0          # (n + 1) / w;  laser_nm: 532 adds (w_L - w)^4
+  fwhm_cm: 3.0
+```
+
+`akitsushima raman` diagonalises the Gamma dynamical matrix of each cell,
+groups degenerate modes and decides Raman and IR activity from the
+characters of the space-group operations (spglib; no character tables).
+With a polarizability derivative A[k, a, b, c] = d alpha_ab / d u_kc it
+gives the mode Raman tensors R_m = sum_k A_k e_m(k) / sqrt(M_k), the
+intensity (e_s . R . e_i)^2 for each named geometry, the powder
+I_par = 45 a^2 + 4 g^2, I_perp = 3 g^2 and rho, and Lorentzian spectra
+(raw and normalised; the geometries share one normalisation).  Only
+relative intensities are meaningful.  Outputs: raman_modes.dat,
+raman_spectrum.dat, raman_spectrum_normalised.dat, raman_results.json and
+raman_spectrum.png.  With `born:` the LO frequencies along x, y, z are
+listed (the electro-optic LO intensity term is not included).  VASP
+finite-difference Raman tensors and the BPM fit follow in the next stage
+(ADR-0046).
 
 ### NEMD and the decomposition of kappa (ADR-0020)
 
@@ -998,6 +1047,7 @@ Which solvers take an MLIP (ADR-0007):
 |---|---|---|---|
 | `relax`, `md`, `neb`, `tsa`, `phonon`, `elastic`, `gruneisen`, `qha` | yes | yes | need E, F, S only |
 | `dielectric`, `piezo` | with `born:` | with `born:` | Z* and eps_inf must be given (no charges of its own) |
+| `raman` | yes | yes | frequencies from the MLIP; intensities from `polarizability:` |
 | `gcmc` | refused | yes | the atom count changes: needs a sum of site energies; inserted elements must be among the model's |
 | `kappa`, `nemd` (local flux) | refused | yes | exact heat flux from the site terms |
 | `osmc` | refused | yes | CFCMC couples the fractional atom through total energies (ADR-0009): as `gcmc` |

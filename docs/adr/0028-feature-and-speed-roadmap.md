@@ -790,11 +790,12 @@ The user asked for Raman and other spectra derived from atomic
 displacements.  The plan is ADR-0046 (Q1-Q17, all agreed as
 recommended).  It is a new block of work after tier B, in five stages:
 
-- S1: `raman`, 0.3.0a10;
+- S1: `raman`, 0.3.0a11 (done 2026-11-25, ADR-0049; planned as
+  0.3.0a10, which went to ADR-0047);
 - S2: VASP finite differences and the BPM fit;
 - S3: IR eps(omega) in `dielectric`;
 - S4: BTE linewidths;
-- S5: the two-phonon DOS and ADPs, 0.3.0a14.
+- S5: the two-phonon DOS and ADPs, 0.3.0a15.
 
 All stages start after ADR-0045 is settled.  The following go to the
 planned port of nozuchi (its own grilling): spectra from MD time
