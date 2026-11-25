@@ -416,6 +416,8 @@ class _BaseMDSimulation:
     #  Trajectory output (ADR-0034: xdatcar | extxyz | lammps-dump)
     # ------------------------------------------------------------------ #
     traj_format = "xdatcar"
+    # ADR-0052: velocities [A/fs] in every extxyz / lammps-dump frame.
+    traj_velocities = False
 
     def _traj_header(self, fh, lattice, atom_types, comment="") -> None:
         """The XDATCAR header of a fixed cell; the other formats have none."""
@@ -431,7 +433,8 @@ class _BaseMDSimulation:
         w.frame_idx = self._xdatcar_frame_idx
         w.frame(step, self.lattice, self.positions, self.atom_types,
                 energy=e_pot, forces=forces, stress=stress,
-                comment=comment or "akitsushima MD trajectory")
+                comment=comment or "akitsushima MD trajectory",
+                velocities=self.velocities if self.traj_velocities else None)
         self._xdatcar_frame_idx += 1
 
     def _ck_settings(self) -> dict:
@@ -448,6 +451,8 @@ class _BaseMDSimulation:
         }
         if self.traj_format != "xdatcar":  # absent for xdatcar: older checkpoints match
             out["traj_format"] = self.traj_format
+        if self.traj_velocities:  # ADR-0052; absent when off
+            out["traj_velocities"] = True
         if getattr(self, "cell_dof", "iso") != "iso":  # ADR-0036; absent for iso
             out["cell_dof"] = self.cell_dof
         if getattr(self, "baro_thermostat", "nhc") != "nhc":

@@ -311,6 +311,8 @@ md:
   velocity_rescale_steps: 1000     # = equil_steps: VS active during equilibration
   traj_every:   10                 # write trajectory every N steps
   traj_format:  xdatcar            # xdatcar | extxyz | lammps-dump (ADR-0034)
+  traj_velocities: false           # true: velocities in extxyz (A/fs) /
+                                   # lammps-dump (A/ps), for mdspec (ADR-0052)
   thermo_every: 50                 # write thermo log every N steps
   skin_width:   0.5
   seed:         42
@@ -1278,7 +1280,7 @@ born:                        # shared with phonon / dielectric / raman
 
 mdspec:
   trajectory:
-    files: [md_output/XDATCAR_nvt]   # from akitsushima md (traj_format xdatcar)
+    files: [md_output/XDATCAR_nvt]   # XDATCAR, *.extxyz or *.lammpstrj (ADR-0052)
     mode: concatenate        # concatenate | independent (one run per file)
     timestep_fs: 1.0         # MD time step
     frame_every: 2           # MD steps between frames (md traj_every)
@@ -1288,7 +1290,8 @@ mdspec:
   temperature_source: [md_output/thermo.log]
   masses: {}                 # optional override [amu]
   dipole:
-    model: point_charge      # point_charge | born_tensor | external
+    model: point_charge      # auto | point_charge | born_tensor | external; auto:
+                             # born.born_charges > the potential's charges > charges
     charges: {Mg: 2.0, O: -2.0}   # the potential's charges (Lewis-Catlow MgO)
   spectrum:
     max_lag_ps: auto         # a quarter of the run
@@ -1299,8 +1302,12 @@ mdspec:
     kk_check: true
     n_blocks: 5
     estimator: auto          # auto | mode | fsum | raw
-  # modes: {phonopy: qpoints.yaml, unit_cell: POSCAR_unit, supercell: [3, 3, 3]}
-  # forces: {files: [forces.npy]}  # force-based static value (reported only)
+  # modes: Gamma modes for the mode estimator.  With a potential: block they
+  #   are computed with it (the MD cell itself up to 1000 atoms), or for a
+  #   crystal give {unit_cell: POSCAR_unit, supercell: [3, 3, 3]}; external:
+  #   {phonopy: qpoints.yaml | file: modes.npz | outcar: OUTCAR, unit_cell, supercell};
+  #   off: none
+  # forces: trajectory       # extxyz / lammps-dump forces; or {files: [forces.npy]}
   # fit: {model: additive, terms: [{type: lorentz, f0: 12.0}], freq_range: [1.0, 30.0]}
   output:
     dir: mdspec_output

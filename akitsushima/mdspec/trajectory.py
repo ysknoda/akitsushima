@@ -44,6 +44,8 @@ class Header:
     counts: list[int]
     n_header_lines: int  # lines before the first 'Direct' line
     variable: bool = False  # a full header precedes every frame (NPT, GCMC)
+    fmt: str = "xdatcar"  # xdatcar | extxyz | lammps-dump (ADR-0052)
+    species_hint: list | None = None  # trajectory.species (LAMMPS types)
 
     @property
     def n_atoms(self) -> int:
@@ -83,7 +85,14 @@ def _parse_header_lines(lines: list[str], species: list[str] | None):
 
 
 def read_header(path: str | Path, species: list[str] | None = None) -> Header:
-    """Read the first header of an XDATCAR file and detect per-frame headers."""
+    """Read the first header of an XDATCAR file and detect per-frame headers.
+    extxyz and LAMMPS dumps (ADR-0052) are recognised and read from their
+    first frames."""
+    fmt = detect_format(path)
+    if fmt != "xdatcar":
+        h = _read_text_header(path, fmt, species)
+        h.species_hint = list(species) if species else None
+        return h
     with open(path) as fh:
         lines = [fh.readline() for _ in range(8)]
         lattice, sp, counts, n = _parse_header_lines(lines, species)
@@ -227,7 +236,12 @@ def iter_chunks(
     max_frames: int | None = None,
     use_numba: bool | None = None,
 ) -> Iterator[Chunk]:
-    """Yield blocks of complete frames from one XDATCAR file."""
+    """Yield blocks of complete frames from one XDATCAR file (or an extxyz /
+    LAMMPS dump, ADR-0052: Cartesian frames converted to wrapped fractional
+    coordinates)."""
+    if header.fmt != "xdatcar":
+        yield from _text_chunks(path, header, chunk_bytes, max_frames)
+        return
     n_atoms, hl = header.n_atoms, header.n_header_lines
     n_read = 0
     carry = b""
@@ -298,6 +312,8 @@ def count_frames(path: str | Path, header: Header, chunk_bytes: int = 64 * 2**20
     counts only if all its n_atoms coordinate lines are present, as in
     iter_chunks.
     """
+    if header.fmt != "xdatcar":
+        return _count_text_frames(path, header)
     n, after, carry = 0, 0, b""
     with open(path, "rb") as fh:
         while True:
@@ -328,3 +344,236 @@ def read_frames(path: str | Path, header: Header, max_frames: int, **kw) -> Chun
     return Chunk(
         np.concatenate([c.frac for c in parts]), np.concatenate([c.lattice for c in parts])
     )
+
+
+# --------------------------------------------------------------------------
+# extxyz and LAMMPS dump (ADR-0052): akitsushima's other trajectory formats
+# --------------------------------------------------------------------------
+
+_LATTICE_RX = re.compile(r'Lattice="([^"]*)"')
+_PROPS_RX = re.compile(r"Properties=(\S+)")
+_DUMP_POS = (("x", "y", "z"), ("xu", "yu", "zu"), ("xs", "ys", "zs"))
+
+
+def detect_format(path: str | Path) -> str:
+    """'xdatcar', 'extxyz' or 'lammps-dump', from the name, else the content."""
+    name = Path(path).name.lower()
+    if name.endswith((".extxyz", ".xyz")):
+        return "extxyz"
+    if name.endswith((".lammpstrj", ".dump")):
+        return "lammps-dump"
+    with open(path, errors="replace") as fh:
+        first, second = fh.readline(), fh.readline()
+    if first.startswith("ITEM:"):
+        return "lammps-dump"
+    if first.strip().isdigit() and "Lattice=" in second:
+        return "extxyz"
+    return "xdatcar"
+
+
+def _blocks(symbols: list[str], path) -> tuple[list[str], list[int]]:
+    """Species and counts of contiguous blocks; refuse an interleaved order."""
+    species, counts = [], []
+    for s in symbols:
+        if species and species[-1] == s:
+            counts[-1] += 1
+        else:
+            if s in species:
+                raise ValueError(
+                    f"{path}: atoms of one species must be contiguous (as akitsushima "
+                    "writes them, POSCAR order); this file interleaves them"
+                )
+            species.append(s)
+            counts.append(1)
+    return species, counts
+
+
+def _extxyz_columns(props: str) -> dict:
+    """Column slices of species, pos, forces and velocities in a Properties string."""
+    tok = props.split(":")
+    cols, k = {}, 0
+    for i in range(0, len(tok) - 2, 3):
+        name, n = tok[i], int(tok[i + 2])
+        cols[name] = slice(k, k + n)
+        k += n
+    if "species" not in cols or "pos" not in cols:
+        raise ValueError(f"extxyz Properties without species / pos: {props}")
+    return cols
+
+
+def _extxyz_frame_head(line: str, path) -> tuple[np.ndarray, dict]:
+    m = _LATTICE_RX.search(line)
+    p = _PROPS_RX.search(line)
+    if not m or not p:
+        raise ValueError(f"{path}: extxyz comment line without Lattice= / Properties=")
+    lat = np.array(m.group(1).split(), dtype=float).reshape(3, 3)
+    return lat, _extxyz_columns(p.group(1))
+
+
+def _dump_lattice(lines: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    """Lattice (rows) and origin from the three BOX BOUNDS lines (LAMMPS convention)."""
+    b = np.array([[float(x) for x in ln.split()[:3]] if len(ln.split()) >= 3
+                  else [float(x) for x in ln.split()[:2]] + [0.0] for ln in lines])
+    xy, xz, yz = b[0, 2], b[1, 2], b[2, 2]
+    xlo = b[0, 0] - min(0.0, xy, xz, xy + xz)
+    xhi = b[0, 1] - max(0.0, xy, xz, xy + xz)
+    ylo = b[1, 0] - min(0.0, yz)
+    yhi = b[1, 1] - max(0.0, yz)
+    zlo, zhi = b[2, 0], b[2, 1]
+    lat = np.array([[xhi - xlo, 0.0, 0.0], [xy, yhi - ylo, 0.0], [xz, yz, zhi - zlo]])
+    return lat, np.array([xlo, ylo, zlo])
+
+
+def _dump_columns(head: str, species_hint) -> dict:
+    names = head.split()[2:]
+    idx = {n: i for i, n in enumerate(names)}
+    pos = next((p for p in _DUMP_POS if all(c in idx for c in p)), None)
+    if pos is None or "id" not in idx:
+        raise ValueError(f"LAMMPS dump needs id and x y z (or xu.. / xs..) columns: {head}")
+    if "element" not in idx and ("type" not in idx or not species_hint):
+        raise ValueError("LAMMPS dump without an element column: give trajectory.species "
+                         "(the element of each atom type, in type order)")
+    out = {"names": names, "id": idx["id"], "pos": [idx[c] for c in pos],
+           "scaled": pos[0] == "xs", "element": idx.get("element"), "type": idx.get("type")}
+    for key, cs in (("forces", ("fx", "fy", "fz")), ("velocities", ("vx", "vy", "vz"))):
+        out[key] = [idx[c] for c in cs] if all(c in idx for c in cs) else None
+    return out
+
+
+def _iter_text_frames(path, fmt: str, n_atoms: int, frames_per_chunk: int, species_hint):
+    """Blocks of frames of an extxyz / LAMMPS dump: dicts with 'cart' (or 'frac'
+    for scaled dumps), 'lattice', 'symbols' of the first frame, and 'forces' /
+    'velocities' when present (velocities in A/fs)."""
+    from itertools import islice
+
+    per = n_atoms + (2 if fmt == "extxyz" else 9)
+    with open(path, errors="replace") as fh:
+        while True:
+            lines = list(islice(fh, per * frames_per_chunk))
+            n_full = len(lines) // per
+            if len(lines) % per and lines[n_full * per:] and any(
+                ln.strip() for ln in lines[n_full * per:]
+            ):
+                warnings.warn(f"{path}: last frame is incomplete and was dropped", stacklevel=3)
+            if n_full == 0:
+                return
+            lats, xyz, frc, vel, syms = [], [], [], [], None
+            for f in range(n_full):
+                blk = lines[f * per:(f + 1) * per]
+                if fmt == "extxyz":
+                    if int(blk[0]) != n_atoms:
+                        raise ValueError(f"{path}: the atom count changes between frames")
+                    lat, cols = _extxyz_frame_head(blk[1], path)
+                    rows = [ln.split() for ln in blk[2:]]
+                    if syms is None:
+                        syms = [r[cols["species"].start] for r in rows]
+                    arr = np.array([r[cols["species"].stop:] for r in rows], dtype=float)
+                    base = cols["species"].stop
+                    xyz.append(arr[:, cols["pos"].start - base:cols["pos"].stop - base])
+                    if "forces" in cols:
+                        frc.append(arr[:, cols["forces"].start - base:cols["forces"].stop - base])
+                    if "velocities" in cols:
+                        vel.append(arr[:, cols["velocities"].start - base:
+                                       cols["velocities"].stop - base])
+                    lats.append(lat)
+                else:
+                    if not blk[0].startswith("ITEM: TIMESTEP") or int(blk[3]) != n_atoms:
+                        raise ValueError(f"{path}: unexpected LAMMPS dump frame layout")
+                    lat, origin = _dump_lattice(blk[5:8])
+                    c = _dump_columns(blk[8], species_hint)
+                    rows = [ln.split() for ln in blk[9:]]
+                    order = np.argsort([int(r[c["id"]]) for r in rows], kind="stable")
+                    rows = [rows[i] for i in order]
+                    if syms is None:
+                        syms = ([r[c["element"]] for r in rows] if c["element"] is not None
+                                else [species_hint[int(r[c["type"]]) - 1] for r in rows])
+                    p = np.array([[r[i] for i in c["pos"]] for r in rows], dtype=float)
+                    xyz.append(p if c["scaled"] else p - origin)
+                    if c["forces"] is not None:
+                        frc.append(np.array([[r[i] for i in c["forces"]] for r in rows], float))
+                    if c["velocities"] is not None:  # metal units A/ps -> A/fs
+                        vel.append(1e-3 * np.array([[r[i] for i in c["velocities"]]
+                                                    for r in rows], float))
+                    lats.append(lat)
+                    if c["scaled"]:
+                        xyz[-1] = xyz[-1] @ lat  # to Cartesian, as the other branches
+            out = {"cart": np.array(xyz), "lattice": np.array(lats), "symbols": syms}
+            if frc:
+                out["forces"] = np.array(frc)
+            if vel:
+                out["velocities"] = np.array(vel)
+            yield out
+            if n_full < frames_per_chunk:
+                return
+
+
+def _read_text_header(path, fmt: str, species) -> Header:
+    with open(path, errors="replace") as fh:
+        first = fh.readline()
+        if fmt == "extxyz":
+            n = int(first)
+        else:
+            fh.readline()
+            fh.readline()
+            n = int(fh.readline())
+    blocks = list(islice_frames(path, fmt, n, 2, species))
+    fr = blocks[0]
+    sp, counts = _blocks(fr["symbols"], path)
+    lat = fr["lattice"]
+    variable = len(lat) > 1 and not np.allclose(lat[0], lat[1], atol=1e-10)
+    return Header(f"{fmt} trajectory", lat[0], sp, counts, 0, variable, fmt)
+
+
+def islice_frames(path, fmt, n_atoms, n_frames, species):
+    """The first n_frames frames as one block (header detection)."""
+    for blk in _iter_text_frames(path, fmt, n_atoms, n_frames, species):
+        yield blk
+        return
+
+
+def _text_chunks(path, header: Header, chunk_bytes: int, max_frames, want_extra: bool = False):
+    per_frame_bytes = 60 * header.n_atoms + 200
+    k = max(1, int(chunk_bytes // per_frame_bytes))
+    if max_frames is not None:
+        k = min(k, max_frames)
+    n_read = 0
+    for blk in _iter_text_frames(path, header.fmt, header.n_atoms, k, header.species_hint):
+        if blk["symbols"] != header.symbols:
+            raise ValueError(f"{path}: the atom order differs from the first frame")
+        cart, lat = blk["cart"], blk["lattice"]
+        if max_frames is not None:
+            take = max(0, max_frames - n_read)
+            cart, lat = cart[:take], lat[:take]
+            for key in ("forces", "velocities"):
+                if key in blk:
+                    blk[key] = blk[key][:take]
+        if not len(cart):
+            return
+        frac = np.einsum("kni,kij->knj", cart, np.linalg.inv(lat))
+        frac -= np.floor(frac)
+        n_read += len(cart)
+        yield (Chunk(frac, lat), blk) if want_extra else Chunk(frac, lat)
+        if max_frames is not None and n_read >= max_frames:
+            return
+
+
+def iter_forces(path: str | Path, header: Header, chunk_bytes: int = 64 * 2**20):
+    """Forces [eV/A] (k, n_atoms, 3) of every frame of an extxyz / LAMMPS dump."""
+    if header.fmt == "xdatcar":
+        raise ValueError(f"{path}: an XDATCAR holds no forces")
+    for _, blk in _text_chunks(path, header, chunk_bytes, None, want_extra=True):
+        if "forces" not in blk:
+            raise ValueError(f"{path}: no forces in this trajectory")
+        yield blk["forces"]
+
+
+def _count_text_frames(path, header: Header) -> int:
+    per = header.n_atoms + (2 if header.fmt == "extxyz" else 9)
+    n = 0
+    with open(path, "rb") as fh:
+        while True:
+            b = fh.read(64 * 2**20)
+            if not b:
+                break
+            n += b.count(b"\n")
+    return n // per

@@ -187,6 +187,17 @@ def cmd_md(args) -> int:
             print(f"[ERROR] md: {err}")
             return 1
 
+    # ADR-0052: velocities in the trajectory (extxyz A/fs, lammps-dump A/ps).
+    tv = md_cfg.get("traj_velocities", False)
+    if not isinstance(tv, bool):
+        print(f"[ERROR] md.traj_velocities must be true or false, got {tv!r}")
+        return 1
+    if tv and sim.traj_format == "xdatcar":
+        print("[ERROR] md.traj_velocities needs traj_format extxyz or lammps-dump "
+              "(an XDATCAR holds no velocities)")
+        return 1
+    sim.traj_velocities = tv
+
     # Checkpoint and restart (ADR-0031): an existing checkpoint is
     # continued unless `restart: false`.
     ck_path, ck_every, ck_meta = _checkpoint_setup(

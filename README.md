@@ -167,6 +167,11 @@
 > pair, SW and Tersoff kernels no longer overrun their per-thread buffers
 > when a numba cache built with one thread is loaded with more.
 >
+> 0.4.0a2 (ADR-0052): `mdspec` reads extxyz and LAMMPS-dump trajectories
+> (forces too: `forces: trajectory`), computes the Gamma modes of the
+> mode estimator with the MD's own potential, and takes `dipole.model:
+> auto`; `md` writes velocities with `traj_velocities: true`.
+>
 > 0.4.0a1 (ADR-0050, ADR-0051): new `mdspec` command -- spectra from MD
 > trajectories, starting with the complex permittivity eps(omega) from the
 > total dipole M(t) by the fluctuation-dissipation theorem (point charges,
@@ -611,8 +616,8 @@ mdspec:
   temperature_source: [md_output/thermo.log]
   dipole: {model: point_charge, charges: {Mg: 2.0, O: -2.0}}   # | born_tensor | external
   spectrum: {freq_unit: THz, freq_max: 30, estimator: auto}  # auto | mode | fsum | raw
-  # modes: {file: gamma_modes.npz, unit_cell: POSCAR_unit, supercell: [8, 8, 8]}
-  # forces: {files: [forces.npy]}       # force-based static value, reported only
+  # modes: {unit_cell: POSCAR_unit, supercell: [8, 8, 8]}  # computed with potential:
+  # forces: trajectory                  # force-based static value, reported only
   output: {dir: mdspec_output, prefix: mgo}
 ```
 
@@ -627,7 +632,19 @@ Gervais-Piriou) and a Kramers-Kronig check.  `--check` diagnoses the runs
 paths are read against the YAML file's directory.  Validated in nozuchi
 (Tier 2a / 3a within 1.5 % of a force-based reference); the port
 reproduces nozuchi 0.2.0a2 on those inputs (ADR-0051).  VDOS, SED and the
-Raman temperature shift follow (ADR-0050 stages P2-P6).
+Raman temperature shift follow (ADR-0050 stages P3-P6).
+
+Since 0.4.0a2 (ADR-0052): trajectories may be XDATCAR, extxyz or LAMMPS
+dump (detected from the file; atoms of one species must be contiguous, as
+akitsushima writes them; a dump is analysed in the LAMMPS orientation and
+Cartesian inputs for another orientation are refused).  With a
+`potential:` block the Gamma modes are computed with it: for `modes:
+{unit_cell, supercell}` on the unit cell implied by the MD lattice, or on
+the MD cell itself up to 1000 atoms (relaxed at fixed cell; written as
+`<prefix>_gamma_modes.npz` and `<prefix>_gamma_unit.vasp`).  `dipole.model:
+auto` (the default) takes born.born_charges, then the potential's point
+charges, then `dipole.charges`.  `md` writes velocities (extxyz A/fs,
+LAMMPS dump A/ps) with `traj_velocities: true`.
 
 ### NEMD and the decomposition of kappa (ADR-0020)
 

@@ -10,7 +10,6 @@ atom, with the standard deviation.
 """
 
 import json
-import math
 import os
 import time as _time
 
@@ -18,7 +17,12 @@ import numpy as np
 
 from ..solvers import PhononCalculator
 from ..solvers.qha import relax_at_volume
-from ..solvers.raman import RAMAN_DEGENERACY_CM, raman_modes, spectrum_columns
+from ..solvers.raman import (
+    RAMAN_DEGENERACY_CM,
+    auto_supercell,
+    raman_modes,
+    spectrum_columns,
+)
 from ..solvers.response import polarizability_from_config, species_without_bonds
 from ..utils.mpi import _mpi_rank
 from .common import (
@@ -68,27 +72,6 @@ _PRINT_TOP_SETS = 20
 # Gamma matrix took 42 s at N = 1024 and 249 s at N = 2048 (loaded machine).
 _DENSE_GUIDE_ATOMS = 1000
 
-# Neighbour-list skin of the pre-relaxation [A]; the automatic supercell
-# keeps r_cut + skin below half its perpendicular width.
-_SKIN = 0.5
-
-
-def auto_supercell(lattice, r_cut: float, z_fixed: bool = False) -> list:
-    """Smallest replication whose perpendicular widths all exceed
-    2 (r_cut + skin).  At Gamma the dynamical matrix of the cell itself is
-    exact from any supercell the engine accepts (the images fold onto the
-    same atoms with phase 1), so the smallest valid one is used."""
-    lattice = np.asarray(lattice, dtype=float)
-    vol = abs(np.linalg.det(lattice))
-    S = []
-    for i in range(3):
-        width = vol / np.linalg.norm(
-            np.cross(lattice[(i + 1) % 3], lattice[(i + 2) % 3])
-        )
-        S.append(max(1, math.floor(2.0 * (r_cut + _SKIN) / width) + 1))
-    if z_fixed:
-        S[2] = 1
-    return S
 
 
 def _geometries(sec: dict, lattice) -> list:

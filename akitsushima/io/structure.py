@@ -362,15 +362,19 @@ def extxyz_frame_text(
     decimals: int = 14,
     energy_decimals: int | None = None,
     stress_digits: int | None = None,
+    velocities=None,
 ) -> str:
     """One extxyz frame as text.  ``stress`` in akitsushima's sign
-    [eV/A^3]; it is written with ASE's (positive under tension)."""
+    [eV/A^3]; it is written with ASE's (positive under tension).
+    ``velocities`` [A/fs] become the ``velocities:R:3`` property
+    (ADR-0052)."""
     lattice = np.asarray(lattice, dtype=float)
     positions = np.asarray(positions, dtype=float)
     n = len(atom_types)
     ed = decimals if energy_decimals is None else energy_decimals
     sd = decimals + 2 if stress_digits is None else stress_digits
-    props = "species:S:1:pos:R:3" + (":forces:R:3" if forces is not None else "")
+    props = ("species:S:1:pos:R:3" + (":forces:R:3" if forces is not None else "")
+             + (":velocities:R:3" if velocities is not None else ""))
     head = [
         f'Lattice="{_fmt_row(lattice.reshape(-1), decimals)}"',
         f"Properties={props}",
@@ -386,10 +390,13 @@ def extxyz_frame_text(
     out = [str(n), " ".join(head)]
     width = max(len(t) for t in atom_types) if n else 2
     F = None if forces is None else np.asarray(forces, dtype=float)
+    V = None if velocities is None else np.asarray(velocities, dtype=float)
     for i in range(n):
         row = f"{atom_types[i]:<{width}s} {_fmt_row(positions[i], decimals)}"
         if F is not None:
             row += " " + _fmt_row(F[i], decimals)
+        if V is not None:
+            row += " " + _fmt_row(V[i], decimals)
         out.append(row)
     return "\n".join(out) + "\n"
 
@@ -663,9 +670,11 @@ def lammps_dump_frame_text(
     species,
     forces=None,
     decimals: int = 8,
+    velocities=None,
 ) -> str:
-    """One LAMMPS dump frame (``id type element x y z [fx fy fz]``, metal
-    units) in the LAMMPS orientation."""
+    """One LAMMPS dump frame (``id type element x y z [fx fy fz] [vx vy
+    vz]``, metal units: velocities in A/ps) in the LAMMPS orientation.
+    ``velocities`` are given in A/fs (ADR-0052)."""
     Lp, R = lammps_orientation(lattice)
     pos = np.asarray(positions, dtype=float) @ R
     tid = {s: k + 1 for k, s in enumerate(species)}
@@ -687,13 +696,18 @@ def lammps_dump_frame_text(
         out.append(f"{xlo_b:.{d}f} {xhi_b:.{d}f} {xy:.{d}f}")
         out.append(f"{min(0.0, yz):.{d}f} {Lp[1, 1] + max(0.0, yz):.{d}f} {xz:.{d}f}")
         out.append(f"{0.0:.{d}f} {Lp[2, 2]:.{d}f} {yz:.{d}f}")
-    cols = "id type element x y z" + (" fx fy fz" if forces is not None else "")
+    cols = ("id type element x y z" + (" fx fy fz" if forces is not None else "")
+            + (" vx vy vz" if velocities is not None else ""))
     out.append(f"ITEM: ATOMS {cols}")
     F = None if forces is None else np.asarray(forces, dtype=float) @ R
+    # metal units: A/ps = 1000 A/fs
+    V = None if velocities is None else 1000.0 * np.asarray(velocities, dtype=float) @ R
     for i, t in enumerate(atom_types):
         row = f"{i + 1} {tid[t]} {t} {_fmt_row(pos[i], d)}"
         if F is not None:
             row += " " + _fmt_row(F[i], d)
+        if V is not None:
+            row += " " + _fmt_row(V[i], d)
         out.append(row)
     return "\n".join(out) + "\n"
 

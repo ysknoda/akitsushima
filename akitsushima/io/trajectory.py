@@ -4,9 +4,11 @@
 
 * ``xdatcar``     -- ``XDATCAR_<task>`` (the default, unchanged output);
 * ``extxyz``      -- ``traj_<task>.extxyz``: lattice, positions, species,
-  energy, forces and stress (ASE's sign) per frame;
+  energy, forces and stress (ASE's sign) per frame; velocities [A/fs]
+  with ``traj_velocities`` (ADR-0052);
 * ``lammps-dump`` -- ``traj_<task>.lammpstrj``: ``id type element x y z
-  fx fy fz``, metal units, in the LAMMPS orientation.
+  fx fy fz [vx vy vz]``, metal units (velocities A/ps), in the LAMMPS
+  orientation.
 
 Positions and forces are written with 8 decimals, the energy with 10 and
 the stress with 10 significant digits.  Every format is append-only, so the
@@ -77,8 +79,13 @@ class TrajectoryWriter:
         forces=None,
         stress=None,
         comment: str = "",
+        velocities=None,
     ) -> None:
-        """Append one frame.  ``stress`` in akitsushima's sign [eV/A^3]."""
+        """Append one frame.  ``stress`` in akitsushima's sign [eV/A^3];
+        ``velocities`` [A/fs] for extxyz / lammps-dump (ADR-0052)."""
+        if velocities is not None and self.fmt == "xdatcar":
+            raise ValueError("velocities cannot be written to an XDATCAR "
+                             "(use traj_format extxyz or lammps-dump)")
         if self.fmt == "xdatcar":
             _write_xdatcar_frame(
                 self.fh,
@@ -102,6 +109,7 @@ class TrajectoryWriter:
                     decimals=8,
                     energy_decimals=10,
                     stress_digits=10,
+                    velocities=velocities,
                 )
             )
         else:
@@ -118,6 +126,7 @@ class TrajectoryWriter:
                     self.species,
                     forces=forces,
                     decimals=8,
+                    velocities=velocities,
                 )
             )
         self.frame_idx += 1

@@ -48,11 +48,14 @@ def to_internal(cfg: dict) -> dict:
     raw = copy.deepcopy(cfg["mdspec"])
     if "epsilon_inf" in raw:
         raise ConfigError("mdspec.epsilon_inf: give eps_inf as born.epsilon_inf")
-    dp = raw.get("dipole")
-    if isinstance(dp, dict) and "born" in dp:
-        raise ConfigError(
-            "mdspec.dipole.born: give the Born charges as born.born_charges"
-        )
+    dp = raw.setdefault("dipole", {})
+    if not isinstance(dp, dict):
+        raise ConfigError("mdspec.dipole must be a mapping")
+    if "born" in dp:
+        raise ConfigError("mdspec.dipole.born: give the Born charges as born.born_charges")
+    if raw.get("forces") == "trajectory":  # forces of an extxyz / LAMMPS dump (ADR-0052)
+        files = (raw.get("trajectory") or {}).get("files")
+        raw["forces"] = {"files": [files] if isinstance(files, str) else list(files or [])}
     born = cfg.get("born") or {}
     if not isinstance(born, dict):
         raise ConfigError("born must be a mapping")
@@ -61,13 +64,11 @@ def to_internal(cfg: dict) -> dict:
         raise ConfigError(f"unknown key(s) in 'born': {sorted(unknown)}")
     if "epsilon_inf" in born:
         raw["epsilon_inf"] = copy.deepcopy(born["epsilon_inf"])
-    map_frames = dp.pop("map_frames", None) if isinstance(dp, dict) else None
+    map_frames = dp.pop("map_frames", None)
     bc = born.get("born_charges")
     if bc is not None:
         if not isinstance(bc, dict):
             raise ConfigError("born.born_charges must be a mapping")
-        if not isinstance(dp, dict):
-            raise ConfigError("mdspec.dipole is required")
         b = copy.deepcopy(bc)
         if map_frames is not None:
             b["map_frames"] = map_frames

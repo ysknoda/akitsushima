@@ -25,7 +25,9 @@ def cmd_mdspec(args) -> int:
     if getattr(args, "convert_nozuchi", False):
         print(yaml_io.convert_file(args.yaml), end="")
         return 0
-    cfg = yaml_io.load(args.yaml)
+    from ..mdspec.prepare import load as _prepare_load
+
+    cfg = _prepare_load(args.yaml, log=(lambda *_: None) if getattr(args, "quiet", False) else print)
     out = Path(cfg["output"]["dir"])
     out.mkdir(parents=True, exist_ok=True)
     quiet = getattr(args, "quiet", False)

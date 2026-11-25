@@ -29,7 +29,15 @@ from . import charges as ch
 from . import forces as fr
 from . import modes as md
 from .constants import DEBYE_TO_E_ANG
-from .trajectory import Header, count_frames, iter_chunks, read_frames, read_header
+from .trajectory import (
+    Header,
+    count_frames,
+    detect_format,
+    iter_chunks,
+    iter_forces,
+    read_frames,
+    read_header,
+)
 
 CACHE_FORMAT = 2  # 2: displacement-form M and Q, per-file frame counts (0.2.0a2)
 VARIABLE_CELL_TOL = 1e-6  # Angstrom: largest change of a lattice component that counts as fixed
@@ -170,6 +178,24 @@ def _cache_key(cfg: dict, z: np.ndarray, w: np.ndarray | None = None) -> str:
     return h.hexdigest()[:16]
 
 
+def _check_orientation(header: Header, lattice, unit_cell, supercell, what: str) -> None:
+    """A LAMMPS dump is in the LAMMPS orientation (a along x, b in xy): a
+    Cartesian tensor or eigenvector given for a unit cell in another
+    orientation would be silently wrong (ADR-0052).  Refuse when the unit
+    cell implied by the dump differs from the given one by more than 1 %."""
+    if header.fmt != "lammps-dump" or unit_cell is None:
+        return
+    lat_u = ch.read_poscar(unit_cell)[0]
+    S = np.diag(supercell) if np.ndim(supercell) == 1 else np.asarray(supercell, float)
+    implied = np.linalg.inv(S) @ np.asarray(lattice, float)
+    if np.abs(implied - lat_u).max() > 0.01 * np.abs(lat_u).max():
+        raise ValueError(
+            f"{what}: the LAMMPS dump is in the LAMMPS orientation and {unit_cell} is not; "
+            "its Cartesian tensors / eigenvectors would be misaligned.  Give the unit cell "
+            "in the dump's orientation, or analyse an extxyz / XDATCAR trajectory"
+        )
+
+
 def build_charges(cfg: dict, header: Header) -> np.ndarray:
     """Per-atom Z tensors (n, 3, 3) for the 'point_charge' or 'born_tensor' model."""
     dp = cfg["dipole"]
@@ -177,6 +203,8 @@ def build_charges(cfg: dict, header: Header) -> np.ndarray:
         return ch.point_charges(header.symbols, dp["charges"], dp["neutrality_tol"])
     b = dp["born"]
     frac_mean, lattice = mean_positions(cfg, header, int(b["map_frames"]))
+    if b["outcar"]:
+        _check_orientation(header, lattice, b["unit_cell"], b["supercell"], "dipole.born")
     return ch.born_charges(b, header.symbols, frac_mean, lattice)
 
 
@@ -196,6 +224,7 @@ def build_modes(cfg: dict, header: Header, z: np.ndarray, log=print) -> dict | N
         return None
     masses, _, _ = ch.run_masses(cfg, header)
     frac_mean, lattice = mean_positions(cfg, header)
+    _check_orientation(header, lattice, mcfg["unit_cell"], mcfg["supercell"], "modes")
     proj = md.build_projection(mcfg, header.symbols, frac_mean, lattice, z, masses)
     proj["WG"] = fr.weights(proj["W"], masses)  # force projection (ADR-0009)
     src = mcfg["outcar"] or mcfg.get("phonopy") or mcfg["file"]
@@ -228,6 +257,12 @@ def _file_forces(cfg: dict, i: int, path, header: Header, proj: dict, n_frames: 
         k = fcfg["stride_frames"]
         g = fr.project_npy(src, header.n_atoms, proj["WG"])
         expect = (n_frames + k - 1) // k
+    elif detect_format(src) != "xdatcar":  # extxyz / LAMMPS dump forces (ADR-0052)
+        h = read_header(src, cfg["trajectory"]["species"])
+        g = np.concatenate(
+            [np.einsum("tki,kim->tm", f, proj["WG"]) for f in iter_forces(src, h)]
+        )
+        k, expect = 1, n_frames
     else:
         every = int(cfg["trajectory"]["frame_every"])
         g, first = fr.project_outcar(src, header.n_atoms, proj["WG"], every)
