@@ -259,3 +259,64 @@ _Avoid_: joint DOS (phono3py's term for the general case)
 The thermal mean-square displacement tensor <u_i u_j> of one atom, in
 A^2, with U_iso and B = 8 pi^2 U_iso.
 _Avoid_: Debye-Waller factor (the exponential exp(-2W) it enters)
+
+### MD spectra (`mdspec`, merged from nozuchi's glossary, ADR-0051)
+
+**Run** (mdspec):
+One trajectory file. Runs are combined by **concatenation** (one
+trajectory continued) or as **independent runs** (separate spectra,
+averaged; their scatter is the honest error bar).
+_Avoid_: seed, chunk
+
+**Run temperature**:
+The mean instantaneous temperature of a run over its kept frames, from
+its own `temperature_source` (thermo.log or OUTCAR). It enters only the
+raw estimator.
+
+**Total dipole** (M(t)):
+The cell dipole built by a dipole model in the displacement form
+M = sum_k Z_k . u_k, u_k(t) = (f_k(t) - fbar_k) h(t), from unwrapped
+fractional coordinates and their run average. For a fixed cell it differs
+from sum_k Z_k . r_k by a constant only; for a variable cell it removes the
+spurious term of the cell fluctuations.
+_Avoid_: polarisation (that is M / V)
+
+**Dipole model**:
+How M(t) is built: point_charge (fixed scalar charges), born_tensor (Z*
+mapped from a DFT cell), external (a series computed elsewhere). It is
+the response model's charge part, used frame by frame.
+
+**Estimator** (raw / fsum / mode):
+How the static value and the spectrum are normalised: raw (none), fsum
+(each Cartesian component by the exact kinetic constraint <Mdot^2>),
+mode (each Gamma normal coordinate by its own kinetic energy; needs Gamma
+eigenvectors). `auto` takes mode when the modes are known, else fsum.
+
+**f-sum ratio**:
+<Mdot^2>_MD / <Mdot^2>_exact, a diagnostic: 1 in a well-sampled canonical
+run; it also catches a wrong timestep, charge or mass.
+
+**Normal coordinate** (Q_m):
+The projection of the supercell displacements on a mass-weighted Gamma
+eigenvector of the unit cell; M = p Q exactly for constant charges.
+
+**Force-based static value** (eps_static_force):
+Delta eps from positions and forces through the effective harmonic
+matrix D_eff = -<G dQ^T><dQ dQ^T>^-1; the Tier 2a / 3a reference, reported
+alongside and never selected.
+
+**Mode table**:
+Delta eps per Gamma mode with every cross term between two modes shared
+equally (so it sums to the total), with the diagonal-only value, the
+peak frequency and the linewidth. The cross share is what cross terms
+carry.
+
+**KK check**:
+eps' rebuilt from eps'' by Kramers-Kronig and compared with the direct
+FDT eps'; a consistency diagnostic only.
+
+**Validation tiers** (mdspec):
+Tier 1 analytic signals; Tier 2 / 2a akitsushima classical MD against the
+harmonic `dielectric` values and the force-based value; Tier 3 / 3a VASP
+AIMD against DFPT and the force-based value; Tier 4 experiment, shown
+only.

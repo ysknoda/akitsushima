@@ -1,5 +1,5 @@
 ---
-status: accepted (plan agreed 2026-11-25); P1 in progress -- each later stage waits for the user's go-ahead
+status: accepted (plan agreed 2026-11-25); P1 done (ADR-0051, 0.4.0a1); each later stage waits for the user's go-ahead
 ---
 
 # Port of nozuchi into akitsushima: MD spectra (`mdspec`)

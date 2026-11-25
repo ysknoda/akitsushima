@@ -41,6 +41,7 @@ _COMMAND = {
     "qha": "qha",
     "dielectric": "dielectric",
     "raman": "raman",
+    "mdspec": "mdspec",
     "piezo": "piezo",
     "nemd": "nemd",
     "bte": "bte",
@@ -70,6 +71,7 @@ _SHRINK = {
     "qha": {"qha": {"q_mesh": 6}},
     "dielectric": {},
     "raman": {},
+    "mdspec": {},
     "piezo": {},
     "nemd": {"nemd": {"equil_steps": 20, "n_steps": 120}},
     "bte": {"bte": {"mesh": 3}},
@@ -228,10 +230,30 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
                       make_frames([("Si", 4 + r)], n_steps=2, seed=r))
     elif key == "build":
         pass  # starts from bulk: no input file
+    elif key == "mdspec":
+        _write_mdspec_run(tmp_path, cfg["mdspec"])
     elif key == "active":
         _write_active_inputs(tmp_path, cfg["active"])
     else:  # pragma: no cover - guarded by test_every_template_key_is_covered
         raise KeyError(key)
+
+
+def _write_mdspec_run(tmp_path, m):
+    """A short charged harmonic-crystal (Mg / O) XDATCAR and thermo.log at the
+    template's paths (the Langevin model of tests/mdspec/conftest)."""
+    from mdspec.conftest import langevin_crystal, write_xdatcar
+
+    pos, lattice, symbols, _m, _q, _d = langevin_crystal(n_steps=4000)
+    every = m["trajectory"]["frame_every"]
+    frac = (pos[::every] @ np.linalg.inv(lattice)) % 1.0
+    xd = tmp_path / m["trajectory"]["files"][0]
+    xd.parent.mkdir(parents=True, exist_ok=True)
+    n_mg = symbols.count("Mg")
+    write_xdatcar(xd, ["Mg", "O"], [n_mg, len(symbols) - n_mg], frac, lattice)
+    steps = np.arange(len(frac)) * every
+    rows = "".join(f"{s} {s * 1e-3:.3f} -1.0 0.1 -0.9 {300.0 + (s % 7) - 3:.2f}\n" for s in steps)
+    (tmp_path / m["temperature_source"][0]).write_text(
+        "Step Time(ps) E_pot(eV) E_kin(eV) E_tot(eV) T_inst(K)\n" + rows)
 
 
 def _write_active_inputs(tmp_path, a):
@@ -298,7 +320,8 @@ def test_template_runs_as_shipped(key, tmp_path, monkeypatch):
     assert rc == expected, f"template {key!r} returned {rc}"
 
     section = cfg.get(_COMMAND[key], {})
-    out_dir = tmp_path / section.get("output_dir", "")
+    out_dir = tmp_path / (section["output"]["dir"] if key == "mdspec"
+                          else section.get("output_dir", ""))
     assert out_dir.is_dir() and any(out_dir.iterdir()), (
         f"template {key!r} wrote nothing to {out_dir}"
     )
