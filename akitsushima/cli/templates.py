@@ -28,6 +28,7 @@ __all__ = [
     "_YAML_GRUNEISEN_DEFAULT",
     "_YAML_QHA_DEFAULT",
     "_YAML_DIELECTRIC_DEFAULT",
+    "_YAML_RAMAN_DEFAULT",
     "_YAML_PIEZO_DEFAULT",
     "_YAML_NEMD_DEFAULT",
     "_YAML_ANNEAL_DEFAULT",
@@ -1171,9 +1172,15 @@ born:                       # ADR-0019; this block also turns on NAC in
                             # phonon, gruneisen and qha
   epsilon_inf: 2.95         # MgO, experiment (n^2 at optical frequencies);
                             # omit for the rigid-ion default 1 (warned)
+  # epsilon_inf: {outcar: ./dfpt/OUTCAR} # or from a LEPSILON / LCALCEPS run
   # born_charges:           # default: the potential's point charges
   #   per_species: {Mg: 2.0, O: -2.0}      # scalar, [xx,yy,zz] or 3x3
   #   per_atom: {1: [[...],[...],[...]]}  # 1-based POSCAR index, wins
+  #   outcar: ./dfpt/OUTCAR               # Z* of a DFT cell (ADR-0049):
+  #   unit_cell: ./dfpt/POSCAR            #   each atom mapped onto a site
+  #   supercell: [1, 1, 1]                #   of it; this cell = S x that
+  #   map_tolerance: 0.6                  #   cell; priority per_atom >
+  #                                       #   per_species > outcar > charges
   # clamped_ion_piezo: 3x6 C/m^2           # electronic e (piezo only)
 
 dielectric:
@@ -1186,6 +1193,69 @@ dielectric:
   #                             # potential (checked by input hash)
   n_jobs:     1
   masses:     {}
+"""
+
+_YAML_RAMAN_DEFAULT = """\
+# akitsushima  --  Raman spectra in the harmonic approximation (ADR-0049)
+# Usage: akitsushima raman raman.yaml
+# POSCAR: any cell -- a primitive cell or an alloy supercell.  Only the
+# Gamma modes of that cell are used, which are exact from any supercell the
+# potential accepts ("auto": the smallest one).
+
+structure:
+  poscar: POSCAR
+  # or file: <path> -- POSCAR, *.extxyz, *.data / *.lmp (LAMMPS), *.cif
+
+potential:
+  type: Tersoff
+  species: [Si]
+  params:   # Tersoff Si(C) / T3, PRB 38, 9902 (1988); lambda3 = 0
+    A:       1830.8
+    B:       471.18
+    lambda1: 2.4799
+    lambda2: 1.7322
+    lambda3: 0.0
+    beta:    1.1e-6
+    n:       0.78734
+    c:       100390.0
+    d:       16.217
+    h:       -0.59825
+    R:       2.85
+    D:       0.15
+
+polarizability:             # d alpha / du of each atom; omit for frequencies
+  source: bpm               # and activity only.  Bond polarisability model:
+  bonds:                    # alpha_l - alpha_p = alpha_diff + (d_alpha_l -
+    Si-Si:                  # d_alpha_p)(R - r0) per bond, bonds R < r_cut.
+      r_cut: 2.8            # A, between the first (2.35) and second (3.84)
+      r0: 2.35              # A        neighbour shells of Si
+      alpha_diff: 1.0       # A^3  ILLUSTRATIVE values, not fitted: diamond
+      d_alpha_l: 2.0        # A^2  has one Raman constant, so its relative
+      d_alpha_p: 0.5        # A^2  intensities do not depend on them.  A fit
+  # params_file: bpm_params.json  # to VASP finite differences is stage S2.
+
+raman:
+  output_dir: ./raman_output
+  # structures: [cfg_001.vasp, cfg_002.vasp]  # several configurations,
+  #                                           # averaged per atom (+ std)
+  supercell:   auto          # or [n1, n2, n3]
+  delta:       0.01          # A
+  pre_relax:   true          # cell + ions (relax: options as dielectric)
+  # load_ifc: ./phonon_output  # reuse a phonon run (same POSCAR + potential)
+  n_jobs:      1
+  symmetry:    false         # IFC reduction (ADR-0040)
+  symprec:     1.0e-5        # A, also for the activity
+  activity:    auto          # characters from spglib when installed
+  temperature: 300.0         # K, Bose factor (n + 1) / w
+  # laser_nm: 532.0          # (w_L - w)^4 only when given
+  anti_stokes: false
+  fwhm_cm:     3.0           # Lorentzian FWHM, cm^-1 (display default)
+  degeneracy_cm: 0.1         # one degenerate set within this
+  # grid: {min: 0.0, max: 700.0, step: 0.5}
+  geometries:                # e_i, e_s; basis cartesian (default) or lattice
+    - {name: "z(xx)-z", incident: [1, 0, 0], scattered: [1, 0, 0]}
+    - {name: "z(xy)-z", incident: [1, 0, 0], scattered: [0, 1, 0]}
+  masses: {}
 """
 
 _YAML_PIEZO_DEFAULT = """\
@@ -1548,6 +1618,7 @@ _DUMP_MAP = {
     "gruneisen": _YAML_GRUNEISEN_DEFAULT,
     "qha":    _YAML_QHA_DEFAULT,
     "dielectric": _YAML_DIELECTRIC_DEFAULT,
+    "raman":  _YAML_RAMAN_DEFAULT,
     "piezo":  _YAML_PIEZO_DEFAULT,
     "nemd":   _YAML_NEMD_DEFAULT,
     "bte":    _YAML_BTE_DEFAULT,

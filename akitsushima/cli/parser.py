@@ -23,6 +23,7 @@ from .cmd_osmc import cmd_osmc
 from .cmd_phonon import cmd_phonon
 from .cmd_piezo import cmd_piezo
 from .cmd_qha import cmd_qha
+from .cmd_raman import cmd_raman
 from .cmd_relax import cmd_relax
 from .cmd_tsa import cmd_tsa
 from .templates import _DUMP_MAP
@@ -49,6 +50,7 @@ _DISPATCH = {
     "gruneisen": cmd_gruneisen,
     "qha":     cmd_qha,
     "dielectric": cmd_dielectric,
+    "raman":   cmd_raman,
     "piezo":   cmd_piezo,
     "nemd":    cmd_nemd,
     "bte":     cmd_bte,
@@ -84,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  gruneisen Mode Grueneisen parameters (+-dV force constants)\n"
             "  qha       Quasi-harmonic thermal expansion, B(T), Cp\n"
             "  dielectric Static dielectric tensor, LO-TO, IR modes (Born charges)\n"
+            "  raman     Raman spectra: activity, polarisation geometries, powder\n"
             "  piezo     Relaxed-ion piezoelectric e, d and coupling k\n"
             "  nemd      Non-equilibrium MD: T profile, local heat flux, Kapitza\n"
             "  bte       Lattice thermal conductivity from fc3 (RTA, phonon BTE)\n"
@@ -104,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-default", metavar="TASK",
         help=("Print a default YAML template for TASK and exit.\n"
               "TASK: relax | md | nvt | nve | npt | gcmc | neb | tsa | osmc"
-              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | piezo | mlip | dataset | anneal | build | active"))
+              " | esm | phonon | kappa | elastic | gruneisen | qha | dielectric | raman | piezo | mlip | dataset | anneal | build | active"))
     root.add_argument("--version", action="store_true",
                       help="Print version and exit.")
 
@@ -129,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add("gruneisen", "Mode Grueneisen parameters from +-dV force constants")
     _add("qha",    "Quasi-harmonic thermal expansion, bulk modulus, Cp")
     _add("dielectric", "Static dielectric tensor, LO-TO splitting, IR modes")
+    _add("raman",  "Raman spectra in the harmonic approximation (ADR-0049)")
     _add("piezo",  "Relaxed-ion piezoelectric tensors e, d and coupling k")
     _add("nemd",   "Non-equilibrium MD with Langevin heat baths (kappa, Kapitza)")
     _add("bte",    "Lattice thermal conductivity from third-order force constants (RTA)")

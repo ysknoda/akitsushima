@@ -1,5 +1,5 @@
 ---
-status: accepted (plan agreed 2026-11-24); not implemented -- each stage waits for the user's go-ahead
+status: accepted (plan agreed 2026-11-24); S1 done (ADR-0049, 0.3.0a11, 2026-11-25); later stages wait for the user's go-ahead
 ---
 
 # Displacement-based spectroscopy: Raman, IR eps(omega), linewidths, two-phonon DOS and ADPs
@@ -8,7 +8,8 @@ Plan agreed with the user in the grilling of 2026-11-24 (Q1-Q17, all as
 recommended).  It covers spectra that follow from the harmonic
 (eigenmode) picture.  Spectra from time correlations along an MD
 trajectory belong to the planned port of nozuchi (below).  Each stage
-gets its own ADR (ADR-0047 onwards), like the property-command plan of
+gets its own ADR (ADR-0049 onwards; ADR-0047 and 0048 went to other
+work), like the property-command plan of
 ADR-0017.
 
 ## Starting point (found by reading the code, 2026-11-24, 0.3.0a8)
@@ -234,11 +235,14 @@ ADR-0017.
 
     | stage | content | version |
     |---|---|---|
-    | S1 | nozuchi shared parts (OUTCAR readers, site mapping), response-model interface, activity from characters, `raman` (BPM with given parameters, geometries, powder, constant FWHM, configuration average), checks 1-4 | 0.3.0a10 |
-    | S2 | VASP finite differences (write / read back), BPM fit; check 5 when the user's VASP runs exist (does not block later stages) | 0.3.0a11 |
-    | S3 | `dielectric.spectrum` (eps(omega), optics via the ported nozuchi optics) | 0.3.0a12 |
-    | S4 | BTE linewidths for Raman and IR (`load_bte`) | 0.3.0a13 |
-    | S5 | two-phonon DOS and U_ij in `phonon` | 0.3.0a14 |
+    | S1 | nozuchi shared parts (OUTCAR readers, site mapping), response-model interface, activity from characters, `raman` (BPM with given parameters, geometries, powder, constant FWHM, configuration average), checks 1-4 | 0.3.0a11 (done, ADR-0049) |
+    | S2 | VASP finite differences (write / read back), BPM fit; check 5 when the user's VASP runs exist (does not block later stages) | 0.3.0a12 |
+    | S3 | `dielectric.spectrum` (eps(omega), optics via the ported nozuchi optics) | 0.3.0a13 |
+    | S4 | BTE linewidths for Raman and IR (`load_bte`) | 0.3.0a14 |
+    | S5 | two-phonon DOS and U_ij in `phonon` | 0.3.0a15 |
+
+    The versions were planned one lower; 0.3.0a10 went to ADR-0047
+    (classical force-field speed-ups), so every stage moved up by one.
     | application | GeSn Raman (BPM fitted to hybrid data, composition and strain), runs and report in example/ | -- |
 
     - A short grilling per stage only when open decisions remain.
@@ -286,7 +290,10 @@ ADR-0017.
 
 ## Consequences
 
-- No code changes yet.  ADR-0028 addendum 8 points to this plan.
+- ADR-0028 addendum 8 points to this plan.
+- S1 (ADR-0049, 0.3.0a11): `gamma_only` became `supercell: auto`, since
+  the Gamma matrix of a cell is exact from any supercell the potential
+  accepts (ADR-0049 decision 3).
 - The nozuchi port plan (its own grilling) receives the VDOS, MD IR,
   SED, MD Raman and ML charge-model items, and the decision on nozuchi
   0.3.0a1.

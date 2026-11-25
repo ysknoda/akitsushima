@@ -79,7 +79,8 @@ def _volume_setup(args, section: str, title: str):
         if is_root and not r["converged"]:
             print("  WARNING: pre-relaxation did not converge")
     born = _born_setup(cfg, types, pot_cfg,
-                       required=section in ("dielectric", "piezo"))
+                       required=section in ("dielectric", "piezo"),
+                       lattice=lat, positions=pos)
     return {"cfg": cfg, "sec": sec, "pot_cfg": pot_cfg, "force_fn": force_fn,
             "born": born, "input_hash": _input_hash(
                 pos_data["lattice"], pos_data["positions"], types, pot_cfg),

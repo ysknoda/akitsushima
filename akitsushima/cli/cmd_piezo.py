@@ -52,7 +52,8 @@ def cmd_piezo(args) -> int:
         _print_header("Piezoelectric response (piezo)", cfg, poscar, pot_cfg)
     force_fn, _ = _cli_force_fn(pot_cfg, "cmd_piezo")
     types = pos_data["atom_types"]
-    born = _born_setup(cfg, types, pot_cfg, required=True)
+    born = _born_setup(cfg, types, pot_cfg, required=True,
+                       lattice=pos_data["lattice"], positions=pos_data["positions"])
     in_hash = _input_hash(pos_data["lattice"], pos_data["positions"], types, pot_cfg)
     t_sections = []
 

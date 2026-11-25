@@ -34,7 +34,9 @@ def _as_tensor(v, what: str) -> np.ndarray:
 
 
 def born_from_config(born_cfg: Optional[dict], atom_types: Sequence[str],
-                     charges: Optional[dict] = None) -> Optional[dict]:
+                     charges: Optional[dict] = None,
+                     lattice: Optional[np.ndarray] = None,
+                     positions: Optional[np.ndarray] = None) -> Optional[dict]:
     """
     Z* (N, 3, 3) and eps_inf (3, 3) from the YAML ``born:`` block
     (ADR-0019, Q12, Q13, Q22):
@@ -45,6 +47,20 @@ def born_from_config(born_cfg: Optional[dict], atom_types: Sequence[str],
             per_species: {Zn: 2.1, O: [..3..] or 3x3}
             per_atom:    {4: 3x3, ...}        # 1-based POSCAR index; wins
           clamped_ion_piezo: 3x6 (C/m^2)      # optional, for piezo
+
+    OUTCAR sources (ADR-0049, ported from nozuchi):
+
+        born:
+          epsilon_inf: {outcar: OUTCAR}       # last eps_inf block
+          born_charges:
+            outcar: OUTCAR                    # LEPSILON / LCALCEPS run
+            unit_cell: POSCAR_dft             # the cell of that run
+            supercell: [2, 2, 2]              # this cell = S x unit cell
+            map_tolerance: 0.6                # A
+
+    Every atom of this cell is mapped onto a site of ``unit_cell`` by
+    position (``lattice`` and ``positions`` are then required).  Priority
+    per atom: per_atom > per_species > outcar > the point charges.
 
     Missing pieces fall back to the potential's point charges, Z* = q I and
     eps_inf = 1 (the rigid-ion model: no electronic polarisation; LO-TO
@@ -64,6 +80,8 @@ def born_from_config(born_cfg: Optional[dict], atom_types: Sequence[str],
     src = []
     per_sp = bc.get("per_species") or {}
     per_at = {int(k): v for k, v in (bc.get("per_atom") or {}).items()}
+    z_outcar = (_outcar_born_charges(bc, atom_types, lattice, positions)
+                if bc.get("outcar") else None)
     for i, t in enumerate(atom_types):
         if (i + 1) in per_at:
             Z[i] = _as_tensor(per_at[i + 1], f"born_charges.per_atom[{i + 1}]")
@@ -71,6 +89,9 @@ def born_from_config(born_cfg: Optional[dict], atom_types: Sequence[str],
         elif t in per_sp:
             Z[i] = _as_tensor(per_sp[t], f"born_charges.per_species[{t}]")
             src.append("per_species")
+        elif z_outcar is not None:
+            Z[i] = z_outcar[i]
+            src.append("outcar")
         elif charges is not None and t in charges:
             Z[i] = float(charges[t]) * np.eye(3)
             src.append("point_charge")
@@ -83,8 +104,16 @@ def born_from_config(born_cfg: Optional[dict], atom_types: Sequence[str],
     mean = Z.mean(axis=0)
     Z -= mean
     eps_given = "epsilon_inf" in born_cfg
-    eps = (_as_tensor(born_cfg["epsilon_inf"], "epsilon_inf") if eps_given
-           else np.eye(3))
+    eps_cfg = born_cfg.get("epsilon_inf")
+    if isinstance(eps_cfg, dict):
+        if set(eps_cfg) != {"outcar"}:
+            raise ValueError("born.epsilon_inf: give a value or {outcar: path}, "
+                             f"got keys {sorted(eps_cfg)}")
+        from ..io.outcar_dielectric import read_outcar_eps_inf
+        eps = read_outcar_eps_inf(eps_cfg["outcar"])
+    else:
+        eps = (_as_tensor(eps_cfg, "epsilon_inf") if eps_given
+               else np.eye(3))
     if np.any(np.linalg.eigvalsh(0.5 * (eps + eps.T)) < 1.0 - 1e-12):
         raise ValueError("born.epsilon_inf must be >= 1 in every direction.")
     e0 = born_cfg.get("clamped_ion_piezo")
@@ -94,6 +123,37 @@ def born_from_config(born_cfg: Optional[dict], atom_types: Sequence[str],
             "sum_rule_correction": float(np.max(np.abs(mean))),
             "clamped_ion_piezo": (None if e0 is None
                                   else np.asarray(e0, dtype=float).reshape(3, 6))}
+
+
+def _outcar_born_charges(bc: dict, atom_types, lattice, positions) -> np.ndarray:
+    """Z* of every atom of this cell from an OUTCAR of a (smaller) unit
+    cell, by mapping each atom onto a site of that cell (ADR-0049)."""
+    from ..io.outcar_dielectric import map_to_unit_cell, read_outcar_born
+    from ..io.poscar import parse_poscar
+    unknown = set(bc) - {"outcar", "unit_cell", "supercell", "map_tolerance",
+                         "per_species", "per_atom"}
+    if unknown:
+        raise ValueError(f"born.born_charges: unknown keys {sorted(unknown)}")
+    if "unit_cell" not in bc:
+        raise ValueError("born.born_charges.outcar needs unit_cell: the POSCAR "
+                         "of the DFT run (its atom order is the OUTCAR's)")
+    if lattice is None or positions is None:
+        raise ValueError("born.born_charges.outcar: this command does not "
+                         "pass the structure for the site mapping")
+    zu = read_outcar_born(bc["outcar"])
+    u = parse_poscar(bc["unit_cell"])
+    if len(zu) != u["natoms"]:
+        raise ValueError(f"born.born_charges: the OUTCAR has {len(zu)} Born "
+                         f"tensors, unit_cell has {u['natoms']} atoms")
+    lattice = np.asarray(lattice, dtype=float)
+    lat_u = np.asarray(u["lattice"], dtype=float)
+    frac_u = np.asarray(u["positions"], dtype=float) @ np.linalg.inv(lat_u)
+    frac = np.asarray(positions, dtype=float) @ np.linalg.inv(lattice)
+    site = map_to_unit_cell(frac, lattice, list(atom_types), lat_u,
+                            list(u["atom_types"]), frac_u,
+                            bc.get("supercell", [1, 1, 1]),
+                            float(bc.get("map_tolerance", 0.6)))
+    return zu[site]
 
 
 def g_vectors(lattice: np.ndarray, n_points: int = 300):

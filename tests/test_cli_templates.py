@@ -40,6 +40,7 @@ _COMMAND = {
     "gruneisen": "gruneisen",
     "qha": "qha",
     "dielectric": "dielectric",
+    "raman": "raman",
     "piezo": "piezo",
     "nemd": "nemd",
     "bte": "bte",
@@ -68,6 +69,7 @@ _SHRINK = {
     "gruneisen": {"gruneisen": {"mesh": {"q_mesh": 4}}},
     "qha": {"qha": {"q_mesh": 6}},
     "dielectric": {},
+    "raman": {},
     "piezo": {},
     "nemd": {"nemd": {"equil_steps": 20, "n_steps": 120}},
     "bte": {"bte": {"mesh": 3}},
@@ -205,7 +207,7 @@ def _prepare_inputs(key: str, cfg: dict, tmp_path) -> None:
         _write_si(tmp_path / st["poscar"])
     elif key == "elastic":
         _write_si(tmp_path / st["poscar"])
-    elif key in ("gruneisen", "qha"):
+    elif key in ("gruneisen", "qha", "raman"):
         _write_si_primitive(tmp_path / st["poscar"])
     elif key == "bte":
         _write_si(tmp_path / st["poscar"], n=1)

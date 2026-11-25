@@ -204,3 +204,58 @@ each depending only on one atom's own neighbourhood within the cutoff
 (Behler-Parrinello; ADR-0005). Locality is what lets it run on a cell
 size, surface or defect it was not trained on.
 _Avoid_: local model, per-atom model, HDNNP (for the ELM form)
+
+### Spectroscopy
+
+**Response model**:
+What gives a structure's dipole and electronic polarisability and their
+derivatives with respect to the atomic positions (Born charges Z*, the
+polarisability derivative), in the role `force_fn` plays for forces:
+fixed tensors from DFT, point charges, or the bond polarisability model
+(ADR-0046, ADR-0049).
+_Avoid_: charge model, dielectric model
+
+**Polarisability derivative** (`A`):
+A[k, a, b, c] = d alpha_ab / d u_kc, per atom, in A^2, with alpha the
+polarisability volume (alpha = V (eps_inf - 1) / 4 pi). The input of
+every Raman intensity; response indices first, as in Z*.
+_Avoid_: Raman tensor, Raman susceptibility
+
+**Raman tensor**:
+The 3x3 tensor of one mode only, R_m = sum_k A_k e_m(k) / sqrt(M_k) — the
+derivative of alpha along that mode's normal coordinate. Not the per-atom
+quantity, which is the polarisability derivative.
+
+**Activity**:
+Whether a mode set can appear in a Raman (or IR) spectrum at all, decided
+by symmetry from the characters of the space-group operations: a yes or
+no. An active mode can still be weak; an inactive one is exactly zero.
+
+**Powder intensity**:
+The rotational average 45 a^2 + 7 g^2 = I_par + I_perp of one mode set,
+in A^4/amu, before the thermal factor. Gaussian and Phonopy-Spectroscopy
+call this scalar the "Raman activity"; here activity is the symmetry
+yes/no.
+_Avoid_: Raman activity (for this scalar)
+
+**Polarisation geometry**:
+A named pair of polarisation vectors (incident e_i, scattered e_s), given
+in Cartesian or lattice directions. The propagation directions are not
+part of it.
+_Avoid_: Porto notation (it is not parsed)
+
+**BPM** (bond polarisability model):
+alpha as a sum over bonds of a uniaxial tensor whose parallel and
+perpendicular parts depend linearly on the bond length: three parameters
+per species pair enter the derivative.
+
+**Two-phonon DOS**:
+The density of (q, -q) phonon pairs that second-order Raman / IR can
+reach, the photon momentum being about zero. Not the general three-phonon
+q' + q'' = q phase space.
+_Avoid_: joint DOS (phono3py's term for the general case)
+
+**ADP** (atomic displacement parameter, U_ij):
+The thermal mean-square displacement tensor <u_i u_j> of one atom, in
+A^2, with U_iso and B = 8 pi^2 U_iso.
+_Avoid_: Debye-Waller factor (the exponential exp(-2W) it enters)

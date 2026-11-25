@@ -153,7 +153,8 @@ def cmd_bte(args) -> int:
     t0 = _time.perf_counter()
     bc.compute_fc2(n_jobs=n_jobs, verbose=verbose)
     sections.append(("fc2", _time.perf_counter() - t0))
-    born = _born_setup(cfg, types, pot_cfg)
+    born = _born_setup(cfg, types, pot_cfg, lattice=pos["lattice"],
+                       positions=pos["positions"])
     if born is not None:
         bc.ph2.set_nac(born["Z"], born["epsilon_inf"])
         if verbose:
