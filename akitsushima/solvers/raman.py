@@ -33,6 +33,7 @@ degenerate set split by the tolerance, or a structure that is not
 symmetric to symprec, shows up there).
 """
 
+import math
 import warnings
 from collections.abc import Sequence
 
@@ -42,6 +43,7 @@ from ..constants import EV_ANG_TO_AMU_ANG_FS2, FREQ_RAD_FS_TO_WAVENUMBER_CM
 
 __all__ = [
     "RAMAN_DEGENERACY_CM",
+    "auto_supercell",
     "activities",
     "degenerate_sets",
     "gamma_modes",
@@ -300,3 +302,21 @@ def spectrum_columns(
         cols[g["name"]] = np.array([r["geometry"][g["name"]] for r in rows])
     scale = 1.0 / per_atom if per_atom else 1.0
     return {k: scale * lorentzian(grid, w, v * t, fwhm) for k, v in cols.items()}
+
+
+def auto_supercell(lattice, r_cut: float, z_fixed: bool = False, skin: float = 0.5) -> list:
+    """Smallest replication whose perpendicular widths all exceed
+    2 (r_cut + skin).  At Gamma the dynamical matrix of the cell itself is
+    exact from any supercell the engine accepts (the images fold onto the
+    same atoms with phase 1), so the smallest valid one is used."""
+    lattice = np.asarray(lattice, dtype=float)
+    vol = abs(np.linalg.det(lattice))
+    S = []
+    for i in range(3):
+        width = vol / np.linalg.norm(
+            np.cross(lattice[(i + 1) % 3], lattice[(i + 2) % 3])
+        )
+        S.append(max(1, math.floor(2.0 * (r_cut + skin) / width) + 1))
+    if z_fixed:
+        S[2] = 1
+    return S
