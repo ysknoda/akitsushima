@@ -1,5 +1,5 @@
 ---
-status: accepted (plan agreed 2026-11-24); S1 done (ADR-0049, 0.3.0a11, 2026-11-25); later stages wait for the user's go-ahead
+status: accepted (plan agreed 2026-11-24; decisions 5, 15 and 17 revised 2026-11-25 by ADR-0050); S1 done (ADR-0049, 0.3.0a11); S2 lowered; later stages wait for the user's go-ahead
 ---
 
 # Displacement-based spectroscopy: Raman, IR eps(omega), linewidths, two-phonon DOS and ADPs
@@ -105,6 +105,11 @@ ADR-0017.
    - The ML charge model, for orientational polarisation from MLIP MD,
      is the first new item of the port plan.  An ML polarisability is
      tier C.
+   - **Revised 2026-11-25 (ADR-0050 decision 4):** the ML charge model
+     goes to tier C as well; its labels need extra DFT runs, and the user
+     wants little dependence on external first-principles codes.  The
+     port uses fixed tensors only (point charges, Z* from `born:`, an
+     external dipole series).
 6. **Conventions (Q16).**
    - Polarisability derivative A[k, a, b, c] = d alpha_ab / d u_kc, in
      A^2.  The response indices come first, as in
@@ -243,6 +248,16 @@ ADR-0017.
 
     The versions were planned one lower; 0.3.0a10 went to ADR-0047
     (classical force-field speed-ups), so every stage moved up by one.
+
+    **Revised 2026-11-25 (ADR-0050):** the user wants akitsushima to be
+    usable with little dependence on external first-principles codes.
+    S2 (VASP finite differences, BPM fit) is lowered and waits; the
+    nozuchi port (ADR-0050, versions 0.4.0aN) comes first.  S3 follows
+    P1 of the port, since it uses the ported optics; S4 and S5 fit
+    between the port stages.  The version numbers above are void; each
+    stage takes the next free alpha when it starts.  For S2, if resumed:
+    the VASP wiki gives the LCALCEPS header without "in DFT", which the
+    reader must accept (ADR-0050 decision 7).
     | application | GeSn Raman (BPM fitted to hybrid data, composition and strain), runs and report in example/ | -- |
 
     - A short grilling per stage only when open decisions remain.
@@ -273,6 +288,11 @@ ADR-0017.
     2. This plan, S1-S5.
     3. The port grilling, which also decides whether nozuchi 0.3.0a1 is
        done in nozuchi or folded into the port.
+
+    **Revised 2026-11-25 (ADR-0050 decision 2):** nozuchi 0.2.0a2 was
+    done first, and S1 followed.  nozuchi 0.3.0a1 (B1-B8) is folded into
+    the port, after its equivalence stage, and nozuchi is frozen at
+    0.2.0a2.
 
 ## Self-critique of the chosen values
 

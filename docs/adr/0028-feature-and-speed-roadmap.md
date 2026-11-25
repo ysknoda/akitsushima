@@ -803,3 +803,17 @@ correlations (VDOS on the CLI, MD IR, SED, MD Raman) and the ML charge
 model.  Inelastic neutron scattering is added to tier C, together with
 an ML polarisability and Lanczos / KPM Raman spectra for very large
 cells.
+
+## Addendum 9: nozuchi port, MD spectra (grilling 2026-11-25, after 0.3.0a11)
+
+The user wants akitsushima to be usable with little dependence on
+external first-principles codes (VASP included).  S2 of ADR-0046 (VASP
+finite differences) is lowered.  The port of nozuchi comes first: ADR-0050
+(Q1-Q21, all agreed as recommended).
+
+- New command `akitsushima mdspec`: MD permittivity eps(omega), VDOS,
+  SED and the Raman temperature shift.
+- Stages P1-P6, versions 0.4.0a1 onwards.
+- P1 is an equivalence port, checked against nozuchi 0.2.0a2 on Tier 2a
+  and 3a.
+- The ML charge model moves to tier C, next to the ML polarisability.
